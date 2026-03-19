@@ -1,21 +1,26 @@
 Version 1.0 (2026-03-19)
 ========================
-* FrogPilot `testing-v1` 기반 UI 포팅
-  * onroad HUD를 FrogPilot 최종 커스텀 레이아웃에 맞춰 재구성
+* UI 개편
+  * onroad HUD를 새로운 커스텀 레이아웃에 맞춰 재구성
   * blindspot, LFA, steering wheel, 차간거리 아이콘, APN/APM 배지, 전방차 박스 표시를 현재 carrotpilot 구조에 맞게 포팅
   * disengaged, 상시조향, 완전 인게이지 상태를 각각 다른 카메라/path/HUD 색상 체계로 정리
 * Alert / Event 커스터마이징
   * `resumeRequired`, `FCW`, `LDW`, `leadDeparting`, `autohold` 계열 경고 UI를 재구성
-  * 기존 carrotpilot 이벤트 문구를 FrogPilot 스타일에 맞게 정리하고 preview에서도 검증 가능한 경로를 추가
+  * 기존 carrotpilot 이벤트 문구와 경고 스타일을 정리하고 preview에서도 검증 가능한 경로를 추가
 * Offroad 화면 개편
   * 검은 톤 홈 화면, 총 주행 통계, 직전 1회 주행 요약 화면을 추가
   * 우측 상단에 현재 `carrotpilot` 브랜치와 커밋을 표시하는 배지를 추가
-  * FrogPilot 전용 tracking 백엔드가 없는 구조를 고려해, UI가 직접 누적 통계를 저장하도록 맞춤 이식
+  * 별도 tracking 백엔드 없이도 UI가 직접 누적 통계를 저장하도록 맞춤 구성
 * Driving Model / Runtime 안정화
   * `Driving Model` 선택 UI와 `/data/models` 기반 downloaded model override를 연결
   * `deviceState.started` 순간 하락에 대한 debounce를 manager/UI에 적용해 주행 중 새로고침성 재시작을 줄임
   * `launch_env.sh`, `SConstruct`를 정리해 checked-in UI 바이너리가 comma 기기 런타임 라이브러리와 더 잘 맞도록 보강
   * 자동 밝기 하한을 다듬고, preview 전용 강제 onroad/engaged 코드는 env gate로만 동작하게 유지
+* 배포 / 업데이트 흐름 정리
+  * `git pull` 후 부팅 과정에서 저장소 파일을 직접 덮어쓰지 않도록 정리
+  * 실제 comma 기기에서 `git pull -> reboot -> manager/ui 기동 -> clean worktree` 경로까지 검증
+* 문서 보강
+  * README 최상단에 기존 carrotpilot 대비 주요 변경점을 한눈에 볼 수 있도록 정리
 
 Carrot2-v9 (2026-02-xx)
 ========================

@@ -31,6 +31,16 @@ The developer does **not take any responsibility** for real-world installation o
   <a href="https://g4iwnl.gitbook.io/carrotpilot">Manual</a>
 </h3>
 
+### 이 프로젝트의 방향
+
+이 저장소는 기존 carrotpilot의 주행 기능과 차종 대응을 바탕으로, UI 완성도와 실기기 배포 안정성을 함께 다듬은 브랜치입니다.
+
+- onroad HUD 재배치, blindspot/LFA/steering/gap/APN 배지, 상시조향 전용 표시, 전방차 박스/커스텀 alert 적용
+- offroad 홈 화면 개편, 주행 요약/총 주행 통계, 브랜치·커밋 정보 표시
+- driving model 선택 UI, preview/UTM 확인용 경로와 실제 comma 기기용 경로를 구분한 구성
+- `launch_env.sh`, runtime library path, AGNOS 버전 처리, screenrecorder/navd 링크 등 실기기 부팅·빌드 호환성 보강
+- `git pull` 후에도 부팅 과정에서 저장소 파일을 직접 덮어쓰지 않도록 정리해 배포/업데이트 흐름 개선
+
 ![image](https://github.com/user-attachments/assets/4d80d256-7e66-4473-a289-04a50733b7e0)
 
 
