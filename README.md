@@ -33,13 +33,18 @@ The developer does **not take any responsibility** for real-world installation o
 
 ### 이 프로젝트의 방향
 
-이 저장소는 기존 carrotpilot의 주행 기능과 차종 대응을 바탕으로, UI 완성도와 실기기 배포 안정성을 함께 다듬은 브랜치입니다.
+이 저장소는 기존 carrotpilot를 바탕으로, 화면 구성과 실사용 편의성을 더 보기 쉽게 다듬은 브랜치입니다.
 
-- onroad HUD 재배치, blindspot/LFA/steering/gap/APN 배지, 상시조향 전용 표시, 전방차 박스/커스텀 alert 적용
-- offroad 홈 화면 개편, 주행 요약/총 주행 통계, 브랜치·커밋 정보 표시
-- driving model 선택 UI, preview/UTM 확인용 경로와 실제 comma 기기용 경로를 구분한 구성
-- `launch_env.sh`, runtime library path, AGNOS 버전 처리, screenrecorder/navd 링크 등 실기기 부팅·빌드 호환성 보강
-- `git pull` 후에도 부팅 과정에서 저장소 파일을 직접 덮어쓰지 않도록 정리해 배포/업데이트 흐름 개선
+- 주행 화면이 더 깔끔해졌습니다.
+  속도, 차간거리, 조향 상태, 경고창 같은 정보가 한눈에 들어오도록 다시 배치했습니다.
+- 상시조향, 인게이지, 해제 상태가 더 쉽게 구분됩니다.
+  화면 색감과 아이콘 표현이 상태에 따라 다르게 보여서 지금 어떤 상태인지 바로 알아보기 쉽습니다.
+- 오프로드 화면이 더 보기 좋아졌습니다.
+  홈 화면, 총 주행 통계, 방금 주행 요약, 현재 브랜치/커밋 정보까지 바로 확인할 수 있습니다.
+- 자주 보는 요소들을 더 직관적으로 넣었습니다.
+  차간거리 아이콘, APN 배지, 전방차 박스, 커스텀 경고창 같은 요소가 보기 쉽게 정리돼 있습니다.
+- 설치와 업데이트 흐름도 더 안정적으로 다듬었습니다.
+  실제 comma 기기에서 `git pull` 후 재부팅까지 확인했고, 부팅 과정에서 저장소 파일이 멋대로 바뀌지 않도록 정리했습니다.
 
 ![image](https://github.com/user-attachments/assets/4d80d256-7e66-4473-a289-04a50733b7e0)
 
