@@ -95,33 +95,6 @@ function launch {
     pip install kaitaistruct
   fi
 
-  # events language init
-  #LANG=$(cat ${PARAMS_ROOT}/d/LanguageSetting)
-  LANG=$(cat /data/params/d/LanguageSetting)
-  EVENTSTAT=$(git status)
-
-  # events.py 한글로 변경 및 파일이 교체된 상태인지 확인
-  if [ "${LANG}" = "main_ko" ] && [[ ! "${EVENTSTAT}" == *"modified:   selfdrive/controls/lib/events.py"* ]]; then
-    cp -f $DIR/selfdrive/selfdrived/events.py $DIR/scripts/add/events_en.py
-    cp -f $DIR/scripts/add/events_ko.py $DIR/selfdrive/selfdrived/events.py
-  elif [ "${LANG}" = "main_zh-CHS" ] && [[ ! "${EVENTSTAT}" == *"modified:   selfdrive/controls/lib/events.py"* ]]; then
-    # Backup current events.py (assumed English) and install Simplified Chinese events
-    cp -f $DIR/selfdrive/selfdrived/events.py $DIR/scripts/add/events_en.py
-    cp -f $DIR/scripts/add/events_zh.py $DIR/selfdrive/selfdrived/events.py
-  elif [ "${LANG}" = "main_en" ] && [[ "${EVENTSTAT}" == *"modified:   selfdrive/controls/lib/events.py"* ]]; then
-    cp -f $DIR/scripts/add/events_en.py $DIR/selfdrive/selfdrived/events.py
-  fi
-
-  # c3xl amplifier file change
-  C3XL=$(cat /data/params/d/HardwareC3xLite)
-
-  if [ "${C3XL}" = "1" ] && [[ ! "${EVENTSTAT}" == *"modified:   system/hardware/tici/amplifier.py"* ]]; then
-    cp -f $DIR/system/hardware/tici/amplifier.py $DIR/scripts/add/amplifier_org.py
-    cp -f $DIR/scripts/add/amplifier_c3xl.py $DIR/system/hardware/tici/amplifier.py
-  elif [ "${C3XL}" = "0" ] && [[ "${EVENTSTAT}" == *"modified:   system/hardware/tici/amplifier.py"* ]]; then
-    cp -f $DIR/scripts/add/amplifier_org.py $DIR/system/hardware/tici/amplifier.py
-  fi
-
   # start manager
   cd system/manager
   if [ ! -f $DIR/prebuilt ]; then

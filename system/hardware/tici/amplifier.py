@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import time
+from pathlib import Path
 from smbus2 import SMBus
 from collections import namedtuple
 
@@ -124,14 +125,16 @@ class Amplifier:
 
   def set_configs(self, configs: list[AmpConfig]) -> bool:
     # retry in case panda is using the amp
-    tries = 15
-    backoff = 0.
+    is_c3xl = Path("/data/params/d/HardwareC3xLite").read_text().strip() == "1" if Path("/data/params/d/HardwareC3xLite").exists() else False
+    tries = 1 if is_c3xl else 15
+    backoff_step = 0.02 if is_c3xl else 0.1
+    backoff = 0.0
     for i in range(tries):
       try:
         self._set_configs(configs)
         return True
       except OSError:
-        backoff += 0.1
+        backoff += backoff_step
         time.sleep(backoff)
         print(f"Failed to set amp config, {tries - i - 1} retries left")
     return False
