@@ -6,6 +6,8 @@ libs = ['qt_widgets', 'qt_util', 'QMapLibre', common, messaging, cereal, visioni
         'zmq', 'capnp', 'kj', 'm', 'OpenCL', 'ssl', 'crypto', 'pthread', 'json11'] + map_env["LIBS"]
 if arch == 'larch64':
   libs.append(':libEGL_mesa.so.0')
+  # libEGL_mesa pulls Wayland symbols, so keep wayland-client after it as well.
+  libs.append('wayland-client')
 
 if arch in ['larch64', 'aarch64', 'x86_64']:
   if arch == 'x86_64':

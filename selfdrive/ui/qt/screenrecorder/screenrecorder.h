@@ -9,7 +9,7 @@
 #include <atomic>
 #include <mutex>
 
-#if defined(WSL2) || !defined(QCOM2)
+#if !defined(Q_MOC_RUN) && (defined(WSL2) || !defined(QCOM2))
 
 class ScreenRecoder : public QPushButton {
 public:
