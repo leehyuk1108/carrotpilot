@@ -19,7 +19,11 @@ if [ -d "$LOCAL_LIBYUV_DIR" ]; then
 fi
 
 if [ -z "$AGNOS_VERSION" ]; then
-  export AGNOS_VERSION="12.4"
+  if [ -f /VERSION ]; then
+    export AGNOS_VERSION="$(cat /VERSION)"
+  else
+    export AGNOS_VERSION="12.4"
+  fi
 fi
 
 export STAGING_ROOT="/data/safe_staging"
