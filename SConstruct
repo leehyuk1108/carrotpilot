@@ -12,10 +12,11 @@ SCons.Warnings.warningAsException(True)
 
 TICI = os.path.isfile('/TICI')
 AGNOS = TICI
+RUNTIME_LINK_LIBS = "#third_party/runtime_link_libs"
 
 Decider('MD5-timestamp')
 
-SetOption('num_jobs', int(os.cpu_count()/2))
+SetOption('num_jobs', max(1, int(os.cpu_count()/2)))
 
 AddOption('--kaitai',
           action='store_true',
@@ -99,6 +100,7 @@ if arch == "larch64":
   ]
 
   libpath = [
+    RUNTIME_LINK_LIBS,
     "/usr/local/lib",
     "/system/vendor/lib64",
     "#third_party/nanovg",
@@ -138,12 +140,17 @@ else:
   # Linux
   else:
     libpath = [
+      RUNTIME_LINK_LIBS,
       f"#third_party/acados/{arch}/lib",
       f"#third_party/libyuv/{arch}/lib",
       f"#third_party/mapbox-gl-native-qt/{arch}",
+      "/usr/lib/aarch64-linux-gnu",
+      "/lib/aarch64-linux-gnu",
       "/usr/lib",
       "/usr/local/lib",
     ]
+
+libpath = [path for path in libpath if path != RUNTIME_LINK_LIBS or os.path.isdir(Dir(path).abspath)]
 
 if GetOption('asan'):
   ccflags = ["-fsanitize=address", "-fno-omit-frame-pointer"]
@@ -157,7 +164,7 @@ else:
 
 # no --as-needed on mac linker
 if arch != "Darwin":
-  ldflags += ["-Wl,--as-needed", "-Wl,--no-undefined"]
+  ldflags += ["-Wl,--no-undefined"]
 
 ccflags_option = GetOption('ccflags')
 if ccflags_option:
@@ -259,7 +266,7 @@ Export('envCython', 'np_version')
 
 # Qt build environment
 qt_env = env.Clone()
-qt_modules = ["Widgets", "Gui", "Core", "Network", "Concurrent", "Qml", "QuickWidgets", "Location", "Positioning", "DBus", "Xml"]
+qt_modules = ["Widgets", "Gui", "Core", "Network", "Concurrent", "Qml", "Quick", "QuickWidgets", "Location", "Positioning", "PositioningQuick", "DBus", "Xml"]
 
 qt_libs = []
 if arch == "Darwin":
@@ -286,6 +293,21 @@ else:
   qt_dirs += [f"{qt_install_headers}/Qt{m}" for m in qt_modules]
 
   qt_libs = [f"Qt5{m}" for m in qt_modules]
+  if arch != "larch64":
+    try:
+      qt_pkg_libs = shlex.split(subprocess.check_output(['pkg-config', '--libs', *qt_libs], encoding='utf8').strip())
+      parsed_qt_libs = []
+      for token in qt_pkg_libs:
+        if token.startswith("-l"):
+          parsed_qt_libs.append(token[2:])
+        elif token.startswith("-L"):
+          qt_env['LIBPATH'] += [token[2:]]
+        else:
+          qt_env['LINKFLAGS'] += [token]
+      if parsed_qt_libs:
+        qt_libs = parsed_qt_libs
+    except (FileNotFoundError, subprocess.CalledProcessError):
+      pass
   if arch == "larch64":
     qt_libs += ["GLESv2", "wayland-client"]
     qt_env.PrependENVPath('PATH', Dir("#third_party/qt5/larch64/bin/").abspath)

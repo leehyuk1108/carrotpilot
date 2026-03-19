@@ -3,7 +3,7 @@ import json
 Import('qt_env', 'arch', 'common', 'messaging', 'visionipc', 'transformations')
 
 base_libs = [common, messaging, visionipc, transformations,
-             'm', 'OpenCL', 'ssl', 'crypto', 'pthread', 'OmxCore', 'avformat', 'avcodec', 'avutil', 'yuv'] + qt_env["LIBS"]
+             'm', 'OpenCL', 'ssl', 'crypto', 'pthread', 'OmxCore', 'avformat', 'avcodec', 'avutil', 'yuv']
 
 if arch == 'larch64':
   base_libs.append('EGL')
@@ -31,6 +31,8 @@ if maps:
                   "qt/maps/map_eta.cc", "qt/maps/map_instructions.cc"]
   qt_env['CPPDEFINES'] += ["ENABLE_MAPS"]
 
+base_libs += qt_env["LIBS"]
+
 widgets = qt_env.Library("qt_widgets", widgets_src, LIBS=base_libs)
 Export('widgets')
 qt_libs = [widgets, qt_util] + base_libs
@@ -40,27 +42,32 @@ qt_src = ["main.cc", "ui.cc", "qt/sidebar.cc", "qt/body.cc",
           "qt/offroad/software_settings.cc", "qt/offroad/developer_panel.cc", "qt/offroad/onboarding.cc",
           "qt/offroad/driverview.cc", "qt/offroad/experimental_mode.cc", "qt/offroad/firehose.cc",
           "qt/onroad/onroad_home.cc", "qt/onroad/annotated_camera.cc", "qt/onroad/model.cc",
-          "carrot.cc",
           "qt/screenrecorder/screenrecorder.cc",
           "qt/screenrecorder/omx_encoder.cc",
-          "#third_party/nanovg/nanovg.c",
           "qt/onroad/buttons.cc", "qt/onroad/alerts.cc", "qt/onroad/driver_monitoring.cc", "qt/onroad/hud.cc"]
 
 def is_running_on_wsl2():
   try:
-    with open('/proc/version', 'r') as f:
-      contents = f.read()
-      return 'WSL2' in contents or 'Ubuntu' in contents
+    with open('/proc/sys/kernel/osrelease', 'r') as f:
+      contents = f.read().lower()
+      return 'microsoft' in contents or 'wsl' in contents
   except FileNotFoundError:
-    return False
+    try:
+      with open('/proc/version', 'r') as f:
+        contents = f.read().lower()
+        return 'microsoft' in contents or 'wsl' in contents
+    except FileNotFoundError:
+        return False
 
-if is_running_on_wsl2():
+disable_screenrecorder = arch != 'larch64' or is_running_on_wsl2()
+
+if disable_screenrecorder:
   qt_env.Append(CXXFLAGS=['-DWSL2'])
   base_libs.remove('OmxCore')
   qt_libs.remove('OmxCore')
   qt_src.remove("qt/screenrecorder/screenrecorder.cc")
   qt_src.remove("qt/screenrecorder/omx_encoder.cc")
-  print("Building for WSL2. Removing Screen Recorder")
+  print("Building without Screen Recorder")
 
 # build translation files
 with open(File("translations/languages.json").abspath) as f:

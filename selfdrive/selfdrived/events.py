@@ -465,26 +465,26 @@ EVENTS: dict[int, dict[str, Alert | AlertCallbackType]] = {
 
   EventName.stockAeb: {
     ET.PERMANENT: Alert(
-      "BRAKE!",
-      "Stock AEB: Risk of Collision",
+      "AEB 작동",
+      "충돌의 위험이 있어 차량의 순정 AEB가 작동했습니다",
       AlertStatus.critical, AlertSize.full,
       Priority.HIGHEST, VisualAlert.fcw, AudibleAlert.stopStop, 2.),
-    ET.NO_ENTRY: NoEntryAlert("Stock AEB: Risk of Collision"),
+    ET.NO_ENTRY: NoEntryAlert("충돌의 위험이 있어 차량의 순정 AEB가 작동했습니다"),
   },
 
   EventName.fcw: {
     ET.PERMANENT: Alert(
-      "BRAKE!",
-      "Risk of Collision",
-      AlertStatus.critical, AlertSize.full,
-      Priority.HIGHEST, VisualAlert.fcw, AudibleAlert.stopStop, 2.),
+      "전방 추돌 주의",
+      "전방 차량과 추돌 위험이 있습니다",
+      AlertStatus.critical, AlertSize.mid,
+      Priority.HIGHEST, VisualAlert.fcw, AudibleAlert.prompt, 3.),
   },
 
   EventName.ldw: {
     ET.PERMANENT: Alert(
-      "Lane Departure Detected",
-      "",
-      AlertStatus.userPrompt, AlertSize.small,
+      "차선 이탈 감지됨",
+      "운전에 주의하세요",
+      AlertStatus.userPrompt, AlertSize.mid,
       Priority.LOW, VisualAlert.ldw, AudibleAlert.prompt, 3.),
   },
 
@@ -556,9 +556,9 @@ EVENTS: dict[int, dict[str, Alert | AlertCallbackType]] = {
 
   EventName.resumeRequired: {
     ET.WARNING: Alert(
-      "Press Resume to Exit Standstill",
-      "",
-      AlertStatus.userPrompt, AlertSize.small,
+      "오토 홀드",
+      "해제하려면 악셀을 밟거나 RES버튼을 누르세요",
+      AlertStatus.normal, AlertSize.mid,
       Priority.LOW, VisualAlert.none, AudibleAlert.none, .2),
   },
 
@@ -600,10 +600,10 @@ EVENTS: dict[int, dict[str, Alert | AlertCallbackType]] = {
 
   EventName.steerSaturated: {
     ET.WARNING: Alert(
-      "Take Control",
-      "Turn Exceeds Steering Limit",
-      AlertStatus.normal, AlertSize.small,
-      Priority.LOW, VisualAlert.none, AudibleAlert.none, 1.),
+      "핸들을 조작해주세요",
+      "조향각 한계에 도달했습니다",
+      AlertStatus.userPrompt, AlertSize.mid,
+      Priority.LOW, VisualAlert.steerRequired, AudibleAlert.warningSoft, 2.),
   },
 
   # Thrown when the fan is driven at >50% but is not rotating

@@ -99,6 +99,7 @@ public:
   int show_brightness_timer = 20;
 
   bool ublox_avaliable = true;
+  double started_false_since = -1.0;
 
 signals:
   void uiUpdate(const UIState &s);

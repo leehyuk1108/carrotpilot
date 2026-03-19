@@ -32,12 +32,17 @@ const char frame_fragment_shader[] =
   "#extension GL_OES_EGL_image_external_essl3 : enable\n"
   "precision mediump float;\n"
   "uniform samplerExternalOES uTexture;\n"
+  "uniform float uGrayscaleMix;\n"
+  "uniform float uBrightnessMult;\n"
   "in vec2 vTexCoord;\n"
   "out vec4 colorOut;\n"
   "void main() {\n"
   "  colorOut = texture(uTexture, vTexCoord);\n"
   // gamma to improve worst case visibility when dark
   "  colorOut.rgb = pow(colorOut.rgb, vec3(1.0/1.28));\n"
+  "  float luminance = dot(colorOut.rgb, vec3(0.299, 0.587, 0.114));\n"
+  "  colorOut.rgb = mix(colorOut.rgb, vec3(luminance), uGrayscaleMix);\n"
+  "  colorOut.rgb *= uBrightnessMult;\n"
   "}\n";
 #else
 #ifdef __APPLE__
@@ -48,6 +53,8 @@ const char frame_fragment_shader[] =
 #endif
   "uniform sampler2D uTextureY;\n"
   "uniform sampler2D uTextureUV;\n"
+  "uniform float uGrayscaleMix;\n"
+  "uniform float uBrightnessMult;\n"
   "in vec2 vTexCoord;\n"
   "out vec4 colorOut;\n"
   "void main() {\n"
@@ -57,6 +64,9 @@ const char frame_fragment_shader[] =
   "  float g = y - 0.344 * uv.x - 0.714 * uv.y;\n"
   "  float b = y + 1.772 * uv.x;\n"
   "  colorOut = vec4(r, g, b, 1.0);\n"
+  "  float luminance = dot(colorOut.rgb, vec3(0.299, 0.587, 0.114));\n"
+  "  colorOut.rgb = mix(colorOut.rgb, vec3(luminance), uGrayscaleMix);\n"
+  "  colorOut.rgb *= uBrightnessMult;\n"
   "}\n";
 #endif
 
@@ -144,6 +154,8 @@ void CameraWidget::initializeGL() {
   glUniform1i(program->uniformLocation("uTextureY"), 0);
   glUniform1i(program->uniformLocation("uTextureUV"), 1);
 #endif
+  glUniform1f(program->uniformLocation("uGrayscaleMix"), 0.0f);
+  glUniform1f(program->uniformLocation("uBrightnessMult"), 1.0f);
 }
 
 void CameraWidget::showEvent(QShowEvent *event) {
@@ -247,6 +259,8 @@ void CameraWidget::paintGL() {
 #endif
 
   glUniformMatrix4fv(program->uniformLocation("uTransform"), 1, GL_TRUE, frame_mat.v);
+  glUniform1f(program->uniformLocation("uGrayscaleMix"), frame_grayscale_mix);
+  glUniform1f(program->uniformLocation("uBrightnessMult"), frame_brightness_mult);
   glEnableVertexAttribArray(0);
   glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_BYTE, (const void *)0);
   glDisableVertexAttribArray(0);

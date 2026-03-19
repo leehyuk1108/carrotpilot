@@ -118,6 +118,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"UpdaterCurrentDescription", {CLEAR_ON_MANAGER_START, STRING}},
     {"UpdaterCurrentReleaseNotes", {CLEAR_ON_MANAGER_START, BYTES}},
     {"UpdaterFetchAvailable", {CLEAR_ON_MANAGER_START, BOOL}},
+    {"AvailableModels", {PERSISTENT, STRING}},
     {"UpdaterNewDescription", {CLEAR_ON_MANAGER_START, STRING}},
     {"UpdaterNewReleaseNotes", {CLEAR_ON_MANAGER_START, BYTES}},
     {"UpdaterState", {CLEAR_ON_MANAGER_START, STRING}},
@@ -256,8 +257,15 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"IsLdwsCar", {PERSISTENT, INT, "0"}},
     {"CanfdHDA2", {PERSISTENT, INT, "0"}},
     {"CanfdDebug", {PERSISTENT, INT, "0"}},
+    {"DownloadAllModels", {CLEAR_ON_MANAGER_START, BOOL}},
+    {"DrivingModel", {PERSISTENT, STRING, "wmi-model_default"}},
+    {"DrivingModelName", {PERSISTENT, STRING, "WMI model (Default)"}},
+    {"DrivingModelVersion", {PERSISTENT, STRING, "v9"}},
 
     {"SoundVolumeAdjust", {PERSISTENT, INT, "100"}},
+    {"FrogPilotStats", {PERSISTENT, JSON}},
+    {"ModelDownloadProgress", {CLEAR_ON_MANAGER_START, STRING}},
+    {"ModelToDownload", {CLEAR_ON_MANAGER_START, STRING}},
     {"SoundVolumeAdjustEngage", {PERSISTENT, INT, "10"}},
 
     {"TFollowGap1", {PERSISTENT, INT, "110"}},
@@ -315,6 +323,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"EnableConnect", {PERSISTENT, INT, "0"}},
     {"MuteDoor", {PERSISTENT, INT, "0"}},
     {"MuteSeatbelt", {PERSISTENT, INT, "0"}},
+    {"UpdateTinygrad", {CLEAR_ON_MANAGER_START, BOOL}},
 
     {"CarrotException", {CLEAR_ON_MANAGER_START, STRING}},
 

@@ -35,6 +35,10 @@ public:
   explicit CameraWidget(std::string stream_name, VisionStreamType stream_type, QWidget* parent = nullptr);
   ~CameraWidget();
   void setBackgroundColor(const QColor &color) { bg = color; }
+  void setFrameFilter(float grayscale_mix, float brightness_mult) {
+    frame_grayscale_mix = grayscale_mix;
+    frame_brightness_mult = brightness_mult;
+  }
   void setFrameId(int frame_id) { draw_frame_id = frame_id; }
   void setStreamType(VisionStreamType type) { requested_stream_type = type; }
   VisionStreamType getStreamType() { return active_stream_type; }
@@ -62,6 +66,8 @@ protected:
   GLuint textures[2];
   std::unique_ptr<QOpenGLShaderProgram> program;
   QColor bg = QColor("#000000");
+  float frame_grayscale_mix = 0.0f;
+  float frame_brightness_mult = 1.0f;
 
 #ifdef QCOM2
   std::map<int, EGLImageKHR> egl_images;

@@ -20,6 +20,23 @@ from openpilot.common.swaglog import cloudlog, add_file_handler
 from openpilot.system.version import get_build_metadata, terms_version, training_version
 from openpilot.system.hardware.hw import Paths
 
+STARTED_FALL_DEBOUNCE_S = 5.0
+
+
+def debounce_started_state(raw_started, effective_started, started_false_since):
+  if raw_started:
+    return True, None
+
+  if not effective_started:
+    return False, None
+
+  now = time.monotonic()
+  if started_false_since is None:
+    started_false_since = now
+
+  return now - started_false_since < STARTED_FALL_DEBOUNCE_S, started_false_since
+
+
 def set_default_params():
   params = Params()
   for k in params.all_keys():
@@ -155,6 +172,7 @@ def manager_thread() -> None:
   print_timer = 0
 
   started_prev = False
+  started_false_since = None
   ignition_prev = False
 
   mem_print_t = 0.0
@@ -162,7 +180,8 @@ def manager_thread() -> None:
     sm.update(1000)
     now = time.monotonic()
 
-    started = sm['deviceState'].started
+    raw_started = sm['deviceState'].started
+    started, started_false_since = debounce_started_state(raw_started, started_prev, started_false_since)
 
     if started and not started_prev:
       params.clear_all(ParamKeyFlag.CLEAR_ON_ONROAD_TRANSITION)

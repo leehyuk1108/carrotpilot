@@ -1,8 +1,75 @@
 #include "selfdrive/ui/qt/onroad/model.h"
 
+#include "selfdrive/ui/qt/util.h"
+
 constexpr int CLIP_MARGIN = 500;
 constexpr float MIN_DRAW_DISTANCE = 10.0;
 constexpr float MAX_DRAW_DISTANCE = 100.0;
+
+namespace {
+constexpr float LEAD_BOX_ALPHA = 0.85f;
+constexpr float LEAD_BOX_HALF_WIDTH_M = 1.2f;
+constexpr float LEAD_BOX_HEIGHT_FACTOR = 0.8f;
+constexpr float LEAD_BOX_MIN_WIDTH = 120.0f;
+constexpr float LEAD_BOX_MAX_WIDTH = 800.0f;
+constexpr float LEAD_BOX_RADIUS = 15.0f;
+constexpr float LEAD_BOX_STROKE = 3.0f;
+constexpr float LEAD_BOX_HPAD = 10.0f;
+constexpr float LEAD_BADGE_OFFSET_X = 80.0f;
+constexpr float LEAD_BADGE_OFFSET_Y = 60.0f;
+constexpr float LEAD_BADGE_HEIGHT = 42.0f;
+
+QColor carrotRed() {
+  return QColor(255, 0, 0, 255);
+}
+
+QColor carrotOrange() {
+  return QColor(255, 175, 3, 255);
+}
+
+QColor carrotBlue() {
+  return QColor(0, 0, 255, 255);
+}
+
+QColor carrotOchre() {
+  return QColor(218, 111, 37, 255);
+}
+
+QColor carrotBlackAlpha(int alpha) {
+  return QColor(0, 0, 0, alpha);
+}
+
+QColor carrotRedAlpha(int alpha) {
+  return QColor(255, 0, 0, alpha);
+}
+
+QColor lateralOnlyMint(int alpha = 255) {
+  return QColor(0x67, 0xF5, 0xD1, alpha);
+}
+
+void drawOutlinedText(QPainter &painter, const QRectF &rect, const QString &text, const QColor &text_color) {
+  const QRectF shadow_rect = rect.translated(0.0f, 1.5f);
+  painter.setPen(QColor(0, 0, 0, 180));
+  painter.drawText(shadow_rect, Qt::AlignCenter, text);
+  painter.setPen(text_color);
+  painter.drawText(rect, Qt::AlignCenter, text);
+}
+
+QColor grayToneColor(const QColor &color) {
+  const float luminance = (0.299f * color.redF()) + (0.587f * color.greenF()) + (0.114f * color.blueF());
+  const float toned = std::clamp(luminance * 0.82f, 0.0f, 1.0f);
+  return QColor::fromRgbF(toned, toned, toned, color.alphaF());
+}
+
+void grayToneGradient(QLinearGradient &gradient) {
+  const auto stops = gradient.stops();
+  gradient.setStops({});
+  for (const auto &[position, color] : stops) {
+    gradient.setColorAt(position, grayToneColor(color));
+  }
+}
+
+}  // namespace
 
 int get_path_length_idx(const cereal::XYZTData::Reader &line, const float path_height) {
   const auto &line_x = line.getX();
@@ -27,8 +94,13 @@ void ModelRenderer::draw(QPainter &painter, const QRect &surface_rect) {
   experimental_mode |= s->scene.carrot_experimental_mode;
   longitudinal_control = sm["carParams"].getCarParams().getOpenpilotLongitudinalControl();
   path_offset_z = sm["liveCalibration"].getLiveCalibration().getHeight()[0];
+  const auto &selfdrive_state = sm["selfdriveState"].getSelfdriveState();
+  const auto &car_control = sm["carControl"].getCarControl();
+  const auto &car_state = sm["carState"].getCarState();
+  lateral_only_active = qEnvironmentVariableIntValue("ALWAYS_LATERAL_PREVIEW") == 1 ||
+                        (!selfdrive_state.getEnabled() && !car_control.getLongActive() &&
+                         (car_control.getLatActive() || car_state.getLatEnabled()));
 
-  return;
   painter.save();
 
   const auto &model = sm["modelV2"].getModelV2();
@@ -39,27 +111,86 @@ void ModelRenderer::draw(QPainter &painter, const QRect &surface_rect) {
   drawLaneLines(painter);
   drawPath(painter, model, surface_rect.height());
 
-  if (longitudinal_control && sm.alive("radarState")) {
-    update_leads(radar_state, model.getPosition());
-    const auto &lead_two = radar_state.getLeadTwo();
-    if (lead_one.getStatus()) {
-      drawLead(painter, lead_one, lead_vertices[0], surface_rect);
+  static Params params;
+  if (params.getInt("ShowPathEnd") > 0 && sm.alive("radarState") && sm.alive("longitudinalPlan") &&
+      !(uiState()->status == STATUS_DISENGAGED && !lateral_only_active)) {
+    update_leads(radar_state, model, sm["longitudinalPlan"].getLongitudinalPlan(), surface_rect);
+    if (lead_boxes[1].visible) {
+      drawLeadBox(painter, lead_boxes[1], true);
     }
-    if (lead_two.getStatus() && (std::abs(lead_one.getDRel() - lead_two.getDRel()) > 3.0)) {
-      drawLead(painter, lead_two, lead_vertices[1], surface_rect);
+    if (lead_boxes[0].visible) {
+      drawLeadBox(painter, lead_boxes[0], false);
+      drawLeadDistanceBadges(painter, lead_boxes[0]);
     }
+  } else {
+    lead_boxes[0].visible = false;
+    lead_boxes[1].visible = false;
   }
 
   painter.restore();
 }
 
-void ModelRenderer::update_leads(const cereal::RadarState::Reader &radar_state, const cereal::XYZTData::Reader &line) {
-  for (int i = 0; i < 2; ++i) {
-    const auto &lead_data = (i == 0) ? radar_state.getLeadOne() : radar_state.getLeadTwo();
-    if (lead_data.getStatus()) {
-      float z = line.getZ()[get_path_length_idx(line, lead_data.getDRel())];
-      mapToScreen(lead_data.getDRel(), -lead_data.getYRel(), z + path_offset_z, &lead_vertices[i]);
+void ModelRenderer::update_leads(const cereal::RadarState::Reader &radar_state, const cereal::ModelDataV2::Reader &model,
+                                 const cereal::LongitudinalPlan::Reader &longitudinal_plan, const QRect &surface_rect) {
+  const auto &line = model.getPosition();
+  const auto &lead_one = radar_state.getLeadOne();
+  const auto &lead_two = radar_state.getLeadTwo();
+  const auto &leads_v3 = model.getLeadsV3();
+
+  vision_dist = 0.0f;
+  if (leads_v3.size() > 0) {
+    const auto vision_lead = leads_v3[0];
+    if (vision_lead.getProb() > 0.5f && vision_lead.getX().size() > 0) {
+      vision_dist = vision_lead.getX()[0] - 1.52f;
     }
+  }
+
+  auto update_box = [&](const cereal::RadarState::LeadData::Reader &lead_data, LeadBoxState &box, bool selected) {
+    if (!lead_data.getStatus()) {
+      box.visible = false;
+      return;
+    }
+
+    const float z = line.getZ()[get_path_length_idx(line, lead_data.getDRel())];
+    const float y = -lead_data.getYRel();
+    QPointF left, right;
+    mapToScreen(lead_data.getDRel(), y - LEAD_BOX_HALF_WIDTH_M, z + path_offset_z, &left);
+    mapToScreen(lead_data.getDRel(), y + LEAD_BOX_HALF_WIDTH_M, z + path_offset_z, &right);
+
+    float raw_width = std::clamp<float>(right.x() - left.x(), LEAD_BOX_MIN_WIDTH, LEAD_BOX_MAX_WIDTH);
+    float raw_x = std::clamp<float>((left.x() + right.x()) * 0.5f, 350.0f, surface_rect.width() - 350.0f);
+    float raw_y = std::clamp<float>((left.y() + right.y()) * 0.5f, 200.0f, surface_rect.height() - 80.0f);
+
+    if (!std::isfinite(raw_x) || !std::isfinite(raw_y) || !std::isfinite(raw_width)) {
+      box.visible = false;
+      return;
+    }
+
+    if (!box.initialized) {
+      box.x = raw_x;
+      box.y = raw_y;
+      box.width = raw_width;
+      box.initialized = true;
+    } else {
+      box.x = box.x * LEAD_BOX_ALPHA + raw_x * (1.0f - LEAD_BOX_ALPHA);
+      box.y = box.y * LEAD_BOX_ALPHA + raw_y * (1.0f - LEAD_BOX_ALPHA);
+      box.width = box.width * LEAD_BOX_ALPHA + raw_width * (1.0f - LEAD_BOX_ALPHA);
+    }
+
+    box.visible = true;
+    box.selected = selected;
+    box.radar_detected = lead_data.getRadarTrackId() >= 0;
+    box.lead_scc = lead_data.getRadarTrackId() < 1;
+    box.radar_distance = lead_data.getRadar() ? lead_data.getDRel() : 0.0f;
+  };
+
+  update_box(lead_one, lead_boxes[0], false);
+
+  if (lead_two.getRadar() && (!lead_one.getStatus() || lead_two.getDRel() > lead_one.getDRel() + 3.0f)) {
+    const bool selected = longitudinal_plan.getLongitudinalPlanSource() == cereal::LongitudinalPlan::LongitudinalPlanSource::LEAD1;
+    update_box(lead_two, lead_boxes[1], selected);
+  } else {
+    lead_boxes[1].visible = false;
   }
 }
 
@@ -94,6 +225,10 @@ void ModelRenderer::update_model(const cereal::ModelDataV2::Reader &model, const
 }
 
 void ModelRenderer::drawLaneLines(QPainter &painter) {
+  if (uiState()->status == STATUS_DISENGAGED && !lateral_only_active) {
+    return;
+  }
+
   // lanelines
   for (int i = 0; i < std::size(lane_line_vertices); ++i) {
     painter.setBrush(QColor::fromRgbF(1.0, 1.0, 1.0, std::clamp<float>(lane_line_probs[i], 0.0, 0.7)));
@@ -109,7 +244,11 @@ void ModelRenderer::drawLaneLines(QPainter &painter) {
 
 void ModelRenderer::drawPath(QPainter &painter, const cereal::ModelDataV2::Reader &model, int height) {
   QLinearGradient bg(0, height, 0, 0);
-  if (experimental_mode) {
+  if (lateral_only_active) {
+    bg.setColorAt(0.0f, lateralOnlyMint(110));
+    bg.setColorAt(0.55f, lateralOnlyMint(84));
+    bg.setColorAt(1.0f, lateralOnlyMint(8));
+  } else if (experimental_mode) {
     // The first half of track_vertices are the points for the right side of the path
     const auto &acceleration = model.getAcceleration().getX();
     const int max_len = std::min<int>(track_vertices.length() / 2, acceleration.size());
@@ -140,6 +279,10 @@ void ModelRenderer::drawPath(QPainter &painter, const cereal::ModelDataV2::Reade
     updatePathGradient(bg);
   }
 
+  if (uiState()->status == STATUS_DISENGAGED && !lateral_only_active) {
+    grayToneGradient(bg);
+  }
+
   painter.setBrush(bg);
   painter.drawPolygon(track_vertices);
 }
@@ -151,9 +294,9 @@ void ModelRenderer::updatePathGradient(QLinearGradient &bg) {
       QColor::fromHslF(112. / 360., 1.0, 0.68, 0.0)};
 
   static const QColor no_throttle_colors[] = {
-      QColor::fromHslF(148. / 360., 0.0, 0.95, 0.4),
-      QColor::fromHslF(112. / 360., 0.0, 0.95, 0.35),
-      QColor::fromHslF(112. / 360., 0.0, 0.95, 0.0),
+      QColor::fromHslF(148. / 360., 0.62, 0.70, 0.4),
+      QColor::fromHslF(112. / 360., 0.72, 0.72, 0.35),
+      QColor::fromHslF(112. / 360., 0.72, 0.72, 0.0),
   };
 
   // Transition speed; 0.1 corresponds to 0.5 seconds at UI_FREQ
@@ -188,37 +331,60 @@ QColor ModelRenderer::blendColors(const QColor &start, const QColor &end, float 
       (1 - t) * start.alphaF() + t * end.alphaF());
 }
 
-void ModelRenderer::drawLead(QPainter &painter, const cereal::RadarState::LeadData::Reader &lead_data,
-                             const QPointF &vd, const QRect &surface_rect) {
-  const float speedBuff = 10.;
-  const float leadBuff = 40.;
-  const float d_rel = lead_data.getDRel();
-  const float v_rel = lead_data.getVRel();
+void ModelRenderer::drawLeadBox(QPainter &painter, const LeadBoxState &lead_box, bool secondary) {
+  if (!lead_box.visible) return;
 
-  float fillAlpha = 0;
-  if (d_rel < leadBuff) {
-    fillAlpha = 255 * (1.0 - (d_rel / leadBuff));
-    if (v_rel < 0) {
-      fillAlpha += 255 * (-1 * (v_rel / speedBuff));
-    }
-    fillAlpha = (int)(fmin(fillAlpha, 255));
+  const QRectF box_rect(lead_box.x - lead_box.width * 0.5f - LEAD_BOX_HPAD,
+                        lead_box.y - lead_box.width * LEAD_BOX_HEIGHT_FACTOR,
+                        lead_box.width + LEAD_BOX_HPAD * 2.0f,
+                        lead_box.width * LEAD_BOX_HEIGHT_FACTOR);
+
+  QColor stroke = carrotBlue();
+  QColor fill = carrotBlackAlpha(20);
+  if (secondary) {
+    stroke = carrotOchre();
+    fill = lead_box.selected ? carrotRedAlpha(50) : carrotBlackAlpha(20);
+  } else if (lead_box.radar_detected) {
+    stroke = lead_box.lead_scc ? carrotRed() : carrotOrange();
   }
 
-  float sz = std::clamp((25 * 30) / (d_rel / 3 + 30), 15.0f, 30.0f) * 2.35;
-  float x = std::clamp<float>(vd.x(), 0.f, surface_rect.width() - sz / 2);
-  float y = std::min<float>(vd.y(), surface_rect.height() - sz * 0.6);
+  painter.save();
+  painter.setRenderHint(QPainter::Antialiasing);
+  painter.setBrush(fill);
+  painter.setPen(QPen(stroke, LEAD_BOX_STROKE));
+  painter.drawRoundedRect(box_rect, LEAD_BOX_RADIUS, LEAD_BOX_RADIUS);
+  painter.restore();
+}
 
-  float g_xo = sz / 5;
-  float g_yo = sz / 10;
+void ModelRenderer::drawLeadDistanceBadges(QPainter &painter, const LeadBoxState &lead_box) {
+  if (!lead_box.visible) return;
 
-  QPointF glow[] = {{x + (sz * 1.35) + g_xo, y + sz + g_yo}, {x, y - g_yo}, {x - (sz * 1.35) - g_xo, y + sz + g_yo}};
-  painter.setBrush(QColor(218, 202, 37, 255));
-  painter.drawPolygon(glow, std::size(glow));
+  const bool is_metric = uiState()->scene.is_metric;
+  const float display_y = lead_box.y + LEAD_BADGE_OFFSET_Y;
+  const QColor text_color = QColor(255, 255, 255);
+  const QFont badge_font = InterFont(30, QFont::Bold);
 
-  // chevron
-  QPointF chevron[] = {{x + (sz * 1.25), y + sz}, {x, y}, {x - (sz * 1.25), y + sz}};
-  painter.setBrush(QColor(201, 34, 49, fillAlpha));
-  painter.drawPolygon(chevron, std::size(chevron));
+  painter.save();
+  painter.setRenderHint(QPainter::Antialiasing);
+  painter.setFont(badge_font);
+
+  auto draw_badge = [&](float center_x, float distance, const QColor &bg) {
+    if (distance <= 0.0f) return;
+
+    const float display_distance = distance * (is_metric ? 1.0f : METER_TO_FOOT);
+    const QString text = QString::number(display_distance, 'f', 1);
+    const int text_width = painter.fontMetrics().horizontalAdvance(text);
+    const QRectF rect(center_x - (text_width + 28) * 0.5f, display_y - 35.0f, text_width + 28, LEAD_BADGE_HEIGHT);
+
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(bg);
+    painter.drawRoundedRect(rect, LEAD_BOX_RADIUS, LEAD_BOX_RADIUS);
+    drawOutlinedText(painter, rect, text, text_color);
+  };
+
+  draw_badge(lead_box.x - LEAD_BADGE_OFFSET_X, lead_box.radar_distance, lead_box.lead_scc ? carrotRed() : carrotOrange());
+  draw_badge(lead_box.x + LEAD_BADGE_OFFSET_X, vision_dist, carrotBlue());
+  painter.restore();
 }
 
 // Projects a point in car to space to the corresponding point in full frame image space.

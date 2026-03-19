@@ -6,6 +6,7 @@
 #include <thread> //차선캘리
 
 #include <QDebug>
+#include <QDir>
 #include <QProcess>
 
 #include "common/watchdog.h"
@@ -824,6 +825,76 @@ CarrotPanel::CarrotPanel(QWidget* parent) : QWidget(parent) {
   });
 
   startToggles->addItem(selectCarBtn);
+  QPushButton* drivingModelBtn = new QPushButton();
+  drivingModelBtn->setObjectName("drivingModelBtn");
+  drivingModelBtn->setStyleSheet(R"(
+    QPushButton {
+      margin-top: 20px; margin-bottom: 20px; padding: 10px; height: 120px; border-radius: 15px;
+      color: #FFFFFF; background-color: #2E7D32;
+    }
+    QPushButton:pressed {
+      background-color: #3F9C44;
+    }
+  )");
+
+  auto updateDrivingModelText = [drivingModelBtn]() {
+    QString current = QString::fromStdString(Params().get("DrivingModel"));
+    if (current.isEmpty()) current = "wmi-model_default";
+    QString label = current;
+    if (label.endsWith("_default")) {
+      label.chop(QString("_default").size());
+      label += " (Built-in)";
+    }
+    drivingModelBtn->setText(QObject::tr("Driving Model: %1").arg(label));
+  };
+
+  updateDrivingModelText();
+  connect(drivingModelBtn, &QPushButton::clicked, [=]() {
+    QDir model_dir("/data/models");
+    const QStringList vision_models = model_dir.entryList({"*_driving_vision_tinygrad.pkl"}, QDir::Files, QDir::Name);
+
+    QMap<QString, QString> label_to_key;
+    QStringList options;
+    const QString default_label = tr("wmi-model (Built-in)");
+    label_to_key[default_label] = "wmi-model_default";
+    options << default_label;
+
+    for (const QString &vision_file : vision_models) {
+      QString key = vision_file;
+      key.chop(QString("_driving_vision_tinygrad.pkl").size());
+      const QStringList required_files = {
+        key + "_driving_policy_tinygrad.pkl",
+        key + "_driving_vision_metadata.pkl",
+        key + "_driving_policy_metadata.pkl",
+      };
+      bool complete_model = true;
+      for (const QString &required_file : required_files) {
+        if (!model_dir.exists(required_file)) {
+          complete_model = false;
+          break;
+        }
+      }
+      if (!complete_model || label_to_key.values().contains(key)) continue;
+      label_to_key[key] = key;
+      options << key;
+    }
+
+    QString current_key = QString::fromStdString(Params().get("DrivingModel"));
+    if (current_key.isEmpty()) current_key = "wmi-model_default";
+    const QString current_label = label_to_key.key(current_key, default_label);
+    const QString selected_label = MultiOptionDialog::getSelection(tr("Select driving model"), options, current_label, this);
+    if (selected_label.isEmpty()) return;
+
+    const QString selected_key = label_to_key.value(selected_label, "wmi-model_default");
+    Params params;
+    params.put("DrivingModel", selected_key.toStdString());
+    params.put("DrivingModelName", selected_label.toStdString());
+    params.put("DrivingModelVersion", selected_key == "wmi-model_default" ? "built-in" : "downloaded");
+    updateDrivingModelText();
+    ConfirmationDialog::alert(tr("Driving model will change after modeld restarts."), this);
+  });
+
+  startToggles->addItem(drivingModelBtn);
   startToggles->addItem(new CValueControl("HyundaiCameraSCC", tr("HYUNDAI: CAMERA SCC"), tr("1:Connect the SCC's CAN line to CAM, 2:Sync Cruise state, 3:StockLong"), 0, 3, 1));
   startToggles->addItem(new CValueControl("CanfdHDA2", tr("CANFD: HDA2 mode"), tr("1:HDA2,2:HDA2+BSM"), 0, 2, 1));
   startToggles->addItem(new CValueControl("EnableRadarTracks", tr("Enable Radar Track"), tr("1:Enable RadarTrack, -1,2:Disable use HKG SCC radar at all times"), -1, 3, 1));

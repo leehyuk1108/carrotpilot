@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import os
 from openpilot.system.hardware import TICI
-os.environ['DEV'] = 'QCOM' if TICI else 'LLVM'
+os.environ['DEV'] = 'QCOM' if TICI else 'CPU'
 USBGPU = "USBGPU" in os.environ
 if USBGPU:
   os.environ['DEV'] = 'AMD'
@@ -37,14 +37,43 @@ from openpilot.selfdrive.modeld.runners.tinygrad_helpers import qcom_tensor_from
 PROCESS_NAME = "selfdrive.modeld.modeld"
 SEND_RAW_PRED = os.getenv('SEND_RAW_PRED')
 
-VISION_PKL_PATH = Path(__file__).parent / 'models/driving_vision_tinygrad.pkl'
-POLICY_PKL_PATH = Path(__file__).parent / 'models/driving_policy_tinygrad.pkl'
-VISION_METADATA_PATH = Path(__file__).parent / 'models/driving_vision_metadata.pkl'
-POLICY_METADATA_PATH = Path(__file__).parent / 'models/driving_policy_metadata.pkl'
+DEFAULT_VISION_PKL_PATH = Path(__file__).parent / 'models/driving_vision_tinygrad.pkl'
+DEFAULT_POLICY_PKL_PATH = Path(__file__).parent / 'models/driving_policy_tinygrad.pkl'
+DEFAULT_VISION_METADATA_PATH = Path(__file__).parent / 'models/driving_vision_metadata.pkl'
+DEFAULT_POLICY_METADATA_PATH = Path(__file__).parent / 'models/driving_policy_metadata.pkl'
+DOWNLOADED_MODELS_PATH = Path("/data/models")
 
 LAT_SMOOTH_SECONDS = 0.13
 LONG_SMOOTH_SECONDS = 0.3
 MIN_LAT_CONTROL_SPEED = 0.3
+
+
+def decode_param(value) -> str:
+  if isinstance(value, bytes):
+    return value.decode("utf-8", errors="ignore")
+  if value is None:
+    return ""
+  return str(value)
+
+
+def clean_model_key(model_key: str) -> str:
+  return model_key.removesuffix("_default").strip()
+
+
+def resolve_driving_model_paths():
+  params = Params()
+  selected_model = clean_model_key(decode_param(params.get("DrivingModel")))
+  if selected_model:
+    vision_pkl = DOWNLOADED_MODELS_PATH / f"{selected_model}_driving_vision_tinygrad.pkl"
+    policy_pkl = DOWNLOADED_MODELS_PATH / f"{selected_model}_driving_policy_tinygrad.pkl"
+    vision_metadata = DOWNLOADED_MODELS_PATH / f"{selected_model}_driving_vision_metadata.pkl"
+    policy_metadata = DOWNLOADED_MODELS_PATH / f"{selected_model}_driving_policy_metadata.pkl"
+
+    if all(path.exists() for path in (vision_pkl, policy_pkl, vision_metadata, policy_metadata)):
+      cloudlog.warning(f"using downloaded driving model override: {selected_model}")
+      return vision_pkl, policy_pkl, vision_metadata, policy_metadata
+
+  return DEFAULT_VISION_PKL_PATH, DEFAULT_POLICY_PKL_PATH, DEFAULT_VISION_METADATA_PATH, DEFAULT_POLICY_METADATA_PATH
 
 
 def get_action_from_model(model_output: dict[str, np.ndarray], prev_action: log.ModelDataV2.Action,
@@ -147,14 +176,16 @@ class ModelState:
   prev_desire: np.ndarray  # for tracking the rising edge of the pulse
 
   def __init__(self, context: CLContext):
-    with open(VISION_METADATA_PATH, 'rb') as f:
+    vision_pkl_path, policy_pkl_path, vision_metadata_path, policy_metadata_path = resolve_driving_model_paths()
+
+    with open(vision_metadata_path, 'rb') as f:
       vision_metadata = pickle.load(f)
       self.vision_input_shapes =  vision_metadata['input_shapes']
       self.vision_input_names = list(self.vision_input_shapes.keys())
       self.vision_output_slices = vision_metadata['output_slices']
       vision_output_size = vision_metadata['output_shapes']['outputs'][1]
 
-    with open(POLICY_METADATA_PATH, 'rb') as f:
+    with open(policy_metadata_path, 'rb') as f:
       policy_metadata = pickle.load(f)
       self.policy_input_shapes =  policy_metadata['input_shapes']
       self.policy_output_slices = policy_metadata['output_slices']
@@ -177,10 +208,10 @@ class ModelState:
     self.policy_output = np.zeros(policy_output_size, dtype=np.float32)
     self.parser = Parser()
 
-    with open(VISION_PKL_PATH, "rb") as f:
+    with open(vision_pkl_path, "rb") as f:
       self.vision_run = pickle.load(f)
 
-    with open(POLICY_PKL_PATH, "rb") as f:
+    with open(policy_pkl_path, "rb") as f:
       self.policy_run = pickle.load(f)
 
   def slice_outputs(self, model_outputs: np.ndarray, output_slices: dict[str, slice]) -> dict[str, np.ndarray]:

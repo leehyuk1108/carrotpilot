@@ -1,6 +1,8 @@
 #pragma once
 
+#include <QDateTime>
 #include <QFrame>
+#include <QJsonObject>
 #include <QLabel>
 #include <QPushButton>
 #include <QStackedLayout>
@@ -26,9 +28,16 @@ signals:
   void openSettings(int index = 0, const QString &param = "");
 
 private:
+  void mousePressEvent(QMouseEvent *event) override;
   void showEvent(QShowEvent *event) override;
   void hideEvent(QHideEvent *event) override;
   void refresh();
+  void updateGreetingStats();
+  void updateDriveSummaryStats();
+  void updateOffroadContent();
+  void updateVersionBadge();
+  void updateTrackedStats(const UIState &s);
+  void persistTrackedStats();
 
   Params params;
 
@@ -39,6 +48,29 @@ private:
   OffroadAlert* alerts_widget;
   QPushButton* alert_notif;
   QPushButton* update_notif;
+  QPushButton *settings_button;
+  QLabel *greeting_title;
+  QLabel *greeting_description;
+  QLabel *drive_count_value;
+  QLabel *drive_distance_value;
+  QLabel *drive_time_value;
+  QLabel *drive_count_label;
+  QLabel *drive_distance_label;
+  QLabel *drive_time_label;
+  QWidget *drive_count_card;
+  QWidget *drive_distance_card;
+  QWidget *drive_time_card;
+  QJsonObject tracked_stats;
+  QJsonObject previous_drive_stats;
+  QDateTime last_drive_ended_at;
+  double last_tracking_time = 0.0;
+  double last_persist_time = 0.0;
+  bool show_recent_drive_summary = false;
+  bool previously_onroad = false;
+  bool drive_counted = false;
+  bool git_fallback_loaded = false;
+  QString fallback_git_branch;
+  QString fallback_git_commit;
 };
 
 class HomeWindow : public QWidget {

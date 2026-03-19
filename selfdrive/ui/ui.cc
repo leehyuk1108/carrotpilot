@@ -7,12 +7,21 @@
 
 #include "common/transformations/orientation.hpp"
 #include "common/swaglog.h"
+#include "common/timing.h"
 #include "common/util.h"
 #include "common/watchdog.h"
 #include "system/hardware/hw.h"
 
 #define BACKLIGHT_DT 0.05
 #define BACKLIGHT_TS 10.00
+
+constexpr float AUTO_BRIGHTNESS_MIN = 1.0f;
+constexpr float AUTO_BRIGHTNESS_MAX = 100.0f;
+constexpr float AUTO_BRIGHTNESS_EXPOSURE_MAX = 100.0f;
+constexpr float AUTO_BRIGHTNESS_EXPOSURE_GAMMA = 0.8f;
+constexpr float AUTO_BRIGHTNESS_DIM_FLOOR = 10.0f;
+constexpr float AUTO_BRIGHTNESS_DARK_THRESHOLD = 4.0f;
+constexpr double STARTED_FALL_DEBOUNCE_S = 5.0;
 
 static void update_sockets(UIState *s) {
   s->sm->update(0);
@@ -21,6 +30,7 @@ static void update_sockets(UIState *s) {
 static void update_state(UIState *s) {
   SubMaster &sm = *(s->sm);
   UIScene &scene = s->scene;
+  const bool force_onroad_preview = qEnvironmentVariableIntValue("FORCE_ONROAD_PREVIEW") == 1;
 
   if (sm.updated("liveCalibration")) {
     auto list2rot = [](const capnp::List<float>::Reader &rpy_list) ->Eigen::Matrix3f {
@@ -54,8 +64,10 @@ static void update_state(UIState *s) {
   }
   if (sm.updated("wideRoadCameraState")) {
     auto cam_state = sm["wideRoadCameraState"].getWideRoadCameraState();
-    float scale = (cam_state.getSensor() == cereal::FrameData::ImageSensor::AR0231) ? 6.0f : 1.0f;
-    scene.light_sensor = std::max(100.0f - scale * cam_state.getExposureValPercent(), 0.0f);
+    float exposure = std::clamp(cam_state.getExposureValPercent(), 0.0f, AUTO_BRIGHTNESS_EXPOSURE_MAX);
+    float normalized_exposure = exposure / AUTO_BRIGHTNESS_EXPOSURE_MAX;
+    float normalized_light = std::pow(1.0f - normalized_exposure, AUTO_BRIGHTNESS_EXPOSURE_GAMMA);
+    scene.light_sensor = AUTO_BRIGHTNESS_MAX * normalized_light;
   } else if (!sm.allAliveAndValid({"wideRoadCameraState"})) {
     scene.light_sensor = -1;
   }
@@ -64,7 +76,27 @@ static void update_state(UIState *s) {
     scene.carrot_experimental_mode = lp.getXState() == 4;
   }
 
-  scene.started = sm["deviceState"].getDeviceState().getStarted() && scene.ignition;
+  if (force_onroad_preview) {
+    scene.ignition = true;
+    if (scene.pandaType == cereal::PandaState::PandaType::UNKNOWN) {
+      scene.pandaType = cereal::PandaState::PandaType::UNO;
+    }
+  }
+
+  bool raw_started = (sm["deviceState"].getDeviceState().getStarted() && scene.ignition) || force_onroad_preview;
+  if (raw_started) {
+    scene.started = true;
+    s->started_false_since = -1.0;
+  } else if (scene.started) {
+    double now = seconds_since_boot();
+    if (s->started_false_since < 0.0) {
+      s->started_false_since = now;
+    }
+    scene.started = (now - s->started_false_since) < STARTED_FALL_DEBOUNCE_S;
+  } else {
+    s->started_false_since = -1.0;
+    scene.started = false;
+  }
 }
 
 void ui_update_params(UIState *s) {
@@ -76,6 +108,8 @@ void ui_update_params(UIState *s) {
 }
 
 void UIState::updateStatus() {
+  const bool force_onroad_preview = qEnvironmentVariableIntValue("FORCE_ONROAD_PREVIEW") == 1;
+  const bool force_engaged_preview = qEnvironmentVariableIntValue("FORCE_ENGAGED_PREVIEW") == 1;
   if (scene.started && sm->updated("selfdriveState")) {
     auto ss = (*sm)["selfdriveState"].getSelfdriveState();
     auto state = ss.getState();
@@ -84,6 +118,8 @@ void UIState::updateStatus() {
     } else {
       status = ss.getEnabled() ? STATUS_ENGAGED : STATUS_DISENGAGED;
     }
+  } else if (scene.started && force_onroad_preview) {
+    status = force_engaged_preview ? STATUS_ENGAGED : STATUS_DISENGAGED;
   }
 
   // Handle onroad/offroad transition
@@ -164,7 +200,8 @@ void Device::resetInteractiveTimeout(int timeout) {
 void Device::updateBrightness(const UIState &s) {
   float clipped_brightness = offroad_brightness;
   if (s.scene.started && s.scene.light_sensor >= 0) {
-    clipped_brightness = s.scene.light_sensor;
+    const float raw_light_sensor = s.scene.light_sensor;
+    clipped_brightness = raw_light_sensor;
 
     // CIE 1931 - https://www.photonstophotos.net/GeneralTopics/Exposure/Psychometric_Lightness_and_Gamma.htm
     if (clipped_brightness <= 8) {
@@ -173,8 +210,8 @@ void Device::updateBrightness(const UIState &s) {
       clipped_brightness = std::pow((clipped_brightness + 16.0) / 116.0, 3.0);
     }
 
-    // Scale back to 10% to 100%
-    clipped_brightness = std::clamp(100.0f * clipped_brightness, 10.0f, 100.0f);
+    const float auto_brightness_min = raw_light_sensor > AUTO_BRIGHTNESS_DARK_THRESHOLD ? AUTO_BRIGHTNESS_DIM_FLOOR : AUTO_BRIGHTNESS_MIN;
+    clipped_brightness = std::clamp(100.0f * clipped_brightness, auto_brightness_min, AUTO_BRIGHTNESS_MAX);
   }
 
   if (s.scene.started) {

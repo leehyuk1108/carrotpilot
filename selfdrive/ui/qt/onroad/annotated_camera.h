@@ -1,13 +1,14 @@
 #pragma once
 
+#include <QPixmap>
 #include <QVBoxLayout>
 #include <memory>
+
 #include "selfdrive/ui/qt/onroad/hud.h"
 #include "selfdrive/ui/qt/onroad/buttons.h"
 #include "selfdrive/ui/qt/onroad/driver_monitoring.h"
 #include "selfdrive/ui/qt/onroad/model.h"
 #include "selfdrive/ui/qt/widgets/cameraview.h"
-#include "selfdrive/ui/qt/screenrecorder/screenrecorder.h"
 
 class AnnotatedCameraWidget : public CameraWidget {
   Q_OBJECT
@@ -26,6 +27,14 @@ private:
 
   int skip_frame_count = 0;
   bool wide_cam_requested = false;
+  bool blindspot_left = false;
+  bool blindspot_right = false;
+  bool blinker_left = false;
+  bool blinker_right = false;
+  QPixmap blindspot_left_img;
+  QPixmap blindspot_right_img;
+
+  void paintBlindspotIcons(QPainter &painter);
 
 protected:
   void paintGL() override;
@@ -36,7 +45,4 @@ protected:
   double prev_draw_t = 0;
   FirstOrderFilter fps_filter;
   void paintEvent(QPaintEvent *event) override;
-private:
-  ScreenRecoder* recorder;
-  std::shared_ptr<QTimer> record_timer;
 };

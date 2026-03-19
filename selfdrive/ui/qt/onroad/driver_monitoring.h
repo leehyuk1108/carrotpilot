@@ -1,7 +1,7 @@
 #pragma once
 
-#include <vector>
 #include <QPainter>
+
 #include "selfdrive/ui/ui.h"
 
 class DriverMonitorRenderer {
@@ -11,14 +11,17 @@ public:
   void draw(QPainter &painter, const QRect &surface_rect);
 
 private:
-  float driver_pose_vals[3] = {};
-  float driver_pose_diff[3] = {};
-  float driver_pose_sins[3] = {};
-  float driver_pose_coss[3] = {};
   bool is_visible = false;
   bool is_active = false;
   bool is_rhd = false;
-  float dm_fade_state = 1.0;
-  QPixmap dm_img;
-  std::vector<vec3> face_kpts_draw;
+  bool is_engageable = false;
+  bool is_enabled = false;
+  float dm_fade_state = 1.0f;
+  float cone_rotation_deg = 0.0f;
+  QPixmap dm_background_img;
+  QPixmap dm_cone_img;
+  QPixmap dm_person_img;
+  QPixmap dm_cone_disengaged_img;
+  QPixmap dm_cone_engageable_img;
+  QPixmap dm_cone_enabled_img;
 };

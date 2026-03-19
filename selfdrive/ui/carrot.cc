@@ -1,9 +1,12 @@
 #include "selfdrive/ui/carrot.h"
 
+#include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <limits>
 
+#include <QDateTime>
+#include <QElapsedTimer>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonValue>
@@ -47,6 +50,26 @@
 #define COLOR_GREY_ALPHA(x) nvgRGBA(191, 191, 191, x)
 
 #define BOLD "KaiGenGothicKR-Bold"//"Inter-Bold"//"sans-bold"
+
+static QColor blend_qcolor(const QColor &a, const QColor &b, float t) {
+    t = std::clamp(t, 0.0f, 1.0f);
+    return QColor(
+        std::lround(a.red() + (b.red() - a.red()) * t),
+        std::lround(a.green() + (b.green() - a.green()) * t),
+        std::lround(a.blue() + (b.blue() - a.blue()) * t),
+        std::lround(a.alpha() + (b.alpha() - a.alpha()) * t)
+    );
+}
+
+static NVGcolor color_from_qcolor(const QColor &color) {
+    return nvgRGBA(color.red(), color.green(), color.blue(), color.alpha());
+}
+
+static NVGcolor gray_nvg(NVGcolor color) {
+    const float luminance = (0.299f * color.r) + (0.587f * color.g) + (0.114f * color.b);
+    const float toned = std::clamp(luminance * 0.82f, 0.0f, 1.0f);
+    return nvgRGBAf(toned, toned, toned, color.a);
+}
 
 
 constexpr float MIN_DRAW_DISTANCE = 10.0;
@@ -150,6 +173,37 @@ void ui_draw_image(const UIState* s, const Rect1& r, const char* name, float alp
     NVGpaint imgPaint = nvgImagePattern(s->vg, r.x, r.y, r.w, r.h, 0, s->images.at(name), alpha);
     nvgRect(s->vg, r.x, r.y, r.w, r.h);
     nvgFillPaint(s->vg, imgPaint);
+    nvgFill(s->vg);
+}
+
+void ui_draw_tinted_image(const UIState* s, const Rect1& r, const char* name, const NVGcolor& tint, float alpha = 1.0f) {
+    nvgSave(s->vg);
+    ui_draw_image(s, r, name, alpha);
+    nvgGlobalCompositeOperation(s->vg, NVG_ATOP);
+    nvgBeginPath(s->vg);
+    nvgRect(s->vg, r.x, r.y, r.w, r.h);
+    nvgFillColor(s->vg, tint);
+    nvgFill(s->vg);
+    nvgGlobalCompositeOperation(s->vg, NVG_SOURCE_OVER);
+    nvgRestore(s->vg);
+}
+
+void ui_draw_rotated_tinted_image(const UIState* s, const Rect1& r, const char* name, const NVGcolor& tint, float angle_deg, float alpha = 1.0f) {
+    nvgSave(s->vg);
+    nvgTranslate(s->vg, r.centerX(), r.centerY());
+    nvgRotate(s->vg, angle_deg * NVG_PI / 180.0f);
+    Rect1 centered = { -r.w / 2, -r.h / 2, r.w, r.h };
+    ui_draw_tinted_image(s, centered, name, tint, alpha);
+    nvgRestore(s->vg);
+}
+
+void ui_draw_glow(const UIState* s, float cx, float cy, float radius, const QColor &color, int inner_alpha, int outer_alpha) {
+    NVGpaint glow = nvgRadialGradient(s->vg, cx, cy, radius * 0.18f, radius,
+                                      nvgRGBA(color.red(), color.green(), color.blue(), inner_alpha),
+                                      nvgRGBA(color.red(), color.green(), color.blue(), outer_alpha));
+    nvgBeginPath(s->vg);
+    nvgCircle(s->vg, cx, cy, radius);
+    nvgFillPaint(s->vg, glow);
     nvgFill(s->vg);
 }
 void ui_draw_line(const UIState* s, const QPolygonF& vd, NVGcolor* color, NVGpaint* paint, float stroke = 0.0, NVGcolor strokeColor = COLOR_WHITE) {
@@ -1343,6 +1397,7 @@ public:
 class BlindSpotDrawer : ModelDrawer{
 protected:
     QPolygonF lane_barrier_vertices[2];
+    int blink_phase = 0;
 
 protected:
     void ui_draw_bsd(const UIState* s, const QPolygonF& vd, NVGcolor* color, bool right) {
@@ -1396,6 +1451,8 @@ public:
         auto car_state = sm["carState"].getCarState();
         bool left_blindspot = car_state.getLeftBlindspot();
         bool right_blindspot = car_state.getRightBlindspot();
+        const bool left_blinker = car_state.getLeftBlinker();
+        const bool right_blinker = car_state.getRightBlinker();
 
         auto lead_left = sm["radarState"].getRadarState().getLeadLeft();
         auto lead_right = sm["radarState"].getRadarState().getLeadRight();
@@ -1422,6 +1479,34 @@ public:
         }
         else if (lead_right.getStatus() && lead_right.getDRel() < car_state.getVEgo() * 3.0 && rightLaneChange) {
             ui_draw_bsd(s, lane_barrier_vertices[1], &color2, true);
+        }
+
+        const QString preview = qEnvironmentVariable("BLINDSPOT_PREVIEW").trimmed().toLower();
+        const bool preview_left = preview == "1" || preview.contains("left") || preview.contains("both");
+        const bool preview_right = preview == "1" || preview.contains("right") || preview.contains("both");
+        const bool preview_blink_left = preview.contains("left-blink") || preview.contains("both-blink");
+        const bool preview_blink_right = preview.contains("right-blink") || preview.contains("both-blink");
+
+        const bool show_left = left_blindspot || preview_left;
+        const bool show_right = right_blindspot || preview_right;
+        const bool blink_left = (left_blindspot && left_blinker) || preview_blink_left;
+        const bool blink_right = (right_blindspot && right_blinker) || preview_blink_right;
+        blink_phase = (blink_phase + 1) % 8;
+        const bool blink_visible = blink_phase < 4;
+
+        const int icon_w = 196;
+        const int icon_h = 224;
+        const int y = (s->fb_h / 2) - 180;
+        const int left_x = 44;
+        const int right_x = s->fb_w - 40 - icon_w;
+
+        if (show_left && (!blink_left || blink_visible)) {
+            ui_draw_glow(s, left_x + icon_w / 2.0f, y + icon_h / 2.0f, icon_w * 0.72f, QColor(0xFF, 0x67, 0x4A), 82, 0);
+            ui_draw_image(s, { left_x, y, icon_w, icon_h }, "ic_blindspot_left", 1.0f);
+        }
+        if (show_right && (!blink_right || blink_visible)) {
+            ui_draw_glow(s, right_x + icon_w / 2.0f, y + icon_h / 2.0f, icon_w * 0.72f, QColor(0xFF, 0x67, 0x4A), 82, 0);
+            ui_draw_image(s, { right_x, y, icon_w, icon_h }, "ic_blindspot_right", 1.0f);
         }
     }
 };
@@ -1705,6 +1790,11 @@ public:
             nvgRGBA(0x8b, 0, 0xff, alpha),    COLOR_OCHRE_ALPHA(alpha),
             COLOR_WHITE_ALPHA(alpha),         COLOR_BLACK_ALPHA(alpha),
         };
+        if (s->status == STATUS_DISENGAGED) {
+            for (auto &color : colors) {
+                color = gray_nvg(color);
+            }
+        }
 
         bool brake_valid = car_state.getBrakeLights();
         const auto radar_state = sm["radarState"].getRadarState();
@@ -2293,11 +2383,13 @@ public:
     char    gear_str_last[32] = "";
     int     blink_timer = 0;
     int     disp_timer = 0;
+    int     standstill_duration = 0;
     float cpuTemp = 0.0f;
     float cpuUsage = 0.0f;
     int   memoryUsage = 0;
     float freeSpace = 0.0f;
     float voltage = 0.0f;
+    QElapsedTimer standstill_timer;
     void drawHud(UIState* s) {
         int show_device_state = params.getInt("ShowDeviceState");
         blink_timer = (blink_timer + 1) % 16;
@@ -2529,6 +2621,135 @@ public:
               sprintf(str, "%.1fV", voltage);
               ui_draw_text(s, dx, dy + 40, str, 40, COLOR_WHITE, BOLD);
             }
+        }
+
+        const auto selfdrive_state = sm["selfdriveState"].getSelfdriveState();
+        const QString alert_type = QString::fromUtf8(selfdrive_state.getAlertType().cStr());
+        const bool resume_required_active = alert_type.contains("resumeRequired", Qt::CaseInsensitive);
+        const bool standstill_active = carState.getStandstill() && carState.getGearShifter() != cereal::CarState::GearShifter::REVERSE;
+        if (resume_required_active) {
+            standstill_duration = 0;
+            standstill_timer.invalidate();
+        } else if (standstill_active) {
+            if (!standstill_timer.isValid()) {
+                standstill_timer.start();
+            }
+            standstill_duration = standstill_timer.elapsed() / 1000;
+        } else {
+            standstill_duration = 0;
+            standstill_timer.invalidate();
+        }
+
+        if (standstill_duration > 0) {
+            const int minutes = standstill_duration / 60;
+            const int seconds = standstill_duration % 60;
+            const QString timer_text = QString("%1:%2").arg(minutes).arg(seconds, 2, 10, QChar('0'));
+            nvgTextAlign(s->vg, NVG_ALIGN_CENTER | NVG_ALIGN_BOTTOM);
+            ui_draw_text(s, s->fb_w / 2, s->fb_h - 150, timer_text.toStdString().c_str(), 110, COLOR_WHITE, BOLD, 3.0f, 8.0f);
+        }
+
+        const auto controls_state = sm["controlsState"].getControlsState();
+        const auto lateral_state = controls_state.getLateralControlState();
+        const auto lateral_which = lateral_state.which();
+        const bool selfdrive_enabled = selfdrive_state.getEnabled();
+        const bool selfdrive_engageable = selfdrive_state.getEngageable() || selfdrive_enabled;
+        const bool is_overriding = selfdrive_state.getState() == cereal::SelfdriveState::OpenpilotState::OVERRIDING;
+        const bool longitudinal_override_active = is_overriding && carState.getGasPressed();
+        const bool lateral_override_active = is_overriding && carState.getSteeringPressed();
+        const bool steer_limit_warning_active = alert_type.contains("steerSaturated", Qt::CaseInsensitive);
+        const bool lfa_active_preview = qEnvironmentVariableIntValue("LFA_ACTIVE_PREVIEW") == 1;
+        const QString torque_preview_str = qEnvironmentVariable("STEERING_TORQUE_PREVIEW").trimmed();
+        bool torque_preview_ok = false;
+        const float torque_preview = torque_preview_str.toFloat(&torque_preview_ok);
+
+        float steering_torque_pct = 0.0f;
+        switch (lateral_which) {
+            case cereal::ControlsState::LateralControlState::TORQUE_STATE: {
+                const auto torque_state = lateral_state.getTorqueState();
+                steering_torque_pct = std::clamp(std::abs(torque_state.getOutput()), 0.0f, 1.0f);
+                if (torque_state.getSaturated()) steering_torque_pct = 1.0f;
+                break;
+            }
+            case cereal::ControlsState::LateralControlState::PID_STATE: {
+                const auto pid_state = lateral_state.getPidState();
+                steering_torque_pct = std::clamp(std::abs(pid_state.getOutput()), 0.0f, 1.0f);
+                if (pid_state.getSaturated()) steering_torque_pct = 1.0f;
+                break;
+            }
+            case cereal::ControlsState::LateralControlState::ANGLE_STATE: {
+                const auto angle_state = lateral_state.getAngleState();
+                steering_torque_pct = std::clamp(std::abs(angle_state.getOutput()), 0.0f, 1.0f);
+                if (angle_state.getSaturated()) steering_torque_pct = 1.0f;
+                break;
+            }
+            case cereal::ControlsState::LateralControlState::DEBUG_STATE: {
+                const auto debug_state = lateral_state.getDebugState();
+                steering_torque_pct = std::clamp(std::abs(debug_state.getOutput()), 0.0f, 1.0f);
+                if (debug_state.getSaturated()) steering_torque_pct = 1.0f;
+                break;
+            }
+            default:
+                break;
+        }
+        if (torque_preview_ok) {
+            steering_torque_pct = std::clamp(torque_preview, 0.0f, 1.0f);
+        }
+
+        const int wheel_button_size = steer_limit_warning_active ? 188 : 156;
+        const int wheel_icon_size = steer_limit_warning_active ? 178 : 150;
+        const int wheel_cx = s->fb_w - 104 - wheel_button_size / 2;
+        const int wheel_cy = s->fb_h - 96 - wheel_button_size / 2;
+        const float steering_angle_deg = -carState.getSteeringAngleDeg();
+        const bool steering_active = selfdrive_enabled || longitudinal_override_active || lateral_override_active || (torque_preview_ok && torque_preview >= 0.0f);
+
+        QColor wheel_bg(0x0A, 0x10, 0x16, 0xA8);
+        QColor wheel_tint(0x9F, 0xA8, 0xB2, 0xE6);
+        if (lateral_override_active) {
+            wheel_bg = QColor(0x0A, 0x12, 0x1F, 0xB8);
+            wheel_tint = QColor(0x4F, 0x8D, 0xFF);
+        } else if (steering_active) {
+            const QColor active_white(0xF4, 0xF7, 0xFB, 0xF4);
+            const QColor warm_color(0xFF, 0xC7, 0x58, 0xF6);
+            const QColor hot_color(0xFF, 0x5D, 0x57, 0xF8);
+            wheel_bg = QColor(0x0D, 0x16, 0x12, 0xB6);
+            if (steering_torque_pct < 0.65f) {
+                wheel_tint = blend_qcolor(active_white, warm_color, steering_torque_pct / 0.65f * 0.35f);
+            } else {
+                wheel_tint = blend_qcolor(warm_color, hot_color, (steering_torque_pct - 0.65f) / 0.35f);
+            }
+        }
+
+        nvgBeginPath(s->vg);
+        nvgCircle(s->vg, wheel_cx, wheel_cy, wheel_button_size / 2.0f);
+        nvgFillColor(s->vg, color_from_qcolor(wheel_bg));
+        nvgFill(s->vg);
+        ui_draw_rotated_tinted_image(s, { wheel_cx - wheel_icon_size / 2, wheel_cy - wheel_icon_size / 2, wheel_icon_size, wheel_icon_size },
+                                     "ic_steeringwheel", color_from_qcolor(wheel_tint), steering_angle_deg);
+
+        const int lfa_size = 104;
+        const int lfa_x = wheel_cx - lfa_size / 2;
+        const int lfa_y = wheel_cy - wheel_button_size / 2 - 132;
+        QColor lfa_tint(0x92, 0x9D, 0xA8, 0xE6);
+        QColor lfa_glow(0x49, 0xD2, 0x83);
+        if (longitudinal_override_active) {
+            lfa_tint = QColor(0x4F, 0x8D, 0xFF);
+            lfa_glow = QColor(0x4F, 0x8D, 0xFF);
+        } else if (selfdrive_enabled || lfa_active_preview) {
+            lfa_tint = QColor(0x49, 0xD2, 0x83);
+        } else if (selfdrive_engageable) {
+            lfa_tint = QColor(0xF4, 0xF7, 0xFB, 0xF4);
+        }
+        if (selfdrive_enabled || lfa_active_preview || longitudinal_override_active) {
+            ui_draw_glow(s, lfa_x + lfa_size / 2.0f, lfa_y + lfa_size / 2.0f, lfa_size * 0.8f, lfa_glow, 76, 0);
+        }
+        ui_draw_tinted_image(s, { lfa_x, lfa_y, lfa_size, lfa_size }, "ic_lfa", color_from_qcolor(lfa_tint));
+
+        if (steer_limit_warning_active) {
+            const int warning_size = 76;
+            const int warning_x = wheel_cx - wheel_button_size / 2 - 84;
+            const int warning_y = wheel_cy - wheel_button_size / 2 - 20;
+            ui_draw_glow(s, warning_x + warning_size / 2.0f, warning_y + warning_size / 2.0f, warning_size * 0.95f, QColor(0xFF, 0x68, 0x5B), 64, 0);
+            ui_draw_image(s, { warning_x, warning_y, warning_size, warning_size }, "ic_warning", 1.0f);
         }
     }
     void drawDateTime(const UIState* s) {
@@ -2821,6 +3042,20 @@ TurnInfoDrawer drawTurnInfo;
 
 OnroadAlerts::Alert alert;
 NVGcolor alert_color;
+QElapsedTimer resume_required_timer;
+bool resume_required_active = false;
+
+static QColor get_alert_qcolor(cereal::SelfdriveState::AlertStatus status) {
+    switch (status) {
+        case cereal::SelfdriveState::AlertStatus::USER_PROMPT:
+            return QColor(0xDA, 0x6F, 0x25, 0xF1);
+        case cereal::SelfdriveState::AlertStatus::CRITICAL:
+            return QColor(0xC9, 0x22, 0x31, 0xF1);
+        case cereal::SelfdriveState::AlertStatus::NORMAL:
+        default:
+            return QColor(0x15, 0x15, 0x15, 0xF1);
+    }
+}
 
 //MapRenderer mapRenderer;
 
@@ -3068,16 +3303,121 @@ void ui_draw_border(UIState* s, int w, int h, QColor bg, QColor bg_long) {
     glDisable(GL_BLEND);
 }
 void ui_draw_alert(UIState* s) {
-    if (alert.size != cereal::SelfdriveState::AlertSize::NONE) {
-        alert_color = COLOR_ORANGE;
-        nvgTextAlign(s->vg, NVG_ALIGN_CENTER | NVG_ALIGN_BOTTOM);
-        ui_draw_text(s, s->fb_w / 2, s->fb_h - 300, alert.text1.toStdString().c_str(), 100, alert_color, BOLD, 3.0f, 8.0f);
-        ui_draw_text(s, s->fb_w / 2, s->fb_h - 200, alert.text2.toStdString().c_str(), 70, alert_color, BOLD, 3.0f, 8.0f);
+    if (alert.size == cereal::SelfdriveState::AlertSize::NONE) return;
+
+    const QString alert_type = alert.type;
+    if (alert_type.contains("steerSaturated", Qt::CaseInsensitive)) return;
+
+    const bool is_resume_required_alert = alert_type.contains("resumeRequired", Qt::CaseInsensitive);
+    const bool is_lead_departing_alert = alert_type.contains("leadDeparting", Qt::CaseInsensitive);
+    const bool is_collision_alert = alert_type.contains("fcw", Qt::CaseInsensitive) || alert_type.contains("aeb", Qt::CaseInsensitive);
+    const bool is_lane_departure_alert = alert_type.contains("ldw", Qt::CaseInsensitive);
+    const bool icon_alert = is_collision_alert || is_lane_departure_alert;
+    const QColor alert_qcolor = get_alert_qcolor(alert.status);
+    const Rect1 full_rect = {0, 0, s->fb_w, s->fb_h};
+
+    auto draw_overlay_gradient = [&](const QColor &top, const QColor &mid, const QColor &bottom) {
+        NVGpaint overlay = nvgLinearGradient(s->vg, 0, 0, 0, s->fb_h,
+                                             nvgRGBA(top.red(), top.green(), top.blue(), top.alpha()),
+                                             nvgRGBA(bottom.red(), bottom.green(), bottom.blue(), bottom.alpha()));
+        ui_fill_rect(s->vg, full_rect, overlay);
+        NVGpaint mid_overlay = nvgLinearGradient(s->vg, 0, 0, 0, s->fb_h,
+                                                 nvgRGBA(mid.red(), mid.green(), mid.blue(), mid.alpha()),
+                                                 nvgRGBA(bottom.red(), bottom.green(), bottom.blue(), 0));
+        ui_fill_rect(s->vg, full_rect, mid_overlay);
+    };
+
+    if (is_lead_departing_alert) {
+        draw_overlay_gradient(QColor(0x20, 0x22, 0x25, 188), QColor(0x16, 0x18, 0x1C, 206), QColor(0x10, 0x12, 0x16, 224));
+        const int icon_size = 320;
+        const Rect1 icon_rect = { (s->fb_w - icon_size) / 2, (s->fb_h - icon_size) / 2 - 70, icon_size, icon_size };
+        ui_draw_image(s, icon_rect, "ic_lead_depart", 1.0f);
+        nvgTextAlign(s->vg, NVG_ALIGN_CENTER | NVG_ALIGN_TOP);
+        ui_draw_text(s, s->fb_w / 2, icon_rect.bottom() + 52, alert.text2.toStdString().c_str(), 82, COLOR_WHITE, BOLD, 3.0f, 8.0f);
+        return;
+    }
+
+    if (is_resume_required_alert) {
+        draw_overlay_gradient(QColor(alert_qcolor.red(), alert_qcolor.green(), alert_qcolor.blue(), 178),
+                              QColor(alert_qcolor.red(), alert_qcolor.green(), alert_qcolor.blue(), 194),
+                              QColor(std::max(alert_qcolor.red() - 18, 0), std::max(alert_qcolor.green() - 18, 0), std::max(alert_qcolor.blue() - 18, 0), 212));
+
+        const int elapsed_seconds = resume_required_timer.isValid() ? resume_required_timer.elapsed() / 1000 : 0;
+        const QString elapsed_text = QString("%1:%2").arg(elapsed_seconds / 60).arg(elapsed_seconds % 60, 2, 10, QChar('0'));
+        const int icon_size = 184;
+        const int group_gap = 28;
+        const int timer_width = 260;
+        const int group_width = icon_size + group_gap + timer_width;
+        const int group_left = (s->fb_w - group_width) / 2;
+        const int group_top = (s->fb_h / 2) - 150;
+
+        Rect1 icon_rect = { group_left, group_top, icon_size, icon_size };
+        Rect1 timer_rect = { icon_rect.right() + group_gap, group_top + 10, timer_width, icon_size - 20 };
+        ui_draw_image(s, icon_rect, "ic_autohold", 1.0f);
+
+        nvgTextAlign(s->vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+        ui_draw_text(s, timer_rect.centerX(), timer_rect.centerY(), elapsed_text.toStdString().c_str(), 112, COLOR_WHITE, BOLD, 3.0f, 8.0f);
+        nvgTextAlign(s->vg, NVG_ALIGN_CENTER | NVG_ALIGN_TOP);
+        ui_draw_text(s, s->fb_w / 2, group_top + icon_size + 26, alert.text2.toStdString().c_str(), 66, COLOR_WHITE, BOLD, 3.0f, 8.0f);
+        return;
+    }
+
+    if (icon_alert) {
+        draw_overlay_gradient(QColor(0x2C, 0x33, 0x3A, 0x74), QColor(0x1E, 0x24, 0x2A, 0xBF), QColor(0x16, 0x1A, 0x1F, 0xD8));
+
+        const bool blink_visible = ((QDateTime::currentMSecsSinceEpoch() / (is_lane_departure_alert ? 320 : 120)) % 2) == 0;
+        const int icon_size = is_lane_departure_alert ? 292 : 348;
+        const int icon_y = is_lane_departure_alert ? 188 : 164;
+        const char *icon_name = is_lane_departure_alert ? "ic_lanecrossing" : "ic_collision";
+        const QColor glow_color = is_lane_departure_alert ? QColor(0xFF, 0xC3, 0x53) : QColor(0xFF, 0x5D, 0x57);
+        if (blink_visible) {
+            const Rect1 icon_rect = { (s->fb_w - icon_size) / 2, icon_y, icon_size, icon_size };
+            ui_draw_glow(s, icon_rect.centerX(), icon_rect.centerY(), icon_rect.w * 0.66f, glow_color, 82, 0);
+            ui_draw_image(s, icon_rect, icon_name, 1.0f);
+        }
+
+        nvgTextAlign(s->vg, NVG_ALIGN_CENTER | NVG_ALIGN_TOP);
+        ui_draw_text(s, s->fb_w / 2, s->fb_h / 2 + 60, alert.text1.toStdString().c_str(), 88, COLOR_WHITE, BOLD, 3.0f, 8.0f);
+        if (!alert.text2.isEmpty()) {
+            ui_draw_text(s, s->fb_w / 2, s->fb_h / 2 + 210, alert.text2.toStdString().c_str(), 66, COLOR_WHITE, BOLD, 3.0f, 8.0f);
+        }
+        return;
+    }
+
+    int h = 271;
+    if (alert.size == cereal::SelfdriveState::AlertSize::MID) h = 420;
+    if (alert.size == cereal::SelfdriveState::AlertSize::FULL) h = s->fb_h;
+    int margin = alert.size == cereal::SelfdriveState::AlertSize::FULL ? 0 : 40;
+    float radius = alert.size == cereal::SelfdriveState::AlertSize::FULL ? 0.0f : 30.0f;
+    Rect1 r = { margin, s->fb_h - h + margin, s->fb_w - margin * 2, h - margin * 2 };
+
+    ui_fill_rect(s->vg, r, color_from_qcolor(alert_qcolor), radius);
+    NVGpaint shade = nvgLinearGradient(s->vg, 0, r.y, 0, r.bottom(),
+                                       nvgRGBAf(0, 0, 0, 0.05f),
+                                       nvgRGBAf(0, 0, 0, 0.35f));
+    ui_fill_rect(s->vg, r, shade, radius);
+
+    if (alert.size == cereal::SelfdriveState::AlertSize::SMALL) {
+        nvgTextAlign(s->vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+        ui_draw_text(s, r.centerX(), r.centerY(), alert.text1.toStdString().c_str(), 74, COLOR_WHITE, BOLD, 3.0f, 8.0f);
+    } else if (alert.size == cereal::SelfdriveState::AlertSize::MID) {
+        nvgTextAlign(s->vg, NVG_ALIGN_CENTER | NVG_ALIGN_TOP);
+        ui_draw_text(s, s->fb_w / 2, r.y + 90, alert.text1.toStdString().c_str(), 88, COLOR_WHITE, BOLD, 3.0f, 8.0f);
+        ui_draw_text(s, s->fb_w / 2, r.y + 236, alert.text2.toStdString().c_str(), 66, COLOR_WHITE, BOLD, 3.0f, 8.0f);
+    } else {
+        nvgTextAlign(s->vg, NVG_ALIGN_CENTER | NVG_ALIGN_TOP);
+        ui_draw_text(s, s->fb_w / 2, r.y + 270, alert.text1.toStdString().c_str(), alert.text1.length() > 15 ? 132 : 177, COLOR_WHITE, BOLD, 3.0f, 8.0f);
+        ui_draw_text(s, s->fb_w / 2, r.bottom() - 420, alert.text2.toStdString().c_str(), 88, COLOR_WHITE, BOLD, 3.0f, 8.0f);
     }
 }
 void ui_update_alert(const OnroadAlerts::Alert& a) {
-    //alert_color = nvgRGBA(color.red(), color.green(), color.blue(), color.alpha());
-    //printf("r=%d, g=%d, b=%d\n", color.red(), color.green(), color.blue());
+    const bool is_resume_required = a.type.contains("resumeRequired", Qt::CaseInsensitive);
+    if (is_resume_required && !resume_required_active) {
+        resume_required_timer.restart();
+    } else if (!is_resume_required && resume_required_active) {
+        resume_required_timer.invalidate();
+    }
+    resume_required_active = is_resume_required;
     alert = a;
 }
 
@@ -3127,7 +3467,16 @@ void ui_nvg_init(UIState *s) {
   {"ic_apm", "../assets/images/img_apm.png"},
   {"ic_apn", "../assets/images/img_apn.png"},
   {"ic_hda", "../assets/images/img_hda.png"},
-  {"ic_navi_point", "../assets/images/navi_point.png"}
+  {"ic_navi_point", "../assets/images/navi_point.png"},
+  {"ic_blindspot_left", "../files/icons/blindspot_left.png"},
+  {"ic_blindspot_right", "../files/icons/blindspot_right.png"},
+  {"ic_lfa", "../files/icons/lfa.png"},
+  {"ic_steeringwheel", "../files/icons/steeringwheel.png"},
+  {"ic_warning", "../files/icons/warning.png"},
+  {"ic_collision", "../files/icons/collision.png"},
+  {"ic_lead_depart", "../files/icons/lead_depart.png"},
+  {"ic_autohold", "../files/icons/autohold.png"},
+  {"ic_lanecrossing", "../files/icons/lanecrossing.png"}
 
   };
   for (auto [name, file] : images) {

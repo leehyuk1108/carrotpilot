@@ -518,10 +518,10 @@ void OmxEncoder::handle_out_buf(OmxEncoder *e, OMX_BUFFERHEADERTYPE *out_buf) {
       // input timestamps are in microseconds
       AVRational in_timebase = {1, 1000000};
 
-      AVPacket pkt;
-      av_init_packet(&pkt);
+      AVPacket pkt = {};
       pkt.data = buf_data;
       pkt.size = out_buf->nFilledLen;
+      pkt.stream_index = e->out_stream->index;
 
       enum AVRounding rnd = static_cast<enum AVRounding>(AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX);
       pkt.pts = pkt.dts = av_rescale_q_rnd(out_buf->nTimeStamp, in_timebase, e->ofmt_ctx->streams[0]->time_base, rnd);
@@ -534,7 +534,7 @@ void OmxEncoder::handle_out_buf(OmxEncoder *e, OMX_BUFFERHEADERTYPE *out_buf) {
       err = av_write_frame(e->ofmt_ctx, &pkt);
       if (err < 0) { LOGW("ts encoder write issue"); }
 
-      av_free_packet(&pkt);
+      av_packet_unref(&pkt);
     }
   }
 
@@ -640,11 +640,7 @@ void OmxEncoder::encoder_open(const char* filename) {
     this->out_stream = avformat_new_stream(this->ofmt_ctx, NULL);
     assert(this->out_stream);
 
-    // set codec correctly
-    av_register_all();
-
-    AVCodec *codec = NULL;
-    codec = avcodec_find_encoder(AV_CODEC_ID_H264);
+    const AVCodec *codec = avcodec_find_encoder(AV_CODEC_ID_H264);
     assert(codec);
 
     this->codec_ctx = avcodec_alloc_context3(codec);
