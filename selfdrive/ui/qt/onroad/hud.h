@@ -17,6 +17,7 @@ private:
   void drawSetSpeed(QPainter &p, const QRect &surface_rect);
   void drawCurrentSpeed(QPainter &p, const QRect &surface_rect);
   void drawStandstillTimer(QPainter &p, const QRect &surface_rect);
+  void drawTurnSignalIcons(QPainter &p, const QRect &surface_rect);
   void drawCarrotBadge(QPainter &p, const QRect &surface_rect);
   void drawGapIcon(QPainter &p, const QRect &surface_rect);
   void drawLfaIcon(QPainter &p, const QRect &surface_rect);
@@ -43,5 +44,7 @@ private:
   float steering_angle_deg = 0.0f;
   int gap_level = 0;
   int carrot_active_level = 0;
+  bool left_turn_signal_active = false;
+  bool right_turn_signal_active = false;
   int status = STATUS_DISENGAGED;
 };

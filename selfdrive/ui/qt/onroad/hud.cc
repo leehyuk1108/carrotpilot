@@ -14,14 +14,40 @@ constexpr int GAP_ICON_HEIGHT = 84;
 constexpr int CARROT_BADGE_WIDTH = 112;
 constexpr int CARROT_BADGE_HEIGHT = 52;
 constexpr int CARROT_BADGE_GAP = 18;
+constexpr int TURN_SIGNAL_ICON_SIZE = 72;
+constexpr int TURN_SIGNAL_GAP = 28;
 constexpr int HUD_SIDE_MARGIN = 104;
 constexpr int HUD_BOTTOM_MARGIN = 96;
 constexpr float PREVIEW_SPEED_KPH = 192.0f;
 constexpr float PREVIEW_SET_SPEED_KPH = 65.0f;
+constexpr qint64 TURN_SIGNAL_CYCLE_MS = 800;
+constexpr qint64 TURN_SIGNAL_ON_MS = 420;
 
 namespace {
 QColor lateralOnlyMint() {
   return QColor(0x67, 0xF5, 0xD1);
+}
+
+QPixmap tintTurnSignalIcon(const QString &path, const QSize &size, const QColor &tint) {
+  QPixmap src = loadPixmap(path, size);
+  if (src.isNull()) return src;
+
+  QImage img = src.toImage().convertToFormat(QImage::Format_ARGB32);
+  for (int y = 0; y < img.height(); ++y) {
+    for (int x = 0; x < img.width(); ++x) {
+      QColor px = img.pixelColor(x, y);
+      if (px.alpha() < 140) {
+        px.setAlpha(0);
+      } else {
+        px.setAlpha(255);
+        px.setRed(tint.red());
+        px.setGreen(tint.green());
+        px.setBlue(tint.blue());
+      }
+      img.setPixelColor(x, y, px);
+    }
+  }
+  return QPixmap::fromImage(img);
 }
 
 QColor blendColor(const QColor &a, const QColor &b, float t) {
@@ -63,6 +89,8 @@ void HudRenderer::updateState(const UIState &s) {
   const int gap_preview = qEnvironmentVariableIntValue("GAP_PREVIEW", &gap_preview_ok);
   bool carrot_preview_ok = false;
   const int carrot_preview = qEnvironmentVariableIntValue("CARROT_BADGE_PREVIEW", &carrot_preview_ok);
+  const bool left_turn_signal_preview = qEnvironmentVariableIntValue("TURN_SIGNAL_LEFT_PREVIEW") == 1;
+  const bool right_turn_signal_preview = qEnvironmentVariableIntValue("TURN_SIGNAL_RIGHT_PREVIEW") == 1;
   const bool always_lateral_preview = qEnvironmentVariableIntValue("ALWAYS_LATERAL_PREVIEW") == 1;
 
   selfdrive_enabled = selfdrive_state.getEnabled();
@@ -82,6 +110,8 @@ void HudRenderer::updateState(const UIState &s) {
     gap_level = std::clamp(static_cast<int>(selfdrive_state.getPersonality()) + 1, 1, 4);
   }
   carrot_active_level = 0;
+  left_turn_signal_active = left_turn_signal_preview;
+  right_turn_signal_active = right_turn_signal_preview;
   if (sm.rcv_frame("carrotMan") > 0) {
     carrot_active_level = sm["carrotMan"].getCarrotMan().getActiveCarrot();
   } else if (carrot_preview_ok && carrot_preview > 0) {
@@ -128,6 +158,8 @@ void HudRenderer::updateState(const UIState &s) {
   const auto lateral_state = controls_state.getLateralControlState();
   const auto lateral_which = lateral_state.which();
   const bool is_overriding = selfdrive_state.getState() == cereal::SelfdriveState::OpenpilotState::OVERRIDING;
+  left_turn_signal_active = left_turn_signal_active || car_state.getLeftBlinker();
+  right_turn_signal_active = right_turn_signal_active || car_state.getRightBlinker();
 
   always_on_lateral_active = always_on_lateral_active ||
                              (!selfdrive_enabled && !car_control.getLongActive() &&
@@ -208,6 +240,7 @@ void HudRenderer::draw(QPainter &p, const QRect &surface_rect) {
   } else {
     drawStandstillTimer(p, surface_rect);
   }
+  drawTurnSignalIcons(p, surface_rect);
   drawCarrotBadge(p, surface_rect);
   drawGapIcon(p, surface_rect);
   drawLfaIcon(p, surface_rect);
@@ -277,6 +310,41 @@ void HudRenderer::drawStandstillTimer(QPainter &p, const QRect &surface_rect) {
   p.setFont(InterFont(132, QFont::Bold));
   drawText(p, QRect(center_x - 260, group_top - 6, 520, 150), timer_text, QColor(0xFF, 0xFF, 0xFF),
            Qt::AlignHCenter | Qt::AlignBottom);
+}
+
+void HudRenderer::drawTurnSignalIcons(QPainter &p, const QRect &surface_rect) {
+  static const QColor signal_color(0x1E, 0xFF, 0x5C);
+  static const QPixmap left_img = tintTurnSignalIcon("../../files/icons/turn_signal_left.png", {TURN_SIGNAL_ICON_SIZE, TURN_SIGNAL_ICON_SIZE}, signal_color);
+  static const QPixmap right_img = tintTurnSignalIcon("../../files/icons/turn_signal_right.png", {TURN_SIGNAL_ICON_SIZE, TURN_SIGNAL_ICON_SIZE}, signal_color);
+  if ((!left_turn_signal_active || left_img.isNull()) && (!right_turn_signal_active || right_img.isNull())) return;
+
+  const int group_top = surface_rect.height() - 246;
+  const int center_x = surface_rect.center().x();
+  const QRect speed_rect(center_x - 230, group_top - 18, 460, 162);
+  const int icon_y = speed_rect.center().y() - (TURN_SIGNAL_ICON_SIZE / 2) + 2;
+  const QRect left_rect(speed_rect.left() - TURN_SIGNAL_ICON_SIZE - TURN_SIGNAL_GAP, icon_y,
+                        TURN_SIGNAL_ICON_SIZE, TURN_SIGNAL_ICON_SIZE);
+  const QRect right_rect(speed_rect.right() + TURN_SIGNAL_GAP, icon_y,
+                         TURN_SIGNAL_ICON_SIZE, TURN_SIGNAL_ICON_SIZE);
+  const qint64 blink_phase = QDateTime::currentMSecsSinceEpoch() % TURN_SIGNAL_CYCLE_MS;
+  const bool blink_on = blink_phase < TURN_SIGNAL_ON_MS;
+
+  auto draw_indicator = [&](const QRect &icon_rect, const QPixmap &icon, bool active) {
+    if (!active || icon.isNull()) return;
+
+    const qreal icon_opacity = blink_on ? 0.96 : 0.14;
+
+    p.save();
+    p.setRenderHint(QPainter::Antialiasing);
+    p.setRenderHint(QPainter::SmoothPixmapTransform);
+
+    p.setOpacity(icon_opacity);
+    p.drawPixmap(icon_rect, icon);
+    p.restore();
+  };
+
+  draw_indicator(left_rect, left_img, left_turn_signal_active);
+  draw_indicator(right_rect, right_img, right_turn_signal_active);
 }
 
 void HudRenderer::drawGapIcon(QPainter &p, const QRect &surface_rect) {

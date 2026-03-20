@@ -27,7 +27,7 @@ private:
 public:
   bool mapToScreen(float in_x, float in_y, float in_z, QPointF *out);
   void mapLineToPolygon(const cereal::XYZTData::Reader &line, float y_off, float z_off,
-                        QPolygonF *pvd, int max_idx, bool allow_invert = true);
+                        QPolygonF *pvd, int max_idx, bool allow_invert = true, float center_y_off = 0.0f);
   void drawLeadBox(QPainter &painter, const LeadBoxState &lead_box, bool secondary = false);
   void drawLeadDistanceBadges(QPainter &painter, const LeadBoxState &lead_box);
   void update_leads(const cereal::RadarState::Reader &radar_state, const cereal::ModelDataV2::Reader &model,
@@ -40,7 +40,10 @@ public:
 
   bool longitudinal_control = false;
   bool lateral_only_active = false;
+  bool lane_mode_active = false;
   bool experimental_mode = false;
+  cereal::LaneChangeState lane_change_state = cereal::LaneChangeState::OFF;
+  cereal::LaneChangeDirection lane_change_direction = cereal::LaneChangeDirection::NONE;
   float blend_factor = 1.0f;
   bool prev_allow_throttle = true;
   float lane_line_probs[4] = {};

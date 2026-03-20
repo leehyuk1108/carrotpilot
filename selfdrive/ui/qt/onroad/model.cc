@@ -47,6 +47,10 @@ QColor lateralOnlyMint(int alpha = 255) {
   return QColor(0x67, 0xF5, 0xD1, alpha);
 }
 
+QColor laneChangeMint(int alpha = 255) {
+  return QColor(0x53, 0xEE, 0xB6, alpha);
+}
+
 void drawOutlinedText(QPainter &painter, const QRectF &rect, const QString &text, const QColor &text_color) {
   const QRectF shadow_rect = rect.translated(0.0f, 1.5f);
   painter.setPen(QColor(0, 0, 0, 180));
@@ -97,6 +101,7 @@ void ModelRenderer::draw(QPainter &painter, const QRect &surface_rect) {
   const auto &selfdrive_state = sm["selfdriveState"].getSelfdriveState();
   const auto &car_control = sm["carControl"].getCarControl();
   const auto &car_state = sm["carState"].getCarState();
+  lane_mode_active = sm.alive("controlsState") && sm["controlsState"].getControlsState().getActiveLaneLine();
   lateral_only_active = qEnvironmentVariableIntValue("ALWAYS_LATERAL_PREVIEW") == 1 ||
                         (!selfdrive_state.getEnabled() && !car_control.getLongActive() &&
                          (car_control.getLatActive() || car_state.getLatEnabled()));
@@ -104,6 +109,27 @@ void ModelRenderer::draw(QPainter &painter, const QRect &surface_rect) {
   painter.save();
 
   const auto &model = sm["modelV2"].getModelV2();
+  const auto &meta = model.getMeta();
+  lane_change_state = meta.getLaneChangeState();
+  lane_change_direction = meta.getLaneChangeDirection();
+  const QString lane_change_state_preview = qEnvironmentVariable("LANE_CHANGE_STATE_PREVIEW").trimmed().toLower();
+  const QString lane_change_direction_preview = qEnvironmentVariable("LANE_CHANGE_DIRECTION_PREVIEW").trimmed().toLower();
+  if (lane_change_state_preview == "pre") {
+    lane_change_state = cereal::LaneChangeState::PRE_LANE_CHANGE;
+  } else if (lane_change_state_preview == "starting") {
+    lane_change_state = cereal::LaneChangeState::LANE_CHANGE_STARTING;
+  } else if (lane_change_state_preview == "finishing") {
+    lane_change_state = cereal::LaneChangeState::LANE_CHANGE_FINISHING;
+  } else if (lane_change_state_preview == "off") {
+    lane_change_state = cereal::LaneChangeState::OFF;
+  }
+  if (lane_change_direction_preview == "left") {
+    lane_change_direction = cereal::LaneChangeDirection::LEFT;
+  } else if (lane_change_direction_preview == "right") {
+    lane_change_direction = cereal::LaneChangeDirection::RIGHT;
+  } else if (lane_change_direction_preview == "none") {
+    lane_change_direction = cereal::LaneChangeDirection::NONE;
+  }
   const auto &radar_state = sm["radarState"].getRadarState();
   const auto &lead_one = radar_state.getLeadOne();
 
@@ -204,7 +230,13 @@ void ModelRenderer::update_model(const cereal::ModelDataV2::Reader &model, const
   int max_idx = get_path_length_idx(lane_lines[0], max_distance);
   for (int i = 0; i < std::size(lane_line_vertices); i++) {
     lane_line_probs[i] = line_probs[i];
-    mapLineToPolygon(lane_lines[i], 0.025 * lane_line_probs[i], 0, &lane_line_vertices[i], max_idx);
+    float lane_width = 0.025f * lane_line_probs[i];
+    if (lane_mode_active && (i == 1 || i == 2)) {
+      lane_width = std::max(lane_width * 1.7f, 0.034f);
+    } else {
+      lane_width = std::max(lane_width * 1.25f, 0.028f);
+    }
+    mapLineToPolygon(lane_lines[i], lane_width, 0, &lane_line_vertices[i], max_idx);
   }
 
   // update road edges
@@ -231,8 +263,40 @@ void ModelRenderer::drawLaneLines(QPainter &painter) {
 
   // lanelines
   for (int i = 0; i < std::size(lane_line_vertices); ++i) {
-    painter.setBrush(QColor::fromRgbF(1.0, 1.0, 1.0, std::clamp<float>(lane_line_probs[i], 0.0, 0.7)));
+    const bool ego_lane_boundary = i == 1 || i == 2;
+    const bool lane_change_active =
+      (lane_change_state == cereal::LaneChangeState::LANE_CHANGE_STARTING ||
+       lane_change_state == cereal::LaneChangeState::LANE_CHANGE_FINISHING) &&
+      lane_change_direction != cereal::LaneChangeDirection::NONE;
+    const bool between_current_and_target_lane =
+      lane_change_active &&
+      ((lane_change_direction == cereal::LaneChangeDirection::LEFT && i == 1) ||
+       (lane_change_direction == cereal::LaneChangeDirection::RIGHT && i == 2));
+    const bool target_lane_boundary =
+      lane_change_active && !between_current_and_target_lane &&
+      ((lane_change_direction == cereal::LaneChangeDirection::LEFT && (i == 0 || i == 1)) ||
+       (lane_change_direction == cereal::LaneChangeDirection::RIGHT && (i == 2 || i == 3)));
+
+    if (between_current_and_target_lane) {
+      continue;
+    }
+
+    if (target_lane_boundary) {
+      const float alpha = std::clamp<float>(0.22f + lane_line_probs[i] * 0.62f, 0.22f, 0.88f);
+      const QColor lane_glow = laneChangeMint(128);
+      painter.setPen(QPen(lane_glow, 9.0f, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+      painter.setBrush(QColor::fromRgbF(lane_glow.redF(), lane_glow.greenF(), lane_glow.blueF(), alpha));
+    } else if (lane_mode_active && ego_lane_boundary) {
+      const float alpha = std::clamp<float>(0.15f + lane_line_probs[i] * 0.65f, 0.15f, 0.8f);
+      const QColor lane_glow = QColor::fromRgbF(0.24f, 0.95f, 0.46f, std::clamp<float>(alpha * 0.5f, 0.16f, 0.34f));
+      painter.setPen(QPen(lane_glow, 10.0f, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+      painter.setBrush(QColor::fromRgbF(0.14f, 0.90f, 0.38f, alpha));
+    } else {
+      painter.setPen(Qt::NoPen);
+      painter.setBrush(QColor::fromRgbF(1.0, 1.0, 1.0, std::clamp<float>(lane_line_probs[i], 0.0, 0.7)));
+    }
     painter.drawPolygon(lane_line_vertices[i]);
+    painter.setPen(Qt::NoPen);
   }
 
   // road edges
@@ -248,6 +312,10 @@ void ModelRenderer::drawPath(QPainter &painter, const cereal::ModelDataV2::Reade
     bg.setColorAt(0.0f, lateralOnlyMint(110));
     bg.setColorAt(0.55f, lateralOnlyMint(84));
     bg.setColorAt(1.0f, lateralOnlyMint(8));
+  } else if (lane_mode_active) {
+    bg.setColorAt(0.0f, QColor(0xF6, 0xF8, 0xFB, 102));
+    bg.setColorAt(0.55f, QColor(0xF6, 0xF8, 0xFB, 58));
+    bg.setColorAt(1.0f, QColor(0xF6, 0xF8, 0xFB, 0));
   } else if (experimental_mode) {
     // The first half of track_vertices are the points for the right side of the path
     const auto &acceleration = model.getAcceleration().getX();
@@ -396,7 +464,7 @@ bool ModelRenderer::mapToScreen(float in_x, float in_y, float in_z, QPointF *out
 }
 
 void ModelRenderer::mapLineToPolygon(const cereal::XYZTData::Reader &line, float y_off, float z_off,
-                                     QPolygonF *pvd, int max_idx, bool allow_invert) {
+                                     QPolygonF *pvd, int max_idx, bool allow_invert, float center_y_off) {
   const auto line_x = line.getX(), line_y = line.getY(), line_z = line.getZ();
   QPointF left, right;
   pvd->clear();
@@ -404,8 +472,9 @@ void ModelRenderer::mapLineToPolygon(const cereal::XYZTData::Reader &line, float
     // highly negative x positions  are drawn above the frame and cause flickering, clip to zy plane of camera
     if (line_x[i] < 0) continue;
 
-    bool l = mapToScreen(line_x[i], line_y[i] - y_off, line_z[i] + z_off, &left);
-    bool r = mapToScreen(line_x[i], line_y[i] + y_off, line_z[i] + z_off, &right);
+    const float center_y = line_y[i] + center_y_off;
+    bool l = mapToScreen(line_x[i], center_y - y_off, line_z[i] + z_off, &left);
+    bool r = mapToScreen(line_x[i], center_y + y_off, line_z[i] + z_off, &right);
     if (l && r) {
       // For wider lines the drawn polygon will "invert" when going over a hill and cause artifacts
       if (!allow_invert && pvd->size() && left.y() > pvd->back().y()) {

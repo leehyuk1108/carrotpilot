@@ -592,10 +592,10 @@ EVENTS: dict[int, dict[str, Alert | AlertCallbackType]] = {
 
   EventName.laneChange: {
     ET.WARNING: Alert(
-      "Changing Lanes",
+      "",
       "",
       AlertStatus.normal, AlertSize.none,
-      Priority.LOW, VisualAlert.none, AudibleAlert.none, .1),
+      Priority.LOW, VisualAlert.none, AudibleAlert.none, .2),
   },
 
   EventName.steerSaturated: {
@@ -1029,7 +1029,7 @@ EVENTS: dict[int, dict[str, Alert | AlertCallbackType]] = {
      ET.WARNING: EngagementAlert(AudibleAlert.stopStop),
   },
   EventName.audioLaneChange: {
-     ET.WARNING: EngagementAlert(AudibleAlert.laneChange),
+     ET.WARNING: EngagementAlert(AudibleAlert.none),
   },
   EventName.audioTurn: {
      ET.WARNING: EngagementAlert(AudibleAlert.audioTurn),

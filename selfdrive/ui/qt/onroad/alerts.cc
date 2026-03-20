@@ -13,10 +13,15 @@ void OnroadAlerts::updateState(const UIState &s) {
   const bool selfdrive_engageable = selfdrive_state.getEngageable() || selfdrive_enabled;
   const bool was_resume_required = alert.type.contains("resumeRequired", Qt::CaseInsensitive);
   const bool is_resume_required = a.type.contains("resumeRequired", Qt::CaseInsensitive);
+  const bool is_lane_change_alert =
+    a.type.contains("laneChange", Qt::CaseInsensitive) &&
+    !a.type.contains("Blocked", Qt::CaseInsensitive) &&
+    !a.type.contains("preLaneChange", Qt::CaseInsensitive);
   const bool animate_special_alert =
     a.type.contains("fcw", Qt::CaseInsensitive) ||
     a.type.contains("aeb", Qt::CaseInsensitive) ||
     a.type.contains("ldw", Qt::CaseInsensitive) ||
+    is_lane_change_alert ||
     is_resume_required;
 
   if (is_resume_required && !was_resume_required) {
