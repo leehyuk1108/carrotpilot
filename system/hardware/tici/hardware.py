@@ -335,6 +335,8 @@ class Tici(HardwareBase):
 
   def set_screen_brightness(self, percentage):
     try:
+      if percentage > 0:
+        percentage = max(percentage, 10)
       with open("/sys/class/backlight/panel0-backlight/max_brightness") as f:
         max_brightness = float(f.read().strip())
 

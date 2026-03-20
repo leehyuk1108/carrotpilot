@@ -61,6 +61,9 @@ public:
   static void reboot() { std::system("sudo reboot"); }
   static void poweroff() { std::system("sudo poweroff"); }
   static void set_brightness(int percent) {
+    if (percent > 0) {
+      percent = std::max(percent, 10);
+    }
     float max = std::stof(util::read_file("/sys/class/backlight/panel0-backlight/max_brightness"));
     std::ofstream("/sys/class/backlight/panel0-backlight/brightness") << int(percent * (max / 100.0f)) << "\n";
   }

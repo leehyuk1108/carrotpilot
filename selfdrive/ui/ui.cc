@@ -21,6 +21,7 @@ constexpr float AUTO_BRIGHTNESS_EXPOSURE_MAX = 100.0f;
 constexpr float AUTO_BRIGHTNESS_EXPOSURE_GAMMA = 0.8f;
 constexpr float AUTO_BRIGHTNESS_DIM_FLOOR = 10.0f;
 constexpr float AUTO_BRIGHTNESS_DARK_THRESHOLD = 4.0f;
+constexpr int MIN_BACKLIGHT_BRIGHTNESS = 10;
 constexpr double STARTED_FALL_DEBOUNCE_S = 5.0;
 
 static void update_sockets(UIState *s) {
@@ -226,6 +227,8 @@ void Device::updateBrightness(const UIState &s) {
   int brightness = brightness_filter.update(clipped_brightness);
   if (!awake) {
     brightness = 0;
+  } else {
+    brightness = std::max(brightness, MIN_BACKLIGHT_BRIGHTNESS);
   }
 
   if (brightness != last_brightness) {
