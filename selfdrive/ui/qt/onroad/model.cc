@@ -272,16 +272,21 @@ void ModelRenderer::drawLaneLines(QPainter &painter) {
       lane_change_active &&
       ((lane_change_direction == cereal::LaneChangeDirection::LEFT && i == 1) ||
        (lane_change_direction == cereal::LaneChangeDirection::RIGHT && i == 2));
+    const bool current_lane_boundary =
+      lane_change_active &&
+      ((lane_change_direction == cereal::LaneChangeDirection::LEFT && i == 2) ||
+       (lane_change_direction == cereal::LaneChangeDirection::RIGHT && i == 1));
     const bool target_lane_boundary =
-      lane_change_active && !between_current_and_target_lane &&
-      ((lane_change_direction == cereal::LaneChangeDirection::LEFT && (i == 0 || i == 1)) ||
-       (lane_change_direction == cereal::LaneChangeDirection::RIGHT && (i == 2 || i == 3)));
+      lane_change_active &&
+      ((lane_change_direction == cereal::LaneChangeDirection::LEFT && i == 0) ||
+       (lane_change_direction == cereal::LaneChangeDirection::RIGHT && i == 3));
+    const bool lane_change_highlight = current_lane_boundary || target_lane_boundary;
 
     if (between_current_and_target_lane) {
       continue;
     }
 
-    if (target_lane_boundary) {
+    if (lane_change_highlight) {
       const float alpha = std::clamp<float>(0.22f + lane_line_probs[i] * 0.62f, 0.22f, 0.88f);
       const QColor lane_glow = laneChangeMint(128);
       painter.setPen(QPen(lane_glow, 9.0f, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));

@@ -44,7 +44,10 @@ if __name__ == "__main__":
   parser = argparse.ArgumentParser(description="Update translation files for UI",
                                    formatter_class=argparse.ArgumentDefaultsHelpFormatter)
   parser.add_argument("--vanish", action="store_true", help="Remove translations with source text no longer found")
+  parser.add_argument("--include-only", action="store_true",
+                      help="Only regenerate alerts_generated.h without touching tracked .ts files")
   args = parser.parse_args()
 
   generate_translations_include()
-  update_translations(args.vanish)
+  if not args.include_only:
+    update_translations(args.vanish)

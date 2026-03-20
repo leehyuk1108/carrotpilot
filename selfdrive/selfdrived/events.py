@@ -592,10 +592,10 @@ EVENTS: dict[int, dict[str, Alert | AlertCallbackType]] = {
 
   EventName.laneChange: {
     ET.WARNING: Alert(
-      "",
-      "",
-      AlertStatus.normal, AlertSize.none,
-      Priority.LOW, VisualAlert.none, AudibleAlert.none, .2),
+      "차선을 변경합니다",
+      "전후방 및 측면에 유의하세요",
+      AlertStatus.normal, AlertSize.mid,
+      Priority.LOW, VisualAlert.none, AudibleAlert.none, 1.5),
   },
 
   EventName.steerSaturated: {
