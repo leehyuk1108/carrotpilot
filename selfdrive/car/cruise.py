@@ -223,6 +223,7 @@ class VCruiseCarrot:
 
     self.useLaneLineSpeed = self.params.get_int("UseLaneLineSpeed")
     self.useLaneLineSpeedApply = self.useLaneLineSpeed
+    self.lane_mode_switch_state = 0
 
 
   @property
@@ -281,6 +282,7 @@ class VCruiseCarrot:
     self._add_log("")
     self.update_params(is_metric)
     self.frame += 1
+    self.lane_mode_switch_state = 0
     if CS.gearShifter != GearShifter.drive:
       self.autoCruiseControl_cancel_timer = 20 * 100  # 20 sec
     else:
@@ -574,6 +576,7 @@ class VCruiseCarrot:
       elif button_type == ButtonType.lfaButton:
         useLaneLineSpeed = max(1, self.useLaneLineSpeed)
         self.useLaneLineSpeedApply = useLaneLineSpeed if self.useLaneLineSpeedApply == 0 else 0
+        self.lane_mode_switch_state = 1 if self.useLaneLineSpeedApply > 0 else 2
 
       elif button_type == ButtonType.cancel:
         self._cruise_cancel_state = True

@@ -50,7 +50,6 @@ class CarSpecificEvents:
     self.mute_seatbelt = False
     self.vCruise_prev = 250
     self.carrotCruise_prev = False
-    self.use_lane_line_speed_prev = None
 
   def update_params(self):
     if self.frame % 100 == 0:
@@ -180,14 +179,10 @@ class CarSpecificEvents:
     if self.carrotCruise_prev != CS.carrotCruise:
       events.add(EventName.audioPrompt)
 
-    if self.use_lane_line_speed_prev is None:
-      self.use_lane_line_speed_prev = CS.useLaneLineSpeed
-    elif self.use_lane_line_speed_prev != CS.useLaneLineSpeed:
-      if CS.useLaneLineSpeed > 0:
-        events.add(EventName.laneModeSwitched)
-      else:
-        events.add(EventName.lanelessModeSwitched)
-      self.use_lane_line_speed_prev = CS.useLaneLineSpeed
+    if CS.laneModeSwitchState == 1:
+      events.add(EventName.laneModeSwitched)
+    elif CS.laneModeSwitchState == 2:
+      events.add(EventName.lanelessModeSwitched)
 
     self.carrotCruise_prev = CS.carrotCruise
     self.vCruise_prev = CS.vCruise
