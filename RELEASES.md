@@ -7,6 +7,7 @@ Version 1.0.2 (2026-03-22)
   * UTM preview에서 LaneMode / Laneless 전환 안내를 바로 확인할 수 있는 alert preview 훅 추가
 * LaneMode 전환 알림 안정화
   * LFA 길게 누름으로 LaneMode / Laneless가 바뀌는 바로 그 지점에서 안내 이벤트가 발생하도록 바꿔, 일부 상황에서 문구가 누락되던 문제를 줄임
+  * openpilot 비활성 상태에서도 LaneMode / Laneless 전환 MID 안내가 화면에 표시되도록 경고 표시 조건을 보강
 
 Version 1.0.1 (2026-03-21)
 ==========================

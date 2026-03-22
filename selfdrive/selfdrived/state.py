@@ -1,5 +1,5 @@
 from cereal import log
-from openpilot.selfdrive.selfdrived.events import Events, ET
+from openpilot.selfdrive.selfdrived.events import Events, ET, EventName
 from openpilot.common.realtime import DT_CTRL
 
 State = log.SelfdriveState.OpenpilotState
@@ -7,6 +7,10 @@ State = log.SelfdriveState.OpenpilotState
 SOFT_DISABLE_TIME = 3  # seconds
 ACTIVE_STATES = (State.enabled, State.softDisabling, State.overriding)
 ENABLED_STATES = (State.preEnabled, *ACTIVE_STATES)
+DISABLED_WARNING_EVENTS = {
+  EventName.laneModeSwitched,
+  EventName.lanelessModeSwitched,
+}
 
 class StateMachine:
   def __init__(self):
@@ -107,7 +111,6 @@ class StateMachine:
     # Check if openpilot is engaged and actuators are enabled
     enabled = self.state in ENABLED_STATES
     active = self.state in ACTIVE_STATES
-    if active:
+    if active or any(e in DISABLED_WARNING_EVENTS for e in events.names):
       self.current_alert_types.append(ET.WARNING)
     return enabled, active
-
