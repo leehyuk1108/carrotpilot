@@ -52,6 +52,14 @@ OnroadAlerts::Alert OnroadAlerts::getAlert(const SubMaster &sm, uint64_t started
     return {tr("전방 추돌 주의"), tr("전방 차량과 추돌 위험이 있습니다"),
             "fcwPreview", cereal::SelfdriveState::AlertSize::MID,
             cereal::SelfdriveState::AlertStatus::CRITICAL};
+  } else if (qEnvironmentVariableIntValue("LANE_MODE_SWITCHED_PREVIEW") == 1) {
+    return {tr("LANE 모드로 전환됩니다"), tr("차선을 따라 주행합니다"),
+            "laneModeSwitchedPreview", cereal::SelfdriveState::AlertSize::MID,
+            cereal::SelfdriveState::AlertStatus::NORMAL};
+  } else if (qEnvironmentVariableIntValue("LANELESS_MODE_SWITCHED_PREVIEW") == 1) {
+    return {tr("LANELESS 모드로 전환됩니다"), tr("차선에 의존하지 않고 주행합니다"),
+            "lanelessModeSwitchedPreview", cereal::SelfdriveState::AlertSize::MID,
+            cereal::SelfdriveState::AlertStatus::NORMAL};
   } else if (qEnvironmentVariableIntValue("LDW_PREVIEW") == 1) {
     return {tr("차선 이탈 감지됨"), tr("운전에 주의하세요"),
             "ldwPreview", cereal::SelfdriveState::AlertSize::MID,

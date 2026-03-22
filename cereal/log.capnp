@@ -153,6 +153,8 @@ struct OnroadEvent @0xc4fa6047f024e718 {
     audio0 @114;
 
     torqueNNLoad @118;
+    laneModeSwitched @119;
+    lanelessModeSwitched @120;
 
     soundsUnavailableDEPRECATED @47;
   }

@@ -1,3 +1,11 @@
+Version 1.0.2 (2026-03-22)
+==========================
+* LaneMode / Laneless 전환 안내
+  * LFA 버튼으로 LaneMode와 Laneless를 전환할 때 화면에 MID 안내 문구가 표시되도록 추가
+  * LANE 모드에서는 `차선을 따라 주행합니다`, LANELESS 모드에서는 `차선에 의존하지 않고 주행합니다` 문구가 나오도록 정리
+* Preview 검증 경로 보강
+  * UTM preview에서 LaneMode / Laneless 전환 안내를 바로 확인할 수 있는 alert preview 훅 추가
+
 Version 1.0.1 (2026-03-21)
 ==========================
 * Onroad UI 조정

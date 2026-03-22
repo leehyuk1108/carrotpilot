@@ -1004,6 +1004,22 @@ EVENTS: dict[int, dict[str, Alert | AlertCallbackType]] = {
     ET.WARNING: personality_changed_alert,
   },
 
+  EventName.laneModeSwitched: {
+    ET.WARNING: Alert(
+      "LANE 모드로 전환됩니다",
+      "차선을 따라 주행합니다",
+      AlertStatus.normal, AlertSize.mid,
+      Priority.LOW, VisualAlert.none, AudibleAlert.none, 1.5),
+  },
+
+  EventName.lanelessModeSwitched: {
+    ET.WARNING: Alert(
+      "LANELESS 모드로 전환됩니다",
+      "차선에 의존하지 않고 주행합니다",
+      AlertStatus.normal, AlertSize.mid,
+      Priority.LOW, VisualAlert.none, AudibleAlert.none, 1.5),
+  },
+
   EventName.softHold: {
     ET.WARNING: Alert(
       "SoftHold",
