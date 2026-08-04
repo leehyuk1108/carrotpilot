@@ -165,6 +165,15 @@ class TestGmAscmSafety(GmLongitudinalBase, TestGmSafetyBase):
     (0x2FF, 2, 4),
   )
 
+  CAMERA_RX_MSGS = (
+    (0x184, 0, 8),
+    (0x34A, 0, 5),
+    (0x1E1, 0, 7),
+    (0xF1, 0, 6),
+    (0x1C4, 0, 8),
+    (0xC9, 0, 8),
+  )
+
   def setUp(self):
     self.packer = CANPackerPanda("gm_global_a_powertrain_generated")
     self.packer_chassis = CANPackerPanda("gm_global_a_chassis")
@@ -177,11 +186,16 @@ class TestGmAscmSafety(GmLongitudinalBase, TestGmSafetyBase):
       self.assertTrue(self.safety.safety_rx_hook(make_msg(bus, addr, length)))
 
   def test_force_brake_c9_does_not_require_accelerator_pos(self):
-    self.safety.set_safety_hooks(CarParams.SafetyModel.gm, GMSafetyFlags.FORCE_BRAKE_C9)
+    safety_param = GMSafetyFlags.HW_CAM | GMSafetyFlags.HW_CAM_LONG | GMSafetyFlags.FORCE_BRAKE_C9
+    self.safety.set_safety_hooks(CarParams.SafetyModel.gm, safety_param)
     self.safety.init_tests()
 
-    self._feed_common_rx()
+    for addr, bus, length in self.CAMERA_RX_MSGS:
+      self.assertTrue(self.safety.safety_rx_hook(make_msg(bus, addr, length)))
     self.assertTrue(self.safety.safety_config_valid())
+
+    self.safety.set_controls_allowed(True)
+    self.assertTrue(self.safety.safety_tx_hook(make_msg(0, 0x315, 5)))
 
   def test_standard_ascm_still_requires_accelerator_pos(self):
     self._feed_common_rx()

@@ -17,7 +17,7 @@ class TestGMFingerprint:
     assert all(len(finger) for finger in fingerprints)
 
     # The camera can sometimes be communicating on startup
-    if car_model in CAMERA_ACC_CAR:
+    if car_model in CAMERA_ACC_CAR and car_model not in SASCM_CAR:
       for finger in fingerprints:
         for required_addr in (CAMERA_DIAGNOSTIC_ADDRESS, CAMERA_DIAGNOSTIC_ADDRESS + GM_RX_OFFSET):
           assert finger.get(required_addr) == 8, required_addr
@@ -33,10 +33,13 @@ class TestGmMalibuSascm:
     safety_param = car_params.safetyConfigs[0].safetyParam
 
     assert CAR.CHEVROLET_MALIBU_SASCM in SASCM_CAR
+    assert CAR.CHEVROLET_MALIBU_SASCM in CAMERA_ACC_CAR
     assert CAR.CHEVROLET_MALIBU_SASCM not in SDGM_CAR
-    assert car_params.networkLocation == CarParams.NetworkLocation.gateway
+    assert car_params.networkLocation == CarParams.NetworkLocation.fwdCamera
     assert car_params.openpilotLongitudinalControl
-    assert safety_param & GMSafetyFlags.HW_ASCM_LONG
+    assert safety_param & GMSafetyFlags.HW_CAM
+    assert safety_param & GMSafetyFlags.HW_CAM_LONG
+    assert not safety_param & GMSafetyFlags.HW_ASCM_LONG
     assert not safety_param & GMSafetyFlags.HW_SDGM
     assert safety_param & GMSafetyFlags.FORCE_BRAKE_C9
     assert car_params.flags & GMFlags.NO_ACCELERATOR_POS_MSG

@@ -23,6 +23,16 @@ const int GM_GAS_INTERCEPTOR_THRESHOLD = 595; // (675 + 355) / 2 ratio between o
              {0xBE, 0, 7, .ignore_checksum = true, .ignore_counter = true, .frequency = 10U},    /* Bolt EUV */ \
              {0xBE, 0, 8, .ignore_checksum = true, .ignore_counter = true, .frequency = 10U}}},  /* Escalade */ \
 
+// Camera-connected ASCM + SASCM retrofits receive the safety-critical messages on bus 0.
+// They report brake state on 0xC9, do not send 0xBE, and do not route SASCM 0x2FF to bus 2.
+#define GM_CAM_FORCE_BRAKE_C9_RX_CHECKS \
+    {.msg = {{0x184, 0, 8, .ignore_checksum = true, .ignore_counter = true, .frequency = 10U}, { 0 }, { 0 }}}, \
+    {.msg = {{0x34A, 0, 5, .ignore_checksum = true, .ignore_counter = true, .frequency = 10U}, { 0 }, { 0 }}}, \
+    {.msg = {{0x1E1, 0, 7, .ignore_checksum = true, .ignore_counter = true, .frequency = 10U}, { 0 }, { 0 }}}, \
+    {.msg = {{0xF1, 0, 6, .ignore_checksum = true, .ignore_counter = true, .frequency = 10U}, { 0 }, { 0 }}}, \
+    {.msg = {{0x1C4, 0, 8, .ignore_checksum = true, .ignore_counter = true, .frequency = 10U}, { 0 }, { 0 }}}, \
+    {.msg = {{0xC9, 0, 8, .ignore_checksum = true, .ignore_counter = true, .frequency = 10U}, { 0 }, { 0 }}}, \
+
 static const LongitudinalLimits *gm_long_limits;
 
 enum {
@@ -268,7 +278,7 @@ static safety_config gm_init(uint16_t param) {
     .max_brake = 400,
   };
 
-  static const CanMsg GM_CAM_LONG_TX_MSGS[] = {{0x180, 0, 4}, {0x2CB, 0, 8}, {0x370, 0, 6}, {0x200, 0, 6}, {0x1E1, 0, 7},  // pt bus
+  static const CanMsg GM_CAM_LONG_TX_MSGS[] = {{0x180, 0, 4}, {0x2CB, 0, 8}, {0x370, 0, 6}, {0x200, 0, 6}, {0x1E1, 0, 7}, {0x315, 0, 5},  // pt bus
                                                {0x184, 2, 8}, {0x315, 2, 5}};  // camera bus
 
   // TODO: do checksum and counter checks. Add correct timestep, 0.1s for now.
@@ -280,6 +290,10 @@ static safety_config gm_init(uint16_t param) {
   // Some GM vehicles report brake state on 0xC9 and do not send 0xBE.
   static RxCheck gm_force_brake_c9_rx_checks[] = {
     GM_COMMON_RX_CHECKS
+  };
+
+  static RxCheck gm_cam_force_brake_c9_rx_checks[] = {
+    GM_CAM_FORCE_BRAKE_C9_RX_CHECKS
   };
 
   static RxCheck gm_ev_rx_checks[] = {
@@ -351,7 +365,9 @@ static safety_config gm_init(uint16_t param) {
   }
 
   const bool gm_ev = GET_FLAG(param, GM_PARAM_EV);
-  if (gm_force_brake_c9) {
+  if ((gm_hw == GM_CAM) && gm_force_brake_c9) {
+    SET_RX_CHECKS(gm_cam_force_brake_c9_rx_checks, ret);
+  } else if (gm_force_brake_c9) {
     SET_RX_CHECKS(gm_force_brake_c9_rx_checks, ret);
   } else if (gm_hw != GM_SDGM) {
     if (enable_gas_interceptor) {
