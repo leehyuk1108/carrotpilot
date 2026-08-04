@@ -348,5 +348,8 @@ class CarInterface(CarInterfaceBase):
       ret.flags |= GMFlags.TPMS_MSG.value
     if ACCELERATOR_POS_MSG not in fingerprint[CanBus.POWERTRAIN]:
       ret.flags |= GMFlags.NO_ACCELERATOR_POS_MSG.value
+      if candidate in SASCM_CAR:
+        ret.safetyConfigs[0].safetyParam |= GMSafetyFlags.FORCE_BRAKE_C9.value
+        ret.flags |= GMFlags.FORCE_BRAKE_C9.value
 
     return ret

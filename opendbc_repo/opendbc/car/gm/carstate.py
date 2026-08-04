@@ -142,13 +142,13 @@ class CarState(CarStateBase):
       ret.brake = pt_cp.vl["EBCMBrakePedalPosition"]["BrakePedalPosition"] / 0xd0
     else:
       ret.brake = pt_cp.vl["ECMAcceleratorPos"]["BrakePedalPos"]
-    if self.CP.networkLocation == NetworkLocation.fwdCamera:
+    use_c9_brake = bool(self.CP.flags & GMFlags.FORCE_BRAKE_C9.value)
+    if use_c9_brake or self.CP.networkLocation == NetworkLocation.fwdCamera:
       ret.brakePressed = pt_cp.vl["ECMEngineStatus"]["BrakePressed"] != 0
     else:
       ret.brakePressed = ret.brake >= 8
     # Kans: carController용 brake(self.driverBrake)
-    # 제어용 브레이크는 항상 BE 기준만 사용
-    self.driverBrake = ret.brake >= 8
+    self.driverBrake = ret.brakePressed if use_c9_brake else ret.brake >= 8
 
     # Regen braking is braking
     if self.CP.transmissionType == TransmissionType.direct:
@@ -340,4 +340,3 @@ class CarState(CarStateBase):
       Bus.cam: CANParser(DBC[CP.carFingerprint][Bus.pt], cam_messages, 2),
       Bus.loopback: CANParser(DBC[CP.carFingerprint][Bus.pt], loopback_messages, 128),
     }
-

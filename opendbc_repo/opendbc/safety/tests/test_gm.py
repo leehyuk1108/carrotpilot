@@ -5,7 +5,7 @@ from opendbc.car.gm.values import GMSafetyFlags
 from opendbc.car.structs import CarParams
 from opendbc.safety.tests.libsafety import libsafety_py
 import opendbc.safety.tests.common as common
-from opendbc.safety.tests.common import CANPackerPanda
+from opendbc.safety.tests.common import CANPackerPanda, make_msg
 
 
 class Buttons:
@@ -155,12 +155,40 @@ class TestGmAscmSafety(GmLongitudinalBase, TestGmSafetyBase):
   MIN_GAS = 1404 # maximum regen
   INACTIVE_GAS = 1404
 
+  COMMON_RX_MSGS = (
+    (0x184, 0, 8),
+    (0x34A, 0, 5),
+    (0x1E1, 0, 7),
+    (0xF1, 0, 6),
+    (0x1C4, 0, 8),
+    (0xC9, 0, 8),
+    (0x2FF, 2, 4),
+  )
+
   def setUp(self):
     self.packer = CANPackerPanda("gm_global_a_powertrain_generated")
     self.packer_chassis = CANPackerPanda("gm_global_a_chassis")
     self.safety = libsafety_py.libsafety
     self.safety.set_safety_hooks(CarParams.SafetyModel.gm, 0)
     self.safety.init_tests()
+
+  def _feed_common_rx(self):
+    for addr, bus, length in self.COMMON_RX_MSGS:
+      self.assertTrue(self.safety.safety_rx_hook(make_msg(bus, addr, length)))
+
+  def test_force_brake_c9_does_not_require_accelerator_pos(self):
+    self.safety.set_safety_hooks(CarParams.SafetyModel.gm, GMSafetyFlags.FORCE_BRAKE_C9)
+    self.safety.init_tests()
+
+    self._feed_common_rx()
+    self.assertTrue(self.safety.safety_config_valid())
+
+  def test_standard_ascm_still_requires_accelerator_pos(self):
+    self._feed_common_rx()
+    self.assertFalse(self.safety.safety_config_valid())
+
+    self.assertTrue(self.safety.safety_rx_hook(make_msg(0, 0xBE, 6)))
+    self.assertTrue(self.safety.safety_config_valid())
 
 
 class TestGmCameraSafetyBase(TestGmSafetyBase):

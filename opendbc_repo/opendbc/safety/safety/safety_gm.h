@@ -277,6 +277,11 @@ static safety_config gm_init(uint16_t param) {
     GM_ACC_RX_CHECKS
   };
 
+  // Some GM vehicles report brake state on 0xC9 and do not send 0xBE.
+  static RxCheck gm_force_brake_c9_rx_checks[] = {
+    GM_COMMON_RX_CHECKS
+  };
+
   static RxCheck gm_ev_rx_checks[] = {
     GM_COMMON_RX_CHECKS
     GM_ACC_RX_CHECKS
@@ -346,7 +351,9 @@ static safety_config gm_init(uint16_t param) {
   }
 
   const bool gm_ev = GET_FLAG(param, GM_PARAM_EV);
-  if (gm_hw != GM_SDGM) {
+  if (gm_force_brake_c9) {
+    SET_RX_CHECKS(gm_force_brake_c9_rx_checks, ret);
+  } else if (gm_hw != GM_SDGM) {
     if (enable_gas_interceptor) {
       SET_RX_CHECKS(gm_pedal_rx_checks, ret);
     } else if (!gm_has_acc && gm_ev) {

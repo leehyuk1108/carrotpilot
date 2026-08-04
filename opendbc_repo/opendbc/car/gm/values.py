@@ -152,8 +152,8 @@ class CAR(Platforms):
     [GMCarDocs("Chevrolet Malibu Premier 2017")],
     GMCarSpecs(mass=1496, wheelbase=2.83, steerRatio=15.8, centerToFrontRatio=0.4),
   )
-  CHEVROLET_MALIBU_SASCM = GMSDGMPlatformConfig(
-    [GMCarDocs("Chevrolet Malibu 2019 SAscm")],
+  CHEVROLET_MALIBU_SASCM = GMASCMPlatformConfig(
+    [GMCarDocs("Chevrolet Malibu 2019 ASCM + SASCM")],
     GMCarSpecs(mass=1496, wheelbase=2.83, steerRatio=15.8, centerToFrontRatio=0.4),
   )
   GMC_ACADIA = GMASCMPlatformConfig(
@@ -321,8 +321,9 @@ FW_QUERY_CONFIG = FwQueryConfig(
 EV_CAR = {CAR.CHEVROLET_VOLT, CAR.CHEVROLET_VOLT_2019, CAR.CHEVROLET_BOLT_EUV, CAR.CHEVROLET_VOLT_ASCM}
 
 # We're integrated at the Safety Data Gateway Module on these cars
-SDGM_CAR = {CAR.CADILLAC_XT4, CAR.CADILLAC_XT6, CAR.CHEVROLET_TRAVERSE, CAR.BUICK_BABYENCLAVE, CAR.CHEVROLET_VOLT_2019, CAR.CHEVROLET_MALIBU_SASCM}
-SASCM_CAR = {}
+SDGM_CAR = {CAR.CADILLAC_XT4, CAR.CADILLAC_XT6, CAR.CHEVROLET_TRAVERSE, CAR.BUICK_BABYENCLAVE, CAR.CHEVROLET_VOLT_2019}
+# Vehicles using ASCM longitudinal control with a SASCM steering retrofit
+SASCM_CAR = {CAR.CHEVROLET_MALIBU_SASCM}
 ASCM_INT = {CAR.CHEVROLET_VOLT_ASCM, CAR.GMC_ACADIA_ASCM}
 
 # We're integrated at the camera with VOACC on these cars (instead of ASCM w/ OBD-II harness)
