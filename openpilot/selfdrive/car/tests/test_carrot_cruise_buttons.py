@@ -2,6 +2,7 @@ import pytest
 
 from openpilot.cereal import car
 from openpilot.selfdrive.car.cruise import ButtonType, VCruiseCarrot
+from opendbc.car.gm.carstate import create_stock_long_cancel_button_events
 
 
 def make_cruise_helper(button_kph, cruise_button_mode, carrot_cruise_active, cruise_enabled,
@@ -31,6 +32,43 @@ def make_cruise_helper(button_kph, cruise_button_mode, carrot_cruise_active, cru
   CS = car.CarState(cruiseState={"standstill": False})
   CC = car.CarControl(enabled=cruise_enabled)
   return helper, CS, CC
+
+
+def make_button_tracker():
+  helper = VCruiseCarrot.__new__(VCruiseCarrot)
+  helper.button_cnt = 0
+  helper.button_prev = ButtonType.unknown
+  helper.button_long_time = 40
+  helper.button_big_step = False
+  helper.long_pressed = False
+  helper._cruise_speed_unit_basic = 1
+  helper._cruise_speed_unit = 10
+  helper._cruise_button_mode = 2
+  helper._cruise_button_long_delay = 40
+  helper.is_metric = True
+  return helper
+
+
+def test_stock_long_cancel_does_not_latch_the_next_cruise_button():
+  helper = make_button_tracker()
+  CS = car.CarState(buttonEvents=create_stock_long_cancel_button_events())
+
+  _, button_type, long_pressed = helper._prepare_buttons(CS, 80)
+  assert button_type == ButtonType.cancel
+  assert not long_pressed
+  assert helper.button_cnt == 0
+
+  CS.buttonEvents = [car.CarState.ButtonEvent(type=ButtonType.accelCruise, pressed=True)]
+  helper._prepare_buttons(CS, 80)
+  assert helper.button_prev == ButtonType.accelCruise
+  assert helper.button_cnt == 1
+
+  CS.buttonEvents = [car.CarState.ButtonEvent(type=ButtonType.accelCruise, pressed=False)]
+  button_kph, button_type, long_pressed = helper._prepare_buttons(CS, 80)
+  assert button_type == ButtonType.accelCruise
+  assert button_kph == 81
+  assert not long_pressed
+  assert helper.button_cnt == 0
 
 
 @pytest.mark.parametrize("cruise_button_mode, button_kph", [(0, 81), (2, 81)])
