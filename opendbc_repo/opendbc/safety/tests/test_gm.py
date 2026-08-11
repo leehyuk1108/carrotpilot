@@ -164,8 +164,6 @@ class TestGmAscmSafety(GmLongitudinalBase, TestGmSafetyBase):
 
 
 class TestGmCameraSafetyBase(TestGmSafetyBase):
-
-
   @classmethod
   def setUpClass(cls):
     if cls.__name__ == "TestGmCameraSafetyBase":
@@ -222,6 +220,24 @@ class TestGmCameraLongitudinalSafety(GmLongitudinalBase, TestGmCameraSafetyBase)
     self.safety = libsafety_py.libsafety
     self.safety.set_safety_hooks(CarParams.SafetyModel.gm, GMSafetyFlags.HW_CAM | GMSafetyFlags.HW_CAM_LONG)
     self.safety.init_tests()
+
+  def test_driver_gas_allows_inactive_command_group(self):
+    self.safety.set_controls_allowed(True)
+    self.safety.set_alternative_experience(common.ALTERNATIVE_EXPERIENCE.DISABLE_DISENGAGE_ON_GAS)
+    self._rx(self._user_gas_msg(1))
+
+    gas = self.packer.make_can_msg_panda("ASCMGasRegenCmd", 0, {
+      "GasRegenCmd": -500,
+      "GasRegenCmdActive": 1,
+    })
+    brake = self.packer_chassis.make_can_msg_panda("EBCMFrictionBrakeCmd", self.BRAKE_BUS, {
+      "FrictionBrakeCmd": 0,
+    })
+
+    self.assertTrue(self.safety.get_controls_allowed())
+    self.assertFalse(self.safety.get_longitudinal_allowed())
+    self.assertTrue(self._tx(gas))
+    self.assertTrue(self._tx(brake))
 
 
 if __name__ == "__main__":

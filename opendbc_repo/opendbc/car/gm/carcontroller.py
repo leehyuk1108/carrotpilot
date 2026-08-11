@@ -21,6 +21,7 @@ from openpilot.selfdrive.car.cruise import VCruiseCarrot
 VisualAlert = structs.CarControl.HUDControl.VisualAlert
 NetworkLocation = structs.CarParams.NetworkLocation
 LongCtrlState = structs.CarControl.Actuators.LongControlState
+GearShifter = structs.CarState.GearShifter
 
 # Camera cancels up to 0.1s after brake is pressed, ECM allows 0.5s
 CAMERA_CANCEL_DELAY_FRAMES = 10
@@ -214,9 +215,12 @@ class CarController(CarControllerBase):
             self.last_button_frame = self.frame
             can_sends.append(gmcan.create_buttons(self.packer_pt, CanBus.POWERTRAIN, (CS.buttons_counter + 1) % 4, CruiseButtons.DECEL_SET))
         
-      # Gas/regen, brakes, and UI commands - all at 25Hz
-      if self.frame % 4 == 0:
-      # GM: softHold
+      # Gas/regen, brakes, and UI commands - all at 25Hz. The 2021-22
+      # Trailblazer changes the 0x2CB counter phase between cold/inactive and
+      # active ACC states, so follow that stock command rather than ASCM_2CD.
+      longitudinal_command_due, idx = gmcan.get_longitudinal_command_timing(self.CP, CS, self.frame)
+      if longitudinal_command_due:
+        # GM: softHold
         stopping = actuators.longControlState == LongCtrlState.stopping or CS.out.softHoldActive > 0
 
         # Pitch compensated acceleration;
@@ -263,8 +267,6 @@ class CarController(CarControllerBase):
           press_regen_paddle = False
           self.apply_gas = self.params.INACTIVE_REGEN
 
-        idx = (self.frame // 4) % 4
-
         if self.CP.flags & GMFlags.CC_LONG.value:
           if CC.longActive and CS.out.vEgo > self.CP.minEnableSpeed:
             # Using extend instead of append since the message is only sent intermittently
@@ -294,6 +296,15 @@ class CarController(CarControllerBase):
           else:
             acc_engaged = CC.enabled
 
+          self.apply_gas, self.apply_brake, at_full_stop, near_stop = gmcan.apply_driver_gas_override(
+            self.CP.carFingerprint, CS.out.gasPressed, self.params.INACTIVE_REGEN,
+            self.apply_gas, self.apply_brake, at_full_stop, near_stop,
+          )
+          self.apply_gas, self.apply_brake, at_full_stop, near_stop, acc_engaged = gmcan.apply_stock_longitudinal_gate(
+            self.CP.carFingerprint, CS.cam_stock_long_active, self.params.INACTIVE_REGEN,
+            self.apply_gas, self.apply_brake, at_full_stop, near_stop, acc_engaged,
+          )
+
           send_gas = self.apply_gas
           if self.traverse_long:
             send_gas, self.apply_brake, at_full_stop, acc_engaged = self.auto_resume.update(
@@ -308,7 +319,8 @@ class CarController(CarControllerBase):
               self.last_button_frame = self.frame
               can_sends.append(gmcan.create_buttons(self.packer_pt, CanBus.POWERTRAIN, (CS.buttons_counter + 1) % 4, CruiseButtons.RES_ACCEL))
           # GasRegenCmdActive needs to be 1 to avoid cruise faults. It describes the ACC state, not actuation
-          can_sends.append(gmcan.create_gas_regen_command(self.packer_pt, CanBus.POWERTRAIN, send_gas, idx, acc_engaged, at_full_stop))
+          can_sends.append(gmcan.create_gas_regen_command(self.packer_pt, CanBus.POWERTRAIN, send_gas, idx,
+                                                          acc_engaged, at_full_stop, self.CP.carFingerprint))
           if manual_brake:
             self.apply_brake = manual_brake
             near_stop, at_full_stop = True, False
@@ -322,8 +334,21 @@ class CarController(CarControllerBase):
           if self.traverse_sdgm_long:
             # Request up to three display bars even in standby, without asserting ACC active.
             dashboard_gap_level = min(hud_control.leadDistanceBars, 3) if CS.out.canValid and CS.out.cruiseState.available else 0
-          can_sends.append(gmcan.create_acc_dashboard_command(self.packer_pt, CanBus.POWERTRAIN, CC.enabled,
-                                                              dashboard_speed_kph, hud_control, send_fcw, gap_level=dashboard_gap_level))
+          is_trailblazer = self.CP.carFingerprint == CAR.CHEVROLET_TRAILBLAZER
+          stock_acc_status = CS.cam_acc_status if is_trailblazer else None
+          # Reverse/park and a stock ACC veto must retain the Trailblazer
+          # camera state instead of reasserting ACCCmdActive from CC.enabled.
+          dashboard_enabled = gmcan.get_acc_dashboard_enabled(
+            self.CP.carFingerprint, CC.enabled, CS.out.gearShifter == GearShifter.drive,
+            CS.cam_stock_long_active, stock_acc_status,
+          )
+
+          # Do not emit the generic invalid Trailblazer state during startup;
+          # wait at most one camera cycle for a stock 0x370 template.
+          if not is_trailblazer or stock_acc_status is not None:
+            can_sends.append(gmcan.create_acc_dashboard_command(self.packer_pt, CanBus.POWERTRAIN, dashboard_enabled,
+                                                                dashboard_speed_kph, hud_control, send_fcw,
+                                                                stock_acc_status, gap_level=dashboard_gap_level))
       else:
         # to keep accel steady for logs when not sending gas
         accel += self.accel_g
