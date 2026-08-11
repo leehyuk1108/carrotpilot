@@ -1,7 +1,67 @@
-﻿from opendbc.car import DT_CTRL
+﻿from opendbc.car import DT_CTRL, structs
 from opendbc.car.can_definitions import CanData
 from opendbc.car.gm.values import CAR, CruiseButtons, CanBus
 from opendbc.car.common.conversions import Conversions as CV
+
+NetworkLocation = structs.CarParams.NetworkLocation
+
+
+def is_trailblazer_camera_longitudinal(CP):
+  return (CP.openpilotLongitudinalControl and
+          CP.carFingerprint == CAR.CHEVROLET_TRAILBLAZER and
+          CP.networkLocation == NetworkLocation.fwdCamera)
+
+
+def get_longitudinal_sync_messages(CP):
+  if is_trailblazer_camera_longitudinal(CP):
+    # These are synchronization references, not platform-wide CAN validity
+    # requirements. A slow camera startup must not invalidate the whole car.
+    return [("ASCMGasRegenCmd", float('nan')), ("ASCMActiveCruiseControlStatus", float('nan'))]
+  return []
+
+
+def get_longitudinal_command_timing(CP, CS, frame):
+  if is_trailblazer_camera_longitudinal(CP):
+    # The stock command counter can lag ASCM_2CD by one cycle during a cold
+    # start, then align with it after ACC becomes active. Follow the actual
+    # stock 0x2CB command so both phases are handled without guessing.
+    stock_references_ready = (
+      CS.cam_ascm_2cb_counter_ts_nanos != 0 and
+      CS.cam_stock_long_active is not None and
+      CS.cam_acc_status is not None
+    )
+    if not stock_references_ready:
+      return False, 0
+    return CS.cam_ascm_2cb_counter_updated, CS.cam_ascm_2cb_counter
+  return frame % 4 == 0, (frame // 4) % 4
+
+
+def apply_driver_gas_override(car_fingerprint, gas_pressed, inactive_regen, apply_gas, apply_brake,
+                              at_full_stop, near_stop):
+  # The 2021-22 Trailblazer can sample the accelerator before controls has
+  # cleared longActive. Emit a complete inactive command set during that
+  # transition so Panda does not drop a counter-matched 0x2CB/0x315 pair.
+  if car_fingerprint == CAR.CHEVROLET_TRAILBLAZER and gas_pressed:
+    return inactive_regen, 0, False, False
+  return apply_gas, apply_brake, at_full_stop, near_stop
+
+
+def apply_stock_longitudinal_gate(car_fingerprint, stock_long_active, inactive_regen, apply_gas, apply_brake,
+                                  at_full_stop, near_stop, acc_engaged):
+  # The Trailblazer's camera can revoke longitudinal authority before the ECM
+  # cruise state changes. Stop actuation on that same stock command cycle so
+  # the EBCM never sees an active replacement after the camera has gone idle.
+  if car_fingerprint == CAR.CHEVROLET_TRAILBLAZER and stock_long_active is not True:
+    return inactive_regen, 0, False, False, False
+  return apply_gas, apply_brake, at_full_stop, near_stop, acc_engaged
+
+
+def get_acc_dashboard_enabled(car_fingerprint, enabled, in_drive, stock_long_active, stock_acc_status):
+  if car_fingerprint == CAR.CHEVROLET_TRAILBLAZER:
+    return (enabled and in_drive and stock_long_active is True and stock_acc_status is not None and
+            bool(stock_acc_status["ACCCmdActive"]))
+  return enabled
+
 
 # GM: AutoResume: brake signal to CAN
 def create_brake_command(packer, bus, apply_brake, idx):
@@ -68,7 +128,8 @@ def create_adas_keepalive(bus):
   return [CanData(0x409, dat, bus), CanData(0x40a, dat, bus)]
 
 
-def create_gas_regen_command(packer, bus, throttle, idx, enabled, at_full_stop):
+def create_gas_regen_command(packer, bus, throttle, idx, enabled, at_full_stop, car_fingerprint=None):
+  """Create 0x2CB, selecting the stock-verified checksum only for Trailblazer."""
   values = {
     "GasRegenCmdActive": enabled,
     "RollingCounter": idx,
@@ -78,10 +139,16 @@ def create_gas_regen_command(packer, bus, throttle, idx, enabled, at_full_stop):
   }
 
   dat = packer.make_can_msg("ASCMGasRegenCmd", bus, values)[1]
-  values["GasRegenChecksum"] = ((1 - enabled) << 24) | \
-                               (((0xff - dat[1]) & 0xff) << 16) | \
-                               (((0xff - dat[2]) & 0xff) << 8) | \
-                               ((0x100 - dat[3] - idx) & 0xff)
+  if car_fingerprint == CAR.CHEVROLET_TRAILBLAZER:
+    # Captured 2021-22 Trailblazer frames use one 24-bit subtraction, with
+    # carry/borrow across bytes. Other GM platforms retain the established
+    # byte-wise checksum until their stock frames prove the same requirement.
+    checksum = (0x1000000 - int.from_bytes(dat[1:4], "big") - idx) & 0xFFFFFF
+  else:
+    checksum = (((0xff - dat[1]) & 0xff) << 16) | \
+               (((0xff - dat[2]) & 0xff) << 8) | \
+               ((0x100 - dat[3] - idx) & 0xff)
+  values["GasRegenChecksum"] = ((1 - enabled) << 24) | checksum
 
   return packer.make_can_msg("ASCMGasRegenCmd", bus, values)
 
@@ -117,19 +184,33 @@ def create_friction_brake_command(packer, bus, apply_brake, idx, enabled, near_s
   return packer.make_can_msg("EBCMFrictionBrakeCmd", bus, values)
 
 
-def create_acc_dashboard_command(packer, bus, enabled, target_speed_kph, hud_control, fcw):
+def create_acc_dashboard_command(packer, bus, enabled, target_speed_kph, hud_control, fcw, stock_acc_status=None):
   target_speed = min(target_speed_kph, 255)
 
-  values = {
-    "ACCAlwaysOne": 1,
-    "ACCResumeButton": 0,
+  if stock_acc_status is not None:
+    values = dict(stock_acc_status)
+
+    # When longitudinal control is inactive, forward the exact stock state.
+    # In particular, do not replace the Trailblazer's valid (2, 0, 0)
+    # ACCCruiseState/constant-bit tuple with openpilot's generic (0, 1, 1).
+    if not enabled:
+      return packer.make_can_msg("ASCMActiveCruiseControlStatus", bus, values)
+  else:
+    values = {
+      "ACCAlwaysOne": 1,
+      "ACCResumeButton": 0,
+      "ACCAlwaysOne2": 1,
+    }
+
+  # Preserve the stock protocol state while replacing only the fields needed
+  # for openpilot's active longitudinal-control display.
+  values.update({
     "ACCSpeedSetpoint": target_speed,
     "ACCGapLevel": hud_control.leadDistanceBars * enabled,  # 3 "far", 0 "inactive"
     "ACCCmdActive": enabled,
-    "ACCAlwaysOne2": 1,
     "ACCLeadCar": hud_control.leadVisible,
-    "FCWAlert": 0x3 if fcw else 0
-  }
+    "FCWAlert": 0x3 if fcw else 0,
+  })
 
   return packer.make_can_msg("ASCMActiveCruiseControlStatus", bus, values)
 

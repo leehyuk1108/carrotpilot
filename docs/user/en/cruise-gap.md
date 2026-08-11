@@ -287,6 +287,18 @@ For base 50 and ATC 100, the turn section uses about -1.00 m/s². For base 100 a
 
 ATC distance is carried by the internal `carrotMan` service message. That is an internal service name and does not indicate support for the former CarrotMan app or CarrotLink; neither is currently supported.
 
+## Vehicle-specific driver accelerator override
+
+On 2021–22 Chevrolet Trailblazers using openpilot longitudinal control, pressing the accelerator changes the gas/regen and friction-brake commands to their inactive values in the same CAN cycle. ACC state and the stock rolling counter remain continuous, so the longitudinal message group is not skipped during the driver-override transition. This does not relax the safety limits or change command values on other GM platforms.
+
+The 24-bit gas/regen checksum calculation verified from stock captures is also limited to this Trailblazer. Other GM platforms retain their existing checksum and transmit schedule.
+
+On this generation, the stock `0x2CB` gas/regen counter can lag the auxiliary `0x2CD` counter by one cycle immediately after a cold start. openpilot now follows the arrival cycle and counter of the actual stock `0x2CB` command instead of estimating its phase. If the stock `0x2CB` and `0x370` references have not arrived during startup, openpilot waits rather than synthesizing a longitudinal command. Delayed synchronization references alone do not invalidate the vehicle's complete camera CAN parser.
+
+If the stock camera revokes longitudinal authority while driving by setting `GasRegenCmdActive=0` or `ACCCmdActive=0`, openpilot neutralizes its command in the same cycle: gas/regen `-500`, friction brake `0`, and the stop-state bits cleared, followed by disengagement. In simple terms, it prevents openpilot from sending one or two more command envelopes after stock ACC has already said it will no longer accept them. This gate applies only to the 2021–22 Trailblazer openpilot-longitudinal path.
+
+This authority loss is represented internally as a momentary cancel-button click. The synthetic press and release travel together in the same vehicle-state update, so the cruise-button tracker cannot mistake the event for a cancel button that remains held. A later `SET/-` or `RES/+` engagement can therefore restore normal set-speed button processing and lateral permission.
+
 ## Quick diagnostic order
 
 1. Confirm that openpilot actually controls acceleration and braking on the vehicle.
@@ -307,3 +319,4 @@ Related: [Understanding Settings](settings.md) · [Tuning introduction](https://
 - `openpilot/selfdrive/controls/lib/longcontrol.py`
 - `openpilot/selfdrive/controls/radard.py`
 - `opendbc_repo/opendbc/car/hyundai/carcontroller.py`
+- `opendbc_repo/opendbc/car/gm/carcontroller.py`

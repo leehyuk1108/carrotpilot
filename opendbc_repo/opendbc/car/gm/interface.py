@@ -283,6 +283,11 @@ class CarInterface(CarInterfaceBase):
 
     elif candidate in (CAR.CHEVROLET_TRAILBLAZER, CAR.CHEVROLET_TRAILBLAZER_CC):
       ret.steerActuatorDelay = 0.2
+      # The Trailblazer ECM faults if camera-long is initially engaged below
+      # 5 km/h without sufficient brake input. GM's event handling still
+      # permits engagement at a true standstill while the brake is held.
+      if candidate == CAR.CHEVROLET_TRAILBLAZER and ret.openpilotLongitudinalControl:
+        ret.minEnableSpeed = 5 * CV.KPH_TO_MS
       CarInterfaceBase.configure_torque_tune(candidate, ret.lateralTuning)
 
     elif candidate in (CAR.CHEVROLET_SUBURBAN, CAR.CHEVROLET_SUBURBAN_CC):

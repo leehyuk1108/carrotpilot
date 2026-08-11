@@ -190,6 +190,21 @@
       ]
     },
     {
+      "id": "gm-vehicle-integration",
+      "description": "GM vehicle CAN compatibility and driver-control inputs",
+      "code_paths": [
+        "opendbc_repo/opendbc/car/gm/**",
+        "opendbc_repo/opendbc/safety/safety/safety_gm.h",
+        "opendbc_repo/opendbc/safety/tests/test_gm.py"
+      ],
+      "doc_sets": [
+        [
+          "docs/user/ko/cruise-gap.md",
+          "docs/user/en/cruise-gap.md"
+        ]
+      ]
+    },
+    {
       "id": "tesla-vehicle-integration",
       "description": "Tesla vehicle CAN compatibility and driver-control inputs",
       "code_paths": [

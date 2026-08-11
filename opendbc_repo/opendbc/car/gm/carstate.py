@@ -5,8 +5,9 @@ from openpilot.common.params import Params #kans
 import numpy as np
 from opendbc.car import Bus, create_button_events, structs
 from opendbc.car.common.conversions import Conversions as CV
-from opendbc.car.interfaces import CarStateBase
+from opendbc.car.gm import gmcan
 from opendbc.car.gm.values import DBC, AccState, CruiseButtons, STEER_THRESHOLD, CAR, DBC, CanBus, GMFlags, CC_ONLY_CAR, CAMERA_ACC_CAR
+from opendbc.car.interfaces import CarStateBase
 
 ButtonType = structs.CarState.ButtonEvent.Type
 TransmissionType = structs.CarParams.TransmissionType
@@ -17,6 +18,18 @@ STANDSTILL_THRESHOLD = 10 * 0.0311 * CV.KPH_TO_MS
 BUTTONS_DICT = {CruiseButtons.RES_ACCEL: ButtonType.accelCruise, CruiseButtons.DECEL_SET: ButtonType.decelCruise,
                 CruiseButtons.MAIN: ButtonType.mainCruise, CruiseButtons.CANCEL: ButtonType.cancel,
                 CruiseButtons.GAP_DIST: ButtonType.gapAdjustCruise}
+
+
+def create_stock_long_cancel_button_events() -> list[structs.CarState.ButtonEvent]:
+  """Create an atomic synthetic cancel click for a stock ACC authority loss."""
+  # VCruiseCarrot tracks button duration from matching press/release edges. A
+  # press-only synthetic cancel latches that tracker forever, is eventually
+  # interpreted as a long press, and prevents later SET/RES button handling.
+  # Keep both edges in one carState message so they cannot be lost separately.
+  return [
+    structs.CarState.ButtonEvent(pressed=True, type=ButtonType.cancel),
+    structs.CarState.ButtonEvent(pressed=False, type=ButtonType.cancel),
+  ]
 
 class CarState(CarStateBase):
   def __init__(self, CP):
@@ -30,6 +43,12 @@ class CarState(CarStateBase):
     self.loopback_lka_steering_cmd_ts_nanos = 0
     self.pt_lka_steering_cmd_counter = 0
     self.cam_lka_steering_cmd_counter = 0
+    self.cam_ascm_2cb_counter = 0
+    self.cam_ascm_2cb_counter_updated = False
+    self.cam_ascm_2cb_counter_ts_nanos = 0
+    self.cam_stock_long_active = None
+    self.cam_stock_long_cancel = False
+    self.cam_acc_status = None
     self.is_metric = False
 
     self.buttons_counter = 0
@@ -80,6 +99,27 @@ class CarState(CarStateBase):
     if self.CP.networkLocation == NetworkLocation.fwdCamera and not self.CP.flags & GMFlags.NO_CAMERA.value:
       self.pt_lka_steering_cmd_counter = pt_cp.vl["ASCMLKASteeringCmd"]["RollingCounter"]
       self.cam_lka_steering_cmd_counter = cam_cp.vl["ASCMLKASteeringCmd"]["RollingCounter"]
+
+    # The stock 0x2CB counter lags ASCM_2CD by one cycle during some cold starts
+    # and aligns with it after ACC activates. Follow 0x2CB itself instead.
+    self.cam_ascm_2cb_counter_updated = False
+    self.cam_stock_long_cancel = False
+    if self.CP.openpilotLongitudinalControl and self.CP.carFingerprint == CAR.CHEVROLET_TRAILBLAZER:
+      counters = cam_cp.vl_all["ASCMGasRegenCmd"]["RollingCounter"]
+      active_states = cam_cp.vl_all["ASCMGasRegenCmd"]["GasRegenCmdActive"]
+      self.cam_ascm_2cb_counter_updated = len(counters) > 0 and len(active_states) > 0
+      if self.cam_ascm_2cb_counter_updated:
+        previous_stock_long_active = self.cam_stock_long_active
+        self.cam_ascm_2cb_counter = int(counters[-1])
+        self.cam_ascm_2cb_counter_ts_nanos = cam_cp.ts_nanos["ASCMGasRegenCmd"]["RollingCounter"]
+        self.cam_stock_long_active = bool(active_states[-1])
+        self.cam_stock_long_cancel = previous_stock_long_active is True and not self.cam_stock_long_active
+
+      # Keep the camera's complete ACC state as the template for the replacement
+      # 0x370. This Trailblazer generation expects ACCCruiseState and the two
+      # constant bits to retain the stock values (2, 0, 0).
+      if len(cam_cp.vl_all["ASCMActiveCruiseControlStatus"]["ACCCruiseState"]) > 0:
+        self.cam_acc_status = copy.copy(cam_cp.vl["ASCMActiveCruiseControlStatus"])
 
     # This is to avoid a fault where you engage while still moving backwards after shifting to D.
     # An Equinox has been seen with an unsupported status (3), so only check if either wheel is in reverse (2)
@@ -201,16 +241,24 @@ class CarState(CarStateBase):
         *create_button_events(self.lkas_enabled, prev_lkas_enabled,
                               {1: ButtonType.lkas})
       ]
+    if self.cam_stock_long_cancel:
+      # Treat the camera's active-to-inactive edge like a complete momentary
+      # cancel click. The controller has already neutralized this cycle's
+      # actuation; this edge also prevents openpilot from remaining visually
+      # engaged with no ACC without latching the cruise-button state machine.
+      ret.buttonEvents = [*ret.buttonEvents, *create_stock_long_cancel_button_events()]
 
     return ret
 
   @staticmethod
   def get_can_parsers(CP):
     pt_messages = []
+    cam_messages = []
     if CP.networkLocation == NetworkLocation.fwdCamera:
       pt_messages += [
         ("ASCMLKASteeringCmd", float('nan')),
       ]
+    cam_messages += gmcan.get_longitudinal_sync_messages(CP)
     if CP.transmissionType == TransmissionType.direct:
       pt_messages += [
         ("EBCMRegenPaddle", 50),
@@ -222,7 +270,6 @@ class CarState(CarStateBase):
 
     return {
       Bus.pt: CANParser(DBC[CP.carFingerprint][Bus.pt], pt_messages, 0),
-      Bus.cam: CANParser(DBC[CP.carFingerprint][Bus.pt], [], 2),
+      Bus.cam: CANParser(DBC[CP.carFingerprint][Bus.pt], cam_messages, 2),
       Bus.loopback: CANParser(DBC[CP.carFingerprint][Bus.pt], loopback_messages, 128),
     }
-
