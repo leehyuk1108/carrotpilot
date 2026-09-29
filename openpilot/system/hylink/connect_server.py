@@ -10,7 +10,7 @@ from urllib.parse import urlsplit
 import psutil
 
 from openpilot.common.params import Params
-from openpilot.system.hylink import pairing
+from openpilot.system.hylink import health, pairing
 
 
 def valid_host(host):
@@ -99,12 +99,14 @@ class Handler(BaseHTTPRequestHandler):
   def do_GET(self):
     if not same_lan(self.headers.get("Host", ""), self.client_address[0]):
       return self.reply(403, {"error": "Use the comma local IP address and port 1108."})
-    if not pairing.pairing_allowed(self.server.params):
+    if not pairing.page_allowed(self.server.params):
       return self.reply(409, {"error": "키 페이지는 시동이 꺼진 오프로드 상태에서만 열립니다."})
-    if self.path == "/api/key":
+    if self.path in ("/api/key", "/api/health"):
       if self.headers.get("X-Hylink-Request") != "1":
         return self.reply(403, {"error": "Open the local key page."})
       try:
+        if self.path == "/api/health":
+          return self.reply(200, health.snapshot(self.server.params))
         return self.reply(200, pairing.status(self.server.params))
       except ValueError as exc:
         return self.reply(409, {"error": str(exc)})
@@ -136,8 +138,10 @@ class Handler(BaseHTTPRequestHandler):
       self.reply(200, result)
     except ValueError as exc:
       self.reply(400, {"error": str(exc)})
-    except Exception:
-      self.reply(503, {"error": "클라우드 등록을 완료하지 못했어요. 콤마 인터넷을 확인하고 다시 시도해 주세요. 기존 연결 키는 변경하지 않았어요."})
+    except Exception as exc:
+      info = health.failure(exc, "enrollment")
+      _, title, detail, action = health.MESSAGES[info["code"]]
+      self.reply(503, {"error": f"{title}. {detail} {action} 기존 연결 키는 변경하지 않았어요.", "diagnostic": info})
 
 
 def main():

@@ -10,7 +10,8 @@ from openpilot.common.params import Params
 from openpilot.system.hylink.runtime import CONFIG_PATH, param_text, read_config, read_json, service_fresh, write_json, offroad, media_ready, remote_ready
 from openpilot.system.hylink.policy import UploadBackoff
 from openpilot.system.hylink.drive_quality import telemetry_signature
-from openpilot.system.hylink.transport import post_json
+from openpilot.system.hylink.health import TelemetryHealth
+from openpilot.system.hylink.transport import post_json, UploadResponseError
 
 SERVICES = ["deviceState", "pandaStates", "gpsLocation", "gpsLocationExternal", "carState", "selfdriveState"]
 GPS_CACHE = CONFIG_PATH.with_name("last_gps.json")
@@ -271,6 +272,16 @@ def feature_status(params):
 
 
 def main():
+  reporter = TelemetryHealth(read_json(CONFIG_PATH))
+  try:
+    run(reporter)
+  except Exception as exc:
+    info = reporter.failed(exc, reporter.stage)
+    print(f"Hylink telemetry: {info['code']}; stage={info['stage']}", flush=True)
+    raise  # Manager owns process recovery; the failure record survives it.
+
+
+def run(reporter):
   params = Params()
   # Poll the low-rate device service, not 100 Hz carState, to avoid an onroad
   # filesystem/config busy loop. SubMaster still conflates the latest car data.
@@ -280,6 +291,8 @@ def main():
   last_signature = None
   previous_started = None
   while config := read_config(params):
+    reporter.bind(config)
+    reporter.stage = "payload"
     sm.update(1000)
     now = time.monotonic()
     started = bool(sm["deviceState"].started) if service_fresh(sm, "deviceState") else None
@@ -299,16 +312,27 @@ def main():
     if now < next_upload and signature == last_signature:
       continue
     try:
+      reporter.stage = "upload"
+      reporter.attempt(payload["onroad"])
       # Reject NaN and Infinity before any network call.
-      post_json(config, "/api/telemetry", payload)
+      response = post_json(config, "/api/telemetry", payload)
+      if not isinstance(response, dict) or response.get("ok") is not True:
+        raise UploadResponseError("Cloud did not acknowledge telemetry")
+      cache_warning = False
       if payload["gps"].get("fresh"):
-        write_json(GPS_CACHE, payload["gps"])
+        try:
+          write_json(GPS_CACHE, payload["gps"])
+        except (OSError, ValueError):
+          cache_warning = True  # Already uploaded; do not misreport a network failure.
+      reporter.success(cache_warning=cache_warning)
       backoff.success()
       last_signature = signature
       next_upload = now + (30 if payload["onroad"] else 300)
     except Exception as exc:
-      next_change = now + backoff.failure_delay()
-      print(f"Hylink telemetry: {type(exc).__name__}; retry delayed", flush=True)
+      delay = backoff.failure_delay()
+      next_change = time.monotonic() + delay
+      info = reporter.failed(exc, reporter.stage, delay)
+      print(f"Hylink telemetry: {info['code']}; HTTP={info['httpStatus']}; retry delayed", flush=True)
 
 
 if __name__ == "__main__":

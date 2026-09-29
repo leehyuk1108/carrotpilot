@@ -1,7 +1,9 @@
 import http.client
 import json
+import os
 import socket
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -131,6 +133,21 @@ def test_http_key_page_csrf_and_onroad_cutoff(configured):
     code, _, body = request("GET", "/api/key", **{"X-Hylink-Request": "1"})
     assert code == 200 and json.loads(body)["key"] == config["token"]
     assert request("GET", "/api/key")[0] == 403
+    assert request("GET", "/api/health")[0] == 403
+    code, _, result = request("GET", "/api/health", **{"X-Hylink-Request": "1"})
+    assert code == 200 and json.loads(result)["code"] == "no_record"
+    assert config["token"] not in result and config["device_id"] not in result
+    assert runtime.read_json(runtime.CONFIG_PATH) == config  # Read-only diagnostics.
+    runtime.STATE_PATH.unlink()  # Broken guard must not hide diagnostics or expose a key.
+    assert request("GET", "/")[0] == 200
+    assert request("GET", "/api/health", **{"X-Hylink-Request": "1"})[0] == 200
+    assert request("GET", "/api/key", **{"X-Hylink-Request": "1"})[0] == 409
+    assert request("POST", "/api/connect", "{}", **{"Content-Type": "application/json", "Origin": "http://127.0.0.1:1108",
+                                                     "X-Hylink-Request": "1"})[0] == 400
+    params.put_bool("IsOnroad", True)
+    assert request("GET", "/api/health", **{"X-Hylink-Request": "1"})[0] == 409
+    params.put_bool("IsOnroad", False)
+    runtime.write_json(runtime.STATE_PATH, {"pid": os.getpid(), "at": time.monotonic(), "offroad": True})
     assert request("GET", "/", Host="evil.example:1108")[0] == 403
     body = "{}"
     assert request("POST", "/api/connect", body, **{"Content-Type": "application/json", "Origin": "http://evil.example", "X-Hylink-Request": "1"})[0] == 403
@@ -176,7 +193,7 @@ def test_telemetry_stays_onroad_and_transitions_do_not_wait_for_heartbeat(monkey
   monkeypatch.setattr(telemetry, "feature_status", lambda p: {})
   monkeypatch.setattr(telemetry, "telemetry_payload", lambda *a: {"onroad": sm.device.started, "gps": {}})
   uploads = []
-  monkeypatch.setattr(telemetry, "post_json", lambda config, path, body: uploads.append(body["onroad"]))
+  monkeypatch.setattr(telemetry, "post_json", lambda config, path, body: uploads.append(body["onroad"]) or {"ok": True})
   telemetry.main()
   assert uploads == [False, True, False]
 
@@ -200,7 +217,7 @@ def test_unchanged_driving_data_is_not_serialized_at_subscriber_rate(monkeypatch
     builds.append(sm.index)
     return {"onroad": True, "gps": {}}
   monkeypatch.setattr(telemetry, "telemetry_payload", payload)
-  monkeypatch.setattr(telemetry, "post_json", lambda *args: uploads.append(sm.index))
+  monkeypatch.setattr(telemetry, "post_json", lambda *args: uploads.append(sm.index) or {"ok": True})
   telemetry.main()
   assert builds == [0, 5, 10]
   assert uploads == [0]

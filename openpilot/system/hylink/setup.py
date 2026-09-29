@@ -8,6 +8,7 @@ import requests
 
 from openpilot.common.params import Params
 from openpilot.system.hylink.runtime import CONFIG_PATH, ENDPOINT, param_text, read_json, write_json
+from openpilot.system.hylink.transport import UploadHTTPError
 
 
 def import_legacy(params, path=Path("/data/wayon_cloud/config.json")):
@@ -46,7 +47,7 @@ def enroll(params, post=requests.post, activate=True):
                     headers={"Authorization": "Bearer " + config["token"]},
                     timeout=(5, 15), allow_redirects=False)
     if not 200 <= response.status_code < 300:
-      raise RuntimeError(f"Enrollment failed (HTTP {response.status_code}); config kept for retry.")
+      raise UploadHTTPError(response.status_code)
     config["registered"] = True
   if activate:
     config["enabled"] = True

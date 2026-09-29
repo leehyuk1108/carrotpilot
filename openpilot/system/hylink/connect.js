@@ -4,6 +4,60 @@ const copy = document.getElementById('copy');
 const status = document.getElementById('status');
 let pending = null;
 let checking = false;
+let healthRequest = null;
+let healthCode = null;
+
+function setText(id, value) {
+  const element = document.getElementById(id);
+  if (element.textContent !== value) element.textContent = value;
+}
+function healthUnavailable(message) {
+  document.getElementById('health').dataset.level = 'warning';
+  setText('health-title', '전송 상태를 확인할 수 없어요');
+  setText('health-detail', message);
+  document.getElementById('health-action').hidden = true;
+  document.getElementById('health-history').hidden = true;
+  for (const id of ['success', 'attempt', 'process', 'code', 'error', 'http', 'retry']) setText('health-' + id, '—');
+}
+function healthTime(value) {
+  const date = new Date(value);
+  return value && Number.isFinite(date.getTime()) ? date.toLocaleString('ko-KR') : '아직 확인되지 않음';
+}
+function renderHealth(data) {
+  if (!['success', 'waiting', 'warning', 'error'].includes(data.level) || typeof data.title !== 'string') throw new Error('invalid health');
+  document.getElementById('health').dataset.level = data.level;
+  setText('health-title', data.title);
+  setText('health-detail', data.detail || '');
+  setText('health-action', data.action || '');
+  document.getElementById('health-action').hidden = !data.action;
+  setText('health-success', healthTime(data.lastSuccessAt));
+  setText('health-attempt', healthTime(data.lastAttemptAt));
+  document.getElementById('health-history').hidden = !data.historyOnly || !data.lastSuccessAt;
+  setText('health-process', data.process === 'running' ? '최근 동작 확인됨' : '최근 동작 확인 안 됨');
+  setText('health-code', data.code || '—');
+  setText('health-error', data.lastErrorTitle ? data.lastErrorTitle + ' · ' + healthTime(data.lastFailureAt) : '기록된 오류 없음');
+  setText('health-http', data.httpStatus ? String(data.httpStatus) : '—');
+  setText('health-retry', typeof data.retryInSeconds === 'number' ? (data.retryInSeconds ? `약 ${data.retryInSeconds}초 후` : '재시도 대기 중') : '—');
+  if (data.code !== healthCode) document.getElementById('health-diagnostics').open = data.level === 'error';
+  healthCode = data.code;
+}
+async function refreshHealth() {
+  if (healthRequest || document.hidden) return;
+  const controller = new AbortController();
+  healthRequest = controller;
+  const timeout = setTimeout(() => controller.abort(), 2500);
+  try {
+    const response = await fetch('/api/health', {headers: {'X-Hylink-Request': '1'}, cache: 'no-store', signal: controller.signal});
+    if (!response.ok) throw new Error('unavailable');
+    const data = await response.json();
+    if (healthRequest === controller && !controller.signal.aborted) renderHealth(data);
+  } catch {
+    if (healthRequest === controller) healthUnavailable('시동을 끈 상태와 콤마의 같은 Wi-Fi 연결을 확인해 주세요.');
+  } finally {
+    clearTimeout(timeout);
+    if (healthRequest === controller) healthRequest = null;
+  }
+}
 
 function resizeKey() {
   key.style.height = 'auto';
@@ -43,6 +97,7 @@ async function connect() {
   } finally {
     clearTimeout(timeout);
     if (pending === controller) pending = null;
+    refreshHealth();
   }
 }
 copy.onclick = async () => {
@@ -63,12 +118,19 @@ window.addEventListener('pagehide', () => {
   pending = null;
   request?.abort();
   clearKey();
+  const health = healthRequest;
+  healthRequest = null;
+  health?.abort();
+  healthUnavailable('페이지를 다시 열면 현재 상태를 확인해요.');
 });
-window.addEventListener('pageshow', event => { if (event.persisted) connect(); });
+window.addEventListener('pageshow', event => { if (event.persisted) { connect(); refreshHealth(); } });
+refreshHealth();
 connect();
 // Read only: a stopped connection stays stopped until the page is reopened.
 setInterval(async () => {
-  if (document.hidden || !key.value || pending || checking) return;
+  if (document.hidden || pending || checking) return;
+  refreshHealth();
+  if (!key.value) return;
   checking = true;
   try {
     const response = await fetch('/api/key', {

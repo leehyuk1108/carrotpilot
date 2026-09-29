@@ -12,6 +12,30 @@
     <textarea id="key" rows="3" readonly spellcheck="false" autocapitalize="off" aria-describedby="status"></textarea>
     <button id="copy" disabled>키 복사</button>
     <p id="status" role="status" aria-live="polite">키를 불러오는 중…</p>
+    <section class="health" id="health" data-level="waiting" aria-labelledby="health-heading">
+      <h2 id="health-heading">차량 정보 업로드</h2>
+      <div role="status" aria-live="polite" aria-atomic="true">
+        <p class="health-title" id="health-title">상태 확인 중</p>
+        <p class="health-detail" id="health-detail">콤마의 실제 전송 기록을 확인하고 있어요.</p>
+      </div>
+      <p class="health-action" id="health-action" hidden></p>
+      <dl class="health-times">
+        <div><dt>최근 성공</dt><dd id="health-success">아직 확인되지 않음</dd></div>
+        <div><dt>최근 시도</dt><dd id="health-attempt">아직 확인되지 않음</dd></div>
+      </dl>
+      <p class="health-note" id="health-history" hidden>이전 실행에서 저장한 기록이에요. 저장 주기에 따라 최근 최대 5분의 성공 기록은 없을 수 있어요.</p>
+      <details id="health-diagnostics">
+        <summary>진단 정보</summary>
+        <dl>
+          <div><dt>송신 프로그램</dt><dd id="health-process">확인 중</dd></div>
+          <div><dt>진단 코드</dt><dd id="health-code">—</dd></div>
+          <div><dt>최근 오류</dt><dd id="health-error">—</dd></div>
+          <div><dt>HTTP 상태</dt><dd id="health-http">—</dd></div>
+          <div><dt>재시도</dt><dd id="health-retry">—</dd></div>
+        </dl>
+      </details>
+      <p class="health-note">키 등록과 업로드 성공은 별개예요. 이 화면은 차량 상태 정보 전송을 확인하며, 사진·영상·주행 기록 업로드까지 보장하지는 않아요.</p>
+    </section>
   </main>
   <script src="/connect.js"></script>
 </body>

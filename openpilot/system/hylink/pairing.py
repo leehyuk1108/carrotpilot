@@ -7,9 +7,14 @@ from pathlib import Path
 
 from openpilot.system.hylink import runtime, setup
 
+def page_allowed(params):
+  # Diagnostics remain readable offroad when the guard is unhealthy, but keys
+  # and activation still require the original, stricter readiness predicate.
+  return params.get_bool("IsOffroad") and not params.get_bool("IsOnroad")
+
+
 def pairing_allowed(params):
-  return (params.get_bool("IsOffroad") and not params.get_bool("IsOnroad")
-          and runtime.fresh_record(runtime.STATE_PATH).get("offroad") is True)
+  return page_allowed(params) and runtime.fresh_record(runtime.STATE_PATH).get("offroad") is True
 
 
 def status(params):

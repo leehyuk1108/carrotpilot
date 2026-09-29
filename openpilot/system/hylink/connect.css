@@ -10,6 +10,9 @@
   --border: #919c93;
   --accent: #244f3e;
   --on-accent: #ffffff;
+  --success: #236044;
+  --warning: #775114;
+  --error: #a02c31;
   color: var(--text);
   background: var(--background);
 }
@@ -54,6 +57,24 @@ button {
 button:disabled { opacity: .6; cursor: default; }
 textarea:focus-visible, button:focus-visible { outline: 3px solid #2470cd; outline-offset: 4px; }
 #status { min-height: 1.5em; margin: 14px 0 0; font-size: .85rem; color: var(--secondary); overflow-wrap: anywhere; }
+.health { margin-top: 24px; padding: 20px; border: 1px solid var(--border); border-radius: 16px; background: var(--surface); overflow-wrap: anywhere; }
+.health h2 { margin: 0 0 8px; color: var(--secondary); font-size: .85rem; font-weight: 600; }
+.health-title { margin: 0; font-size: 1.12rem; font-weight: 650; letter-spacing: -.02em; }
+.health[data-level="success"] .health-title { color: var(--success); }
+.health[data-level="warning"] .health-title { color: var(--warning); }
+.health[data-level="error"] .health-title { color: var(--error); }
+.health-detail, .health-action { margin: 8px 0 0; font-size: .94rem; }
+.health-action { color: var(--secondary); }
+.health dl { margin: 16px 0 0; font-size: .85rem; }
+.health dl > div { margin-top: 12px; }
+.health dt { color: var(--secondary); }
+.health dd { margin: 2px 0 0; font-variant-numeric: tabular-nums; }
+.health-note { margin: 16px 0 0; color: var(--secondary); font-size: .8rem; }
+.health details { margin-top: 16px; border-top: 1px solid var(--border); }
+.health summary { min-height: 48px; padding: 12px 0; cursor: pointer; font-size: .9rem; }
+.health summary:focus-visible { outline: 3px solid #2470cd; outline-offset: 4px; }
+.health details dl { margin-top: 0; }
+[hidden] { display: none !important; }
 @media (prefers-color-scheme: dark) {
   :root {
     --background: #151b18;
@@ -63,5 +84,8 @@ textarea:focus-visible, button:focus-visible { outline: 3px solid #2470cd; outli
     --border: #7b8c80;
     --accent: #a9d9bd;
     --on-accent: #183527;
+    --success: #a9d9bd;
+    --warning: #e9c38d;
+    --error: #ffb4b5;
   }
 }
