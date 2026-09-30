@@ -55,6 +55,8 @@ button {
   cursor: pointer;
 }
 button:disabled { opacity: .6; cursor: default; }
+button.secondary { background: transparent; color: var(--text); border: 1px solid var(--border); }
+#reissue-note { margin: 8px 0 0; color: var(--secondary); font-size: .8rem; overflow-wrap: anywhere; }
 textarea:focus-visible, button:focus-visible { outline: 3px solid #2470cd; outline-offset: 4px; }
 #status { min-height: 1.5em; margin: 14px 0 0; font-size: .85rem; color: var(--secondary); overflow-wrap: anywhere; }
 .health { margin-top: 24px; padding: 20px; border: 1px solid var(--border); border-radius: 16px; background: var(--surface); overflow-wrap: anywhere; }

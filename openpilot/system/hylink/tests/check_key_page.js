@@ -11,7 +11,7 @@ async (page) => {
   const token = await page.locator('#key').inputValue();
   check(token.includes('demo_only'), 'Never exercise a real vehicle credential');
   check(posts === 1, 'Single automatic activation');
-  check(await page.locator('button').count() === 1, 'Exactly one copy button');
+  check(await page.locator('button').count() === 2, 'Copy and reissue buttons only');
   check(await page.locator('input[type=checkbox],select,form').count() === 0, 'No setup controls');
   check(await page.locator('#status').innerText() === '', 'No extra ready-state prose');
   await page.reload();

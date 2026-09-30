@@ -10,7 +10,7 @@ from urllib.parse import urlsplit
 import psutil
 
 from openpilot.common.params import Params
-from openpilot.system.hylink import health, pairing
+from openpilot.system.hylink import health, pairing, reissue
 
 
 def valid_host(host):
@@ -119,7 +119,7 @@ class Handler(BaseHTTPRequestHandler):
 
   def do_POST(self):
     host = self.headers.get("Host", "")
-    if (not same_lan(host, self.client_address[0]) or self.path != "/api/connect" or self.headers.get("Origin") != "http://" + host
+    if (not same_lan(host, self.client_address[0]) or self.path not in ("/api/connect", "/api/reissue") or self.headers.get("Origin") != "http://" + host
         or self.headers.get("X-Hylink-Request") != "1" or self.headers.get("Content-Type") != "application/json"):
       return self.reply(403, {"error": "이 페이지에서 다시 연결해 주세요."})
     try:
@@ -132,13 +132,18 @@ class Handler(BaseHTTPRequestHandler):
       if not self.server.pair_lock.acquire(blocking=False):
         return self.reply(409, {"error": "연결 처리 중이에요. 잠시 후 다시 시도해 주세요."})
       try:
-        result = pairing.connect(self.server.params, body)
+        operation = pairing.reissue_key if self.path == "/api/reissue" else pairing.connect
+        result = operation(self.server.params, body)
       finally:
         self.server.pair_lock.release()
       self.reply(200, result)
+    except reissue.ReissueError as exc:
+      self.reply(503, {"error": str(exc)})
     except ValueError as exc:
       self.reply(400, {"error": str(exc)})
     except Exception as exc:
+      if self.path == "/api/reissue" or reissue.pending_path().exists():
+        return self.reply(503, {"error": "재발급 처리를 완료하지 못했어요. 설정 파일을 삭제하지 말고 저장 공간과 인터넷을 확인한 뒤 다시 눌러 주세요."})
       info = health.failure(exc, "enrollment")
       _, title, detail, action = health.MESSAGES[info["code"]]
       self.reply(503, {"error": f"{title}. {detail} {action} 기존 연결 키는 변경하지 않았어요.", "diagnostic": info})

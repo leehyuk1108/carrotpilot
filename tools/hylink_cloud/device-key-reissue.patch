@@ -1,0 +1,496 @@
+diff --git a/cloudflare/wayon-cloud/remote/test_remote_auth.mjs b/cloudflare/wayon-cloud/remote/test_remote_auth.mjs
+index f3e31b141dc0ad472ed95c6223b377b322574a55..e89ff66d4cc4d54f851d80cd4b56d148e887d94f 100644
+--- a/cloudflare/wayon-cloud/remote/test_remote_auth.mjs
++++ b/cloudflare/wayon-cloud/remote/test_remote_auth.mjs
+@@ -112,7 +112,8 @@ const session = await accepted.json();
+ assert.match(session.protocol, /^wayon-ssh-v1\./);
+ assert.equal(session.deviceId, deviceId);
+ assert.equal(session.credentialMode, "existing_ssh_key");
+-assert.equal((await verifyRemoteSshProtocol(session.protocol, secret))?.deviceId, deviceId);
++assert.equal((await verifyRemoteSshProtocol(session.protocol, `${secret}:${keyHash}`))?.deviceId, deviceId);
++assert.equal(await verifyRemoteSshProtocol(session.protocol, secret), null);
+ 
+ const publicKey = `ssh-rsa ${randomBytes(96).toString("base64")} hylink-android`;
+ const automatic = await login(wayonKey, { publicKey });
+@@ -137,5 +138,6 @@ const live = await liveAccepted.json();
+ assert.match(live.protocol, /^wayon-live-v1\./);
+ assert.equal(live.websocketUrl, "wss://wayon.test/api/live/stream");
+ assert.equal(live.deviceId, deviceId);
+-assert.equal((await verifyLiveProtocol(live.protocol, secret))?.deviceId, deviceId);
++assert.equal((await verifyLiveProtocol(live.protocol, `${secret}:${keyHash}`))?.deviceId, deviceId);
++assert.equal(await verifyLiveProtocol(live.protocol, secret), null);
+ console.log("remote auth tests passed");
+diff --git a/cloudflare/wayon-cloud/schema.sql b/cloudflare/wayon-cloud/schema.sql
+index 3569a302da18a15a3bbf1e6c25bd4c573596666e..0a77b5013aa80b6585e5e26e6bc2b19405062caa 100644
+--- a/cloudflare/wayon-cloud/schema.sql
++++ b/cloudflare/wayon-cloud/schema.sql
+@@ -10,6 +10,17 @@ CREATE TABLE IF NOT EXISTS wayon_devices (
+ CREATE INDEX IF NOT EXISTS wayon_devices_key_hash_idx
+   ON wayon_devices(key_hash);
+ 
++CREATE TABLE IF NOT EXISTS wayon_key_reissues (
++  device_id TEXT NOT NULL,
++  request_id TEXT NOT NULL,
++  key_hash TEXT NOT NULL,
++  previous_key_hash TEXT NOT NULL,
++  completed_at TEXT NOT NULL,
++  PRIMARY KEY (device_id, request_id)
++);
++CREATE INDEX IF NOT EXISTS wayon_key_reissues_recent_idx
++  ON wayon_key_reissues(device_id, completed_at DESC);
++
+ CREATE TABLE IF NOT EXISTS latest_state (
+   device_id TEXT PRIMARY KEY,
+   updated_at TEXT NOT NULL,
+diff --git a/cloudflare/wayon-cloud/src/worker.js b/cloudflare/wayon-cloud/src/worker.js
+index 37198af410d12f76e44389aaf474be1236c259a4..1c4081262d01ae815a8a3275813dd9e06a348e0d 100644
+--- a/cloudflare/wayon-cloud/src/worker.js
++++ b/cloudflare/wayon-cloud/src/worker.js
+@@ -2,6 +2,7 @@ import {
+   attachPandaCounterHealth,
+   buildAiPandaInterface,
+ } from "./panda_counter_health.mjs";
++import { handleDeviceReissue } from "./device_reissue.mjs";
+ 
+ const CORS_HEADERS = {
+   "access-control-allow-origin": "*",
+@@ -317,7 +318,22 @@ async function authenticateDeviceKey(request, env) {
+   // write amplification and can exhaust the daily quota. Freshness is already
+   // represented by latest_state.updated_at, while registration maintains the
+   // device metadata timestamps.
+-  return { deviceId: device.device_id };
++  return { deviceId: device.device_id, keyHash };
++}
++
++// Sessions minted before a key replacement must not reconnect using the old
++// short-lived protocol. Keep public protocol encoding stable for existing apps.
++async function verifyCurrentProtocol(request, env, prefix, verify) {
++  const header = request.headers.get("sec-websocket-protocol") || "";
++  if (header.length > 4096) return null;
++  const protocol = header.split(",").map(p => p.trim()).find(p => p.startsWith(`${prefix}.`));
++  let deviceId;
++  try { deviceId = base64UrlToText(protocol.split(".")[3]); } catch { return null; }
++  if (!validDeviceId(deviceId)) return null;
++  const device = await env.DB.prepare("SELECT key_hash FROM wayon_devices WHERE device_id = ? AND revoked_at IS NULL")
++    .bind(deviceId).first();
++  if (!device) return null;
++  return verify(header, `${env.WAYON_SSH_SESSION_SECRET}:${device.key_hash}`);
+ }
+ 
+ async function handleDeviceRegistration(request, env) {
+@@ -421,6 +437,12 @@ export class WayonDeviceRelay {
+ 
+   async fetch(request) {
+     const url = new URL(request.url);
++    if (request.method === "POST" && url.pathname === "/revoke-key") {
++      for (const socket of this.state.getWebSockets()) {
++        try { socket.close(1000, "key replaced"); } catch {}
++      }
++      return new Response(null, { status: 204 });
++    }
+     if (request.method === "POST" && url.pathname === "/notify-ambient") {
+       const device = this.state.getWebSockets("device")[0];
+       if (!device) return new Response("device offline", { status: 409 });
+@@ -548,7 +570,7 @@ async function handleRemoteSession(request, env) {
+ 
+   const issuedAt = Math.floor(Date.now() / 1000);
+   const protocol = await issueRemoteSshProtocol(
+-    env.WAYON_SSH_SESSION_SECRET,
++    `${env.WAYON_SSH_SESSION_SECRET}:${identity.keyHash}`,
+     identity.deviceId,
+     issuedAt,
+   );
+@@ -577,7 +599,7 @@ async function handleLiveSession(request, env) {
+   const websocketUrl = new URL(LIVE_STREAM_PATH, request.url);
+   websocketUrl.protocol = websocketUrl.protocol === "https:" ? "wss:" : "ws:";
+   return json({
+-    protocol: await issueLiveProtocol(env.WAYON_SSH_SESSION_SECRET, identity.deviceId, issuedAt),
++    protocol: await issueLiveProtocol(`${env.WAYON_SSH_SESSION_SECRET}:${identity.keyHash}`, identity.deviceId, issuedAt),
+     websocketUrl: websocketUrl.toString(),
+     deviceId: identity.deviceId,
+     expiresAt: issuedAt + LIVE_MAX_AGE_SECONDS,
+@@ -662,10 +684,7 @@ async function handleRemoteSsh(request, env, ctx) {
+     return json({ error: "remote_access_unavailable" }, 503);
+   }
+ 
+-  const session = await verifyRemoteSshProtocol(
+-    request.headers.get("sec-websocket-protocol") || "",
+-    env.WAYON_SSH_SESSION_SECRET,
+-  );
++  const session = await verifyCurrentProtocol(request, env, REMOTE_SSH_PROTOCOL_PREFIX, verifyRemoteSshProtocol);
+   if (!session) return json({ error: "unauthorized" }, 401);
+ 
+   return connectDeviceRelay(request, env, session.deviceId, "ssh", "client", session.protocol);
+@@ -679,10 +698,7 @@ async function handleLiveStream(request, env, ctx) {
+     return json({ error: "live_access_unavailable" }, 503);
+   }
+ 
+-  const session = await verifyLiveProtocol(
+-    request.headers.get("sec-websocket-protocol") || "",
+-    env.WAYON_SSH_SESSION_SECRET,
+-  );
++  const session = await verifyCurrentProtocol(request, env, LIVE_PROTOCOL_PREFIX, verifyLiveProtocol);
+   if (!session) return json({ error: "unauthorized" }, 401);
+ 
+   return connectDeviceRelay(request, env, session.deviceId, "live", "client", session.protocol);
+@@ -3045,6 +3061,9 @@ export default {
+     const url = new URL(request.url);
+     const { pathname } = url;
+ 
++    if (request.method === "POST" && pathname === "/api/devices/reissue") {
++      return handleDeviceReissue(request, env);
++    }
+     if (request.method === "POST" && pathname === DEVICE_REGISTER_PATH) {
+       return handleDeviceRegistration(request, env);
+     }
+diff --git a/cloudflare/wayon-cloud/migrations/0010_device_key_reissues.sql b/cloudflare/wayon-cloud/migrations/0010_device_key_reissues.sql
+new file mode 100644
+index 0000000000000000000000000000000000000000..2c715c01e91d2a3678671daeb78e9ba674ad0ce0
+--- /dev/null
++++ b/cloudflare/wayon-cloud/migrations/0010_device_key_reissues.sql
+@@ -0,0 +1,10 @@
++CREATE TABLE IF NOT EXISTS wayon_key_reissues (
++  device_id TEXT NOT NULL,
++  request_id TEXT NOT NULL,
++  key_hash TEXT NOT NULL,
++  previous_key_hash TEXT NOT NULL,
++  completed_at TEXT NOT NULL,
++  PRIMARY KEY (device_id, request_id)
++);
++CREATE INDEX IF NOT EXISTS wayon_key_reissues_recent_idx
++  ON wayon_key_reissues(device_id, completed_at DESC);
+diff --git a/cloudflare/wayon-cloud/src/device_reissue.mjs b/cloudflare/wayon-cloud/src/device_reissue.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..4a76741ed88bf1ee7db6052261f9140e2bb2aefb
+--- /dev/null
++++ b/cloudflare/wayon-cloud/src/device_reissue.mjs
+@@ -0,0 +1,149 @@
++// Device identity is verified independently of the lost Wayon bearer key.
++// Never accept a DongleId, a client-supplied public key, or LAN membership as proof.
++const encoder = new TextEncoder();
++const reply = (body, status = 200) => new Response(JSON.stringify(body), {
++  status, headers: { "content-type": "application/json", "cache-control": "no-store" },
++});
++const b64bytes = value => Uint8Array.from(atob(value.replace(/-/g, "+").replace(/_/g, "/")), c => c.charCodeAt(0));
++const b64url = value => btoa(String.fromCharCode(...value)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
++const decode = value => JSON.parse(new TextDecoder().decode(b64bytes(value)));
++export async function keyDigest(key) {
++  return Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", encoder.encode(key))), b => b.toString(16).padStart(2, "0")).join("");
++}
++
++// comma's device-info API returns OpenSSH public keys, not client-provided JWKs.
++function sshJwk(publicKey, alg) {
++  if (typeof publicKey !== "string" || publicKey.length > 8192) throw new Error("key");
++  const [type, encoded] = publicKey.trim().split(/\s+/);
++  const bytes = b64bytes(encoded);
++  let offset = 0;
++  const field = () => {
++    if (offset + 4 > bytes.length) throw new Error("key");
++    const size = new DataView(bytes.buffer).getUint32(offset);
++    offset += 4;
++    if (offset + size > bytes.length) throw new Error("key");
++    const result = bytes.slice(offset, offset + size);
++    offset += size;
++    return result;
++  };
++  if (new TextDecoder().decode(field()) !== type) throw new Error("key");
++  if (type === "ssh-rsa" && alg === "RS256") {
++    const exponent = field(), modulus = field();
++    const n = modulus[0] === 0 ? modulus.slice(1) : modulus;
++    if (offset !== bytes.length || n.length < 256 || n.length > 512) throw new Error("key");
++    return { kty: "RSA", e: b64url(exponent), n: b64url(n), alg, ext: true };
++  }
++  if (type === "ecdsa-sha2-nistp256" && alg === "ES256") {
++    const curve = new TextDecoder().decode(field()), point = field();
++    if (offset !== bytes.length || curve !== "nistp256" || point.length !== 65 || point[0] !== 4) throw new Error("key");
++    return { kty: "EC", crv: "P-256", x: b64url(point.slice(1, 33)), y: b64url(point.slice(33)), ext: true };
++  }
++  throw new Error("key");
++}
++
++async function boundedJson(response, limit) {
++  if (!response.body) throw new Error("body");
++  const reader = response.body.getReader();
++  const chunks = [];
++  let total = 0;
++  try {
++    for (;;) {
++      const { done, value } = await reader.read();
++      if (done) break;
++      total += value.length;
++      if (total > limit) throw new Error("size");
++      chunks.push(value);
++    }
++  } finally { await reader.cancel(); }
++  const all = new Uint8Array(total);
++  let offset = 0;
++  for (const chunk of chunks) { all.set(chunk, offset); offset += chunk.length; }
++  return JSON.parse(new TextDecoder().decode(all));
++}
++
++export async function verifyDeviceProof(proof, deviceId, requestId, keyHash, fetcher = fetch, now = Date.now() / 1000) {
++  let parts, header, payload;
++  try {
++    if (typeof proof !== "string" || proof.length > 4096 || !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(proof)) return false;
++    parts = proof.split("."); header = decode(parts[0]); payload = decode(parts[1]);
++    if (!["RS256", "ES256"].includes(header.alg) || header.crit || header.jku || header.jwk) return false;
++    if (payload.identity !== deviceId || payload.hylink?.purpose !== "key-reissue-v1"
++        || payload.hylink.requestId !== requestId || payload.hylink.newKeyHash !== keyHash) return false;
++    const { iat, nbf, exp } = payload;
++    if (![iat, nbf, exp].every(Number.isFinite) || exp <= now || iat > now + 30 || nbf > now + 30
++        || exp <= iat || exp - iat > 300 || now - iat > 300 || nbf < iat - 30) return false;
++  } catch { return false; }
++
++  // Pinned authority. Never follow redirects carrying the device JWT.
++  let info;
++  try {
++    const response = await fetcher(`https://api.commadotai.com/v1.1/devices/${deviceId}/`, {
++      headers: { Authorization: `JWT ${proof}` }, redirect: "error", signal: AbortSignal.timeout(8000),
++    });
++    if ([401, 403, 404].includes(response.status)) return false;
++    if (!response.ok) throw new Error("authority_unavailable");
++    info = await boundedJson(response, 32768);
++  } catch { throw new Error("authority_unavailable"); }
++  try {
++    if (info.dongle_id !== deviceId) return false;
++    const jwk = sshJwk(info.public_key, header.alg);
++    const algorithm = header.alg === "RS256"
++      ? { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" } : { name: "ECDSA", namedCurve: "P-256", hash: "SHA-256" };
++    const key = await crypto.subtle.importKey("jwk", jwk, algorithm, false, ["verify"]);
++    return await crypto.subtle.verify(algorithm, key, b64bytes(parts[2]), encoder.encode(parts.slice(0, 2).join(".")));
++  } catch { return false; }
++}
++
++async function closeRelays(env, deviceId) {
++  if (!env.DEVICE_RELAY) return;
++  for (const kind of ["ssh", "live"]) {
++    const id = env.DEVICE_RELAY.idFromName(`${deviceId}:${kind}`);
++    const response = await env.DEVICE_RELAY.get(id).fetch(new Request("https://wayon.internal/revoke-key", { method: "POST" }));
++    if (!response.ok) throw new Error("relay_unavailable");
++  }
++}
++
++export async function handleDeviceReissue(request, env, fetcher = fetch) {
++  let body;
++  try { body = await boundedJson(request, 6144); } catch { return reply({ error: "invalid_reissue" }, 400); }
++  const { deviceId, requestId, key, proof } = body || {};
++  if (typeof deviceId !== "string" || deviceId.length !== 16 || !/^[0-9a-f]{16}$/.test(deviceId)
++      || typeof requestId !== "string" || requestId.length !== 32 || !/^[0-9a-f]{32}$/.test(requestId)
++      || typeof key !== "string" || key.length !== 49 || !/^wayon_[A-Za-z0-9_-]{43}$/.test(key)) return reply({ error: "invalid_reissue" }, 400);
++  const keyHash = await keyDigest(key);
++  try {
++    if (!await verifyDeviceProof(proof, deviceId, requestId, keyHash, fetcher)) return reply({ error: "device_proof_rejected" }, 403);
++  } catch { return reply({ error: "authority_unavailable" }, 503); }
++
++  try {
++    const device = await env.DB.prepare("SELECT key_hash, revoked_at FROM wayon_devices WHERE device_id = ?").bind(deviceId).first();
++    // A revoked device is an administrative block, not a recoverable lost key.
++    if (!device || device.revoked_at) return reply({ error: "device_not_registered" }, 409);
++    const previous = await env.DB.prepare("SELECT key_hash FROM wayon_key_reissues WHERE device_id = ? AND request_id = ?")
++      .bind(deviceId, requestId).first();
++    if (previous) {
++      if (previous.key_hash !== keyHash || device.key_hash !== keyHash) return reply({ error: "reissue_superseded" }, 409);
++    } else {
++      const now = new Date(Date.now()).toISOString();
++      const cutoff = new Date(Date.now() - 30000).toISOString();
++      // D1 batch is a transaction. Compare-and-swap guards concurrent requests;
++      // plaintext keys, identity JWTs and private keys never enter the database.
++      const results = await env.DB.batch([
++        env.DB.prepare(`INSERT INTO wayon_key_reissues (device_id, request_id, key_hash, previous_key_hash, completed_at)
++          SELECT ?, ?, ?, ?, ? WHERE EXISTS (
++            SELECT 1 FROM wayon_devices WHERE device_id = ? AND key_hash = ? AND revoked_at IS NULL
++          ) AND NOT EXISTS (SELECT 1 FROM wayon_key_reissues WHERE device_id = ? AND completed_at > ?)
++          ON CONFLICT(device_id, request_id) DO NOTHING`)
++          .bind(deviceId, requestId, keyHash, device.key_hash, now, deviceId, device.key_hash, deviceId, cutoff),
++        env.DB.prepare(`UPDATE wayon_devices SET key_hash = ?, updated_at = ? WHERE device_id = ? AND key_hash = ?
++          AND revoked_at IS NULL AND EXISTS (SELECT 1 FROM wayon_key_reissues WHERE device_id = ? AND request_id = ? AND key_hash = ?)`)
++          .bind(keyHash, now, deviceId, device.key_hash, deviceId, requestId, keyHash),
++        env.DB.prepare("DELETE FROM push_subscriptions WHERE device_id = ? AND changes() = 1").bind(deviceId),
++      ]);
++      if (results[1].meta.changes !== 1) return reply({ error: "reissue_busy" }, 409);
++    }
++    // Retry after a lost acknowledgement also retries closing old sessions.
++    await closeRelays(env, deviceId);
++    return reply({ ok: true, deviceId, requestId, keyHash });
++  } catch { return reply({ error: "reissue_unavailable" }, 503); }
++}
+diff --git a/cloudflare/wayon-cloud/test_device_reissue.mjs b/cloudflare/wayon-cloud/test_device_reissue.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..82a022bf7eeb78184fc2b096ffb2bc85f94bbd51
+--- /dev/null
++++ b/cloudflare/wayon-cloud/test_device_reissue.mjs
+@@ -0,0 +1,174 @@
++// Synthetic identities only. SQLite executes the real D1 statements/transactions.
++import assert from "node:assert/strict";
++import { readFileSync } from "node:fs";
++import { DatabaseSync } from "node:sqlite";
++import { generateKeyPairSync, sign } from "node:crypto";
++import { handleDeviceReissue, verifyDeviceProof, keyDigest } from "./src/device_reissue.mjs";
++import worker, { WayonDeviceRelay, verifyLiveProtocol, verifyRemoteSshProtocol } from "./src/worker.js";
++
++const deviceId = "0123456789abcdef", otherId = "fedcba9876543210";
++const oldKey = "wayon_" + "a".repeat(43), nextKey = "wayon_" + "b".repeat(43), otherKey = "wayon_" + "c".repeat(43);
++const requestId = "1".repeat(32), otherRequest = "2".repeat(32);
++let clock = Date.now();
++const realNow = Date.now;
++Date.now = () => clock;
++const field = value => {
++  const data = Buffer.isBuffer(value) ? value : Buffer.from(value);
++  const size = Buffer.alloc(4); size.writeUInt32BE(data.length);
++  return Buffer.concat([size, data]);
++};
++function identity(alg) {
++  const pair = alg === "RS256" ? generateKeyPairSync("rsa", { modulusLength: 2048 })
++    : generateKeyPairSync("ec", { namedCurve: "P-256" });
++  const jwk = pair.publicKey.export({ format: "jwk" });
++  const type = alg === "RS256" ? "ssh-rsa" : "ecdsa-sha2-nistp256";
++  const fields = alg === "RS256" ? [field(type), field(Buffer.from(jwk.e, "base64url")), field(Buffer.concat([Buffer.from([0]), Buffer.from(jwk.n, "base64url")]))]
++    : [field(type), field("nistp256"), field(Buffer.concat([Buffer.from([4]), Buffer.from(jwk.x, "base64url"), Buffer.from(jwk.y, "base64url")]))];
++  return { ...pair, alg, ssh: `${type} ${Buffer.concat(fields).toString("base64")} synthetic` };
++}
++const rsa = identity("RS256"), ec = identity("ES256");
++async function proof(key = nextKey, id = requestId, signer = rsa, extra = {}) {
++  const header = Buffer.from(JSON.stringify({ alg: signer.alg, typ: "JWT" })).toString("base64url");
++  const now = Math.floor(clock / 1000);
++  const payload = Buffer.from(JSON.stringify({ identity: deviceId, iat: now, nbf: now, exp: now + 300,
++    hylink: { purpose: "key-reissue-v1", requestId: id, newKeyHash: await keyDigest(key) }, ...extra })).toString("base64url");
++  const data = `${header}.${payload}`;
++  return data + "." + sign("sha256", Buffer.from(data), { key: signer.privateKey, dsaEncoding: "ieee-p1363" }).toString("base64url");
++}
++let authorityCalls = 0;
++const authority = signer => async (url, options) => {
++  authorityCalls++;
++  assert.equal(url, `https://api.commadotai.com/v1.1/devices/${deviceId}/`);
++  assert.equal(options.redirect, "error");
++  assert.ok(options.headers.Authorization.startsWith("JWT "));
++  return Response.json({ dongle_id: deviceId, public_key: signer.ssh });
++};
++const hash = await keyDigest(nextKey);
++for (const signer of [rsa, ec]) {
++  const signed = await proof(nextKey, requestId, signer);
++  assert.equal(await verifyDeviceProof(signed, deviceId, requestId, hash, authority(signer)), true);
++  assert.equal(await verifyDeviceProof(signed, otherId, requestId, hash, authority(signer)), false);
++  assert.equal(await verifyDeviceProof(signed, deviceId, otherRequest, hash, authority(signer)), false);
++  assert.equal(await verifyDeviceProof(signed, deviceId, requestId, "f".repeat(64), authority(signer)), false);
++}
++const forged = await proof(nextKey, requestId, identity("RS256"));
++assert.equal(await verifyDeviceProof(forged, deviceId, requestId, hash, authority(rsa)), false);
++for (const extra of [{ exp: 0 }, { exp: Math.floor(clock / 1000) + 301 }, { iat: Math.floor(clock / 1000) + 31 }, { hylink: {} }]) {
++  assert.equal(await verifyDeviceProof(await proof(nextKey, requestId, rsa, extra), deviceId, requestId, hash, authority(rsa)), false);
++}
++assert.equal(await verifyDeviceProof("bad", deviceId, requestId, hash, authority(rsa)), false);
++assert.equal(await verifyDeviceProof(await proof(), deviceId, requestId, hash, async () => Response.json({ dongle_id: otherId, public_key: rsa.ssh })), false);
++assert.equal(await verifyDeviceProof(await proof(), deviceId, requestId, hash, async () => new Response(null, { status: 401 })), false);
++await assert.rejects(verifyDeviceProof(await proof(), deviceId, requestId, hash, async () => new Response(null, { status: 503 })), /authority_unavailable/);
++await assert.rejects(verifyDeviceProof(await proof(), deviceId, requestId, hash, async () => new Response("x".repeat(32769))), /authority_unavailable/);
++
++const sqlite = new DatabaseSync(":memory:");
++sqlite.exec(readFileSync(new URL("schema.sql", import.meta.url), "utf8"));
++// Both fresh install and reapplying the additive migration are harmless.
++sqlite.exec(readFileSync(new URL("migrations/0010_device_key_reissues.sql", import.meta.url), "utf8"));
++sqlite.exec(readFileSync(new URL("migrations/0010_device_key_reissues.sql", import.meta.url), "utf8"));
++const oldHash = await keyDigest(oldKey), otherHash = await keyDigest(otherKey);
++for (const [id, keyHash] of [[deviceId, oldHash], [otherId, otherHash]]) {
++  sqlite.prepare("INSERT INTO wayon_devices (device_id, key_hash, created_at, updated_at) VALUES (?, ?, ?, ?)").run(id, keyHash, "old", "old");
++  sqlite.prepare("INSERT INTO push_subscriptions (token, device_id, platform, created_at, updated_at) VALUES (?, ?, 'android', 'old', 'old')").run(id + "-push", id);
++}
++// A separate history sentinel must never be removed by credential rotation.
++sqlite.exec("CREATE TABLE history_sentinel (device_id TEXT PRIMARY KEY, value TEXT)");
++sqlite.prepare("INSERT INTO history_sentinel VALUES (?, 'preserve')").run(deviceId);
++let failBatch = false;
++const db = {
++  prepare(sql) {
++    return { bind(...args) {
++      return { first: async () => sqlite.prepare(sql).get(...args),
++        run: async () => ({ meta: { changes: Number(sqlite.prepare(sql).run(...args).changes) } }),
++        execute: () => ({ meta: { changes: Number(sqlite.prepare(sql).run(...args).changes) } }),
++      };
++    } };
++  },
++  async batch(statements) {
++    sqlite.exec("BEGIN");
++    try {
++      const results = [];
++      for (const [index, statement] of statements.entries()) {
++        results.push(statement.execute());
++        if (failBatch && index === 1) throw new Error("simulated storage failure");
++      }
++      sqlite.exec("COMMIT"); return results;
++    } catch (error) { sqlite.exec("ROLLBACK"); throw error; }
++  },
++};
++const closed = [], relayed = [];
++let relayFailure = false;
++const env = { DB: db, SNAPSHOTS: {}, WAYON_SSH_SESSION_SECRET: "test-only-secret", DEVICE_RELAY: {
++  idFromName: id => id,
++  get: id => ({ fetch: async request => {
++    if (request.url.endsWith("/revoke-key")) {
++      if (relayFailure) return new Response(null, { status: 503 });
++      closed.push(id); return new Response(null, { status: 204 });
++    }
++    relayed.push(id); return new Response(null, { status: 204 });
++  } }),
++} };
++const call = async (key = nextKey, id = requestId, overrides = {}) => handleDeviceReissue(new Request("https://test.invalid/api/devices/reissue", {
++  method: "POST", body: JSON.stringify({ deviceId, requestId: id, key, proof: await proof(key, id), ...overrides }),
++}), env, authority(rsa));
++const currentHash = () => sqlite.prepare("SELECT key_hash FROM wayon_devices WHERE device_id = ?").get(deviceId).key_hash;
++const rowCount = table => sqlite.prepare(`SELECT count(*) AS n FROM ${table}`).get().n;
++const session = async (key, path = "live") => worker.fetch(new Request(`https://test.invalid/api/${path}/session`, {
++  method: "POST", headers: { authorization: `Bearer ${key}` }, body: "{}",
++}), env, {});
++const oldSession = await (await session(oldKey)).json();
++assert.ok(await verifyLiveProtocol(oldSession.protocol, `${env.WAYON_SSH_SESSION_SECRET}:${oldHash}`));
++const oldSsh = await (await session(oldKey, "remote")).json();
++assert.ok(await verifyRemoteSshProtocol(oldSsh.protocol, `${env.WAYON_SSH_SESSION_SECRET}:${oldHash}`));
++
++assert.equal((await call(nextKey, requestId, { proof: "bad" })).status, 403);
++assert.equal((await call(nextKey, requestId, { deviceId: deviceId + "\n" })).status, 400);
++assert.equal((await call(nextKey, requestId, { key: nextKey + "\n" })).status, 400);
++assert.equal((await worker.fetch(new Request("https://test.invalid/api/devices/reissue", {
++  method: "POST", body: JSON.stringify({ deviceId, requestId, key: nextKey, proof: "bad" }),
++}), env, {})).status, 403); // Public route reaches device proof, not bearer-key fallback.
++assert.equal(currentHash(), oldHash);
++failBatch = true;
++assert.equal((await call()).status, 503);
++assert.equal(currentHash(), oldHash); assert.equal(rowCount("wayon_key_reissues"), 0); assert.equal(rowCount("push_subscriptions"), 2);
++failBatch = false;
++relayFailure = true; // Simulate committed key with a lost/failing cleanup acknowledgement.
++assert.equal((await call()).status, 503);
++assert.equal(currentHash(), hash); assert.equal(rowCount("wayon_key_reissues"), 1);
++relayFailure = false;
++let response = await call();
++assert.equal(response.status, 200); assert.equal((await response.json()).keyHash, hash);
++assert.deepEqual(closed, [`${deviceId}:ssh`, `${deviceId}:live`]);
++assert.equal(rowCount("push_subscriptions"), 1);
++assert.equal(sqlite.prepare("SELECT key_hash FROM wayon_devices WHERE device_id = ?").get(otherId).key_hash, otherHash);
++assert.equal(rowCount("history_sentinel"), 1);
++assert.equal((await session(oldKey)).status, 401);
++assert.equal((await session(nextKey)).status, 200);
++assert.equal((await session(otherKey)).status, 200);
++
++const stream = (protocol, path = "live/stream") => worker.fetch(new Request(`https://test.invalid/api/${path}`, {
++  headers: { upgrade: "websocket", "sec-websocket-protocol": protocol },
++}), env, {});
++assert.equal((await stream(oldSession.protocol)).status, 401);
++assert.equal((await stream(oldSsh.protocol, "remote/ssh")).status, 401);
++const newSession = await (await session(nextKey)).json();
++assert.equal((await stream(newSession.protocol)).status, 204);
++const otherSession = await (await session(otherKey)).json();
++assert.equal((await stream(otherSession.protocol)).status, 204);
++// Idempotent retries must not delete freshly restored app notification bindings.
++sqlite.prepare("INSERT INTO push_subscriptions (token, device_id, platform, created_at, updated_at) VALUES ('new-push', ?, 'android', 'new', 'new')").run(deviceId);
++assert.equal((await call()).status, 200); assert.equal(rowCount("push_subscriptions"), 2);
++assert.equal((await call("wayon_" + "d".repeat(43), otherRequest)).status, 409);
++assert.equal(currentHash(), hash);
++clock += 31000;
++assert.equal((await call("wayon_" + "d".repeat(43), otherRequest)).status, 200);
++assert.equal((await call()).status, 409); // Old signed request cannot roll back a later key.
++assert.equal(currentHash(), await keyDigest("wayon_" + "d".repeat(43)));
++// Durable Object revocation closes both sides, without forwarding control input.
++const codes = [];
++const relay = new WayonDeviceRelay({ getWebSockets: () => [{ close: code => codes.push(code) }, { close: code => codes.push(code) }] });
++assert.equal((await relay.fetch(new Request("https://internal/revoke-key", { method: "POST" }))).status, 204);
++assert.deepEqual(codes, [1000, 1000]);
++Date.now = realNow;
++console.log(`PASS: RSA/EC device proof, forged/expired/misbound rejection, atomic rollback, retry, old-key/session revocation, C4 isolation, history and push bindings (${authorityCalls} mocked authority requests)`);

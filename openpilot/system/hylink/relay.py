@@ -167,6 +167,7 @@ def run_relay(relay, params, kind="live"):
   retry = RelayRetry()
   while allowed():
     ws = None
+    config = {}
     relay.peer_opened = False
     connected_at = time.monotonic()
     try:
@@ -187,6 +188,9 @@ def run_relay(relay, params, kind="live"):
     relay_event(relay.target, "retry_scheduled", delay_s=round(delay, 2))
     retry_at = time.monotonic() + delay
     while allowed() and time.monotonic() < retry_at:
+      if read_config(params).get("token") != config.get("token"):
+        retry = RelayRetry()
+        break  # Resume immediately after an explicit local key replacement.
       time.sleep(0.5)
 
 

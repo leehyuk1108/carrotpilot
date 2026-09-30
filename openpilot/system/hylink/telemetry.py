@@ -290,7 +290,16 @@ def run(reporter):
   next_upload = next_change = 0.0
   last_signature = None
   previous_started = None
+  previous_identity = None
   while config := read_config(params):
+    identity = (config.get("device_id"), config.get("token"))
+    if identity != previous_identity:
+      # An explicitly replaced key must not inherit the rejected key's backoff
+      # or the old five-minute heartbeat. Try the new identity on the next tick.
+      backoff.success()
+      next_upload = next_change = 0.0
+      last_signature = None
+      previous_identity = identity
     reporter.bind(config)
     reporter.stage = "payload"
     sm.update(1000)

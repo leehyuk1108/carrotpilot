@@ -1,11 +1,13 @@
 'use strict';
 const key = document.getElementById('key');
 const copy = document.getElementById('copy');
+const reissue = document.getElementById('reissue');
 const status = document.getElementById('status');
 let pending = null;
 let checking = false;
 let healthRequest = null;
 let healthCode = null;
+let keyEpoch = 0;
 
 function setText(id, value) {
   const element = document.getElementById(id);
@@ -69,15 +71,18 @@ function clearKey(message = '') {
   copy.textContent = '키 복사';
   status.textContent = message;
 }
-async function connect() {
+async function connect(replacing = false) {
   if (pending) return;
+  keyEpoch++;
   const controller = new AbortController();
   pending = controller;
-  clearKey('키를 불러오는 중…');
+  reissue.disabled = true;
+  reissue.textContent = replacing ? '재발급 중…' : '키 재발급';
+  clearKey(replacing ? '이 콤마를 확인하고 새 키로 연결하고 있어요…' : '키를 불러오는 중…');
   const timeout = setTimeout(() => controller.abort(), 25000);
   try {
     // Same-origin POST activates defaults; GET and browser prefetch never do.
-    const response = await fetch('/api/connect', {
+    const response = await fetch(replacing ? '/api/reissue' : '/api/connect', {
       method: 'POST', headers: {'Content-Type': 'application/json', 'X-Hylink-Request': '1'},
       cache: 'no-store', body: '{}', signal: controller.signal,
     });
@@ -86,20 +91,25 @@ async function connect() {
     if (!data.ready || !data.enabled || !/^wayon_[A-Za-z0-9_-]{32,128}$/.test(data.key)) {
       throw new Error('키를 준비하지 못했어요. 새로고침해 주세요.');
     }
-    if (controller.signal.aborted) return;
+    if (controller.signal.aborted || pending !== controller) return;
     key.value = data.key;
     copy.disabled = false;
-    status.textContent = '';
+    status.textContent = replacing ? '새 키로 교체했어요. 키를 복사해 앱에 다시 입력해 주세요.' : '';
     resizeKey();
   } catch (error) {
     if (pending === controller) clearKey(error.name === 'AbortError' || error instanceof TypeError
-      ? '연결을 확인하고 새로고침해 주세요.' : error.message);
+      ? '처리 결과를 확인하지 못했어요. 연결을 확인하고 페이지를 다시 열어 주세요.' : error.message);
   } finally {
     clearTimeout(timeout);
-    if (pending === controller) pending = null;
+    if (pending === controller) {
+      pending = null;
+      reissue.disabled = false;
+      reissue.textContent = '키 재발급';
+    }
     refreshHealth();
   }
 }
+reissue.onclick = () => { if (!reissue.disabled) return connect(true); };
 copy.onclick = async () => {
   if (!key.value || copy.disabled) return;
   try {
@@ -114,6 +124,8 @@ copy.onclick = async () => {
 };
 window.addEventListener('resize', resizeKey);
 window.addEventListener('pagehide', () => {
+  keyEpoch++;
+  reissue.disabled = true;
   const request = pending;
   pending = null;
   request?.abort();
@@ -132,13 +144,15 @@ setInterval(async () => {
   refreshHealth();
   if (!key.value) return;
   checking = true;
+  const epoch = keyEpoch;
   try {
     const response = await fetch('/api/key', {
       headers: {'X-Hylink-Request': '1'}, cache: 'no-store', signal: AbortSignal.timeout(2500),
     });
     const data = await response.json();
+    if (epoch !== keyEpoch) return;
     if (!response.ok || !data.ready || !data.enabled || data.key !== key.value) throw new Error('closed');
   } catch {
-    clearKey('연결이 종료됐어요. 시동을 끄고 같은 Wi-Fi에서 새로고침해 주세요.');
+    if (epoch === keyEpoch) clearKey('연결이 종료됐어요. 시동을 끄고 같은 Wi-Fi에서 새로고침해 주세요.');
   } finally { checking = false; }
 }, 5000);

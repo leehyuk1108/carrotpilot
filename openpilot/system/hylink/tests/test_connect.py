@@ -126,7 +126,7 @@ def test_http_key_page_csrf_and_onroad_cutoff(configured):
   try:
     code, headers, body = request("GET", "/")
     assert code == 200 and config["token"] not in body
-    assert body.count("<button") == 1 and 'type="checkbox"' not in body
+    assert body.count("<button") == 2 and 'type="checkbox"' not in body
     assert 'id="setup"' not in body and 'id="copy"' in body
     assert runtime.read_json(runtime.CONFIG_PATH) == config
     assert headers["Cache-Control"] == "no-store" and "Access-Control-Allow-Origin" not in headers
@@ -221,3 +221,29 @@ def test_unchanged_driving_data_is_not_serialized_at_subscriber_rate(monkeypatch
   telemetry.main()
   assert builds == [0, 5, 10]
   assert uploads == [0]
+
+
+def test_replaced_key_does_not_wait_for_old_telemetry_backoff(monkeypatch):
+  class Subscriber:
+    index = -1
+    def update(self, timeout):
+      self.index += 1
+    def __getitem__(self, name):
+      return SimpleNamespace(started=False)
+  sm = Subscriber()
+  monkeypatch.setattr(telemetry, "Params", lambda: object())
+  monkeypatch.setattr(telemetry.messaging, "SubMaster", lambda *a, **k: sm)
+  monkeypatch.setattr(telemetry, "read_config", lambda _: {"device_id": "test", "token": "old" if sm.index < 0 else "new"} if sm.index < 3 else {})
+  monkeypatch.setattr(telemetry, "service_fresh", lambda *a: True)
+  monkeypatch.setattr(telemetry.time, "monotonic", lambda: sm.index)
+  monkeypatch.setattr(telemetry, "feature_status", lambda p: {})
+  monkeypatch.setattr(telemetry, "telemetry_payload", lambda *a: {"onroad": False, "gps": {}})
+  uploads = []
+  def post(config, *args):
+    uploads.append((config["token"], sm.index))
+    if config["token"] == "old":
+      raise RuntimeError("expired key")
+    return {"ok": True}
+  monkeypatch.setattr(telemetry, "post_json", post)
+  telemetry.main()
+  assert uploads == [("old", 0), ("new", 1)]

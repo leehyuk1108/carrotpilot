@@ -78,13 +78,13 @@ MESSAGES = {
     "error",
     "클라우드 인증 실패",
     "클라우드가 콤마의 연결 키를 받아들이지 않았어요.",
-    "현재 콤마의 키와 등록 정보를 확인해 주세요. 키를 새로 생성하거나 설정을 삭제하지 마세요.",
+    "현재 키로 계속 연결되지 않으면 위의 ‘키 재발급’을 눌러 주세요. 새 키는 앱에 다시 입력해야 해요.",
   ),
   "enrollment_conflict": (
     "error",
     "기존 등록 키와 불일치",
     "이 기기가 서버에 다른 키로 등록돼 있어요.",
-    "기존 콤마의 연결 설정을 확인해야 해요. 키를 반복 생성해도 해결되지 않아요.",
+    "위의 ‘키 재발급’으로 이 기기의 키를 교체한 뒤 앱에 새 키를 입력해 주세요.",
   ),
   "rate_limited": (
     "error",
@@ -332,7 +332,7 @@ def snapshot(params):
       code = "config_missing"
     elif config.get("device_id") != runtime.param_text(params, "DongleId"):
       code = "device_mismatch"
-    elif config.get("registered") is False:
+    elif config.get("registered") is not True:
       code = "not_registered"
     elif config.get("enabled") is not True:
       code = "disabled"

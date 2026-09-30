@@ -138,3 +138,28 @@ def test_close_frame_code_logged_without_reason_text(monkeypatch, capsys):
   assert ObservedWebSocket().recv_frame() is frame
   output = capsys.readouterr().out
   assert '"code":1000' in output and "private-close-reason" not in output
+
+
+def test_key_replacement_interrupts_old_relay_backoff(monkeypatch):
+  from types import SimpleNamespace
+  from openpilot.system.hylink import relay as module
+  active, clock, tokens, sleeps = [True], [0.0], [], []
+  config = {"token": "old-synthetic"}
+  monkeypatch.setattr(module, "read_config", lambda _: config.copy())
+  monkeypatch.setattr(module.time, "monotonic", lambda: clock[0])
+  def sleep(seconds):
+    sleeps.append(seconds)
+    clock[0] += seconds
+    config["token"] = "new-synthetic"
+  monkeypatch.setattr(module.time, "sleep", sleep)
+  def connect(*args, **kwargs):
+    tokens.append(kwargs["header"][0])
+    if len(tokens) == 2:
+      active[0] = False
+    return SimpleNamespace(close=lambda **kwargs: None)
+  monkeypatch.setattr(module, "create_connection", connect)
+  relay = Relay(lambda: active[0])
+  monkeypatch.setattr(relay, "connected", lambda ws: None)
+  module.run_relay(relay, object())
+  assert tokens == ["Authorization: Bearer old-synthetic", "Authorization: Bearer new-synthetic"]
+  assert sleeps == [0.5]

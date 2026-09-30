@@ -17,6 +17,7 @@ async function main() {
   const normal = {level: 'success', title: '최근 업로드 성공', code: 'ok', detail: '저장 확인', process: 'running',
     lastSuccessAt: '2026-09-30T03:10:00Z', lastAttemptAt: '2026-09-30T03:10:00Z'};
   let health = normal, unavailable = false, enabled = true, connectFails = false;
+  let shownKey = token, reissueFails = false, releaseReissue = null, holdReissue = false, releasePoll = null, holdPoll = false;
   const context = vm.createContext({
     document: {hidden: false, getElementById: id => {assert.ok(elements[id], id); return elements[id];},
       execCommand: command => {copied.push(command); return true;}},
@@ -31,7 +32,17 @@ async function main() {
         return {ok: true, json: async () => health};
       }
       if (url === '/api/connect' && connectFails) return {ok: false, json: async () => ({error: '등록 실패'})};
-      return {ok: true, json: async () => ({ready: true, enabled, key: token})};
+      if (url === '/api/reissue') {
+        if (holdReissue) await new Promise(resolve => {releaseReissue = resolve;});
+        if (reissueFails) return {ok: false, json: async () => ({error: '기기 인증 실패'})};
+        shownKey = 'wayon_' + 'n'.repeat(43);
+      }
+      if (url === '/api/key' && holdPoll) {
+        const oldKey = shownKey;
+        await new Promise(resolve => {releasePoll = resolve;});
+        return {ok: false, json: async () => ({key: oldKey})};
+      }
+      return {ok: true, json: async () => ({ready: true, enabled, key: shownKey})};
     },
   });
   vm.runInContext(source, context);
@@ -42,7 +53,7 @@ async function main() {
   assert.equal(elements.health.dataset.level, 'success');
   assert.equal(elements['health-diagnostics'].open, false);
   assert.equal(requests.filter(r => r.options.method === 'POST').length, 1);
-  assert.equal((html.match(/<button/g) || []).length, 1);
+  assert.equal((html.match(/<button/g) || []).length, 2);
   await elements.copy.onclick();
   assert.equal(copied[0], token);
   context.window.isSecureContext = false;
@@ -99,9 +110,37 @@ async function main() {
   assert.equal(elements.copy.disabled, true);
   assert.equal(elements.status.textContent, '등록 실패');
   assert.equal(elements.health.dataset.level, 'success'); // Diagnostics still work when key loading fails.
+  assert.equal(elements.reissue.disabled, false); // Recovery remains available after a registration conflict.
+  holdReissue = true;
+  const startCount = requests.filter(r => r.url === '/api/reissue').length;
+  const replace = elements.reissue.onclick();
+  await settle();
+  assert.equal(elements.reissue.disabled, true);
+  assert.equal(elements.copy.disabled, true);
+  assert.equal(elements.key.value, '');
+  await elements.reissue.onclick();
+  assert.equal(requests.filter(r => r.url === '/api/reissue').length, startCount + 1);
+  releaseReissue(); await replace; await settle(); holdReissue = false;
+  assert.equal(elements.key.value, shownKey);
+  assert.ok(elements.status.textContent.includes('새 키로 교체'));
+  assert.equal(elements.reissue.disabled, false);
+  await elements.copy.onclick();
+  assert.equal(elements.copy.disabled, false);
+  // A delayed old poll must not clear a successfully replaced key.
+  holdPoll = true;
+  const oldPoll = tick(); await settle();
+  await elements.reissue.onclick();
+  releasePoll(); await oldPoll; holdPoll = false;
+  assert.equal(elements.key.value, shownKey);
+  reissueFails = true;
+  await elements.reissue.onclick();
+  assert.equal(elements.key.value, '');
+  assert.equal(elements.status.textContent, '기기 인증 실패');
+  assert.equal(elements.reissue.disabled, false);
   listeners.pagehide();
   assert.equal(elements['health-success'].textContent, '—');
   assert.equal(elements.copy.disabled, true);
-  console.log('PASS: health success/error/recovery/history, privacy, disclosure, copy, hidden-page pause and read-only polling');
+  assert.equal(elements.reissue.disabled, true);
+  console.log('PASS: health, privacy, copy, one-click reissue, failure/retry, double-click suppression, stale-poll race, hidden-page pause');
 }
 main().catch(error => {console.error(error); process.exitCode = 1;});
