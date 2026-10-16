@@ -3,7 +3,9 @@ import base64
 import importlib.util
 import json
 from pathlib import Path
+import shutil
 import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -16,6 +18,23 @@ SPEC = importlib.util.spec_from_file_location('remote_support_api',
   Path(__file__).resolve().parents[2] / 'openpilot/selfdrive/carrot/server/features/remote_support.py')
 api = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(api)
+
+
+def test_helper_loads_repo_dependencies_without_pythonpath(tmp_path):
+  helpers = tmp_path / 'tools/jetlink'
+  helpers.mkdir(parents=True)
+  (tmp_path / 'pydeps').mkdir()
+  (tmp_path / 'pydeps/serial.py').write_text('origin = "repo-local"\n')
+  (helpers / 'manage_jetson.py').write_text('')
+  (helpers / 'setup_comma_remote.py').write_text(
+    'from pathlib import Path\nDIRECTORY = Path("/unused")\nSOCKET = "/unused/socket"\n')
+  target = helpers / 'remote_support.py'
+  shutil.copyfile(Path(support.__file__), target)
+  code = ('import runpy, sys; runpy.run_path(sys.argv[1]); import serial; '
+          'assert serial.origin == "repo-local"; '
+          'assert sys.path[:2] == [sys.argv[2], sys.argv[3]]')
+  subprocess.run([sys.executable, '-I', '-c', code, str(target),
+                  str(tmp_path / 'pydeps'), str(tmp_path)], check=True, timeout=15)
 
 
 def test_support_helpers_stay_off_driving_cores_at_background_priority(monkeypatch):

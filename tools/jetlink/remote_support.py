@@ -14,7 +14,8 @@ import urllib.parse
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT))
+# sudo removes PYTHONPATH; use the same repo-local dependencies as the launcher.
+sys.path[:0] = [str(ROOT / 'pydeps'), str(ROOT)]
 from tools.jetlink import manage_jetson as management
 from tools.jetlink import setup_comma_remote as setup
 
