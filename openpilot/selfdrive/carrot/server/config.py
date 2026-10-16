@@ -31,6 +31,7 @@ CARROT_DATA_DIR = os.environ.get("CARROT_DATA_DIR", "/data/carrot")
 CARROT_STATE_DIR = os.path.join(CARROT_DATA_DIR, "state")
 # Pre-relocation in-repo path (what the old hardcoded CARROT_DATA_DIR pointed at).
 CARROT_LEGACY_STATE_DIR = "/data/openpilot/openpilot/selfdrive/carrot/data/state"
+CARROT_PRE_PACKAGE_STATE_DIR = "/data/openpilot/selfdrive/carrot/data/state"
 CARROT_GIT_STATE_PATH = os.path.join(CARROT_STATE_DIR, "git.json")
 CARROT_TOOL_JOBS_STATE_PATH = os.path.join(CARROT_STATE_DIR, "tool_jobs.json")
 CARROT_WEB_SETTINGS_PATH = os.path.join(CARROT_STATE_DIR, "web_settings.json")
@@ -112,15 +113,14 @@ def migrate_legacy_carrot_state() -> None:
   best-effort: copies a file only when the destination is missing, so it never
   clobbers newer settings and is safe to call on every startup."""
   try:
-    if os.path.abspath(CARROT_LEGACY_STATE_DIR) == os.path.abspath(CARROT_STATE_DIR):
-      return
-    if not os.path.isdir(CARROT_LEGACY_STATE_DIR):
-      return
-    os.makedirs(CARROT_STATE_DIR, exist_ok=True)
-    for name in _LEGACY_STATE_FILES:
-      src = os.path.join(CARROT_LEGACY_STATE_DIR, name)
-      dst = os.path.join(CARROT_STATE_DIR, name)
-      if os.path.isfile(src) and not os.path.exists(dst):
-        shutil.copy2(src, dst)
+    for legacy_dir in (CARROT_LEGACY_STATE_DIR, CARROT_PRE_PACKAGE_STATE_DIR):
+      if os.path.abspath(legacy_dir) == os.path.abspath(CARROT_STATE_DIR) or not os.path.isdir(legacy_dir):
+        continue
+      os.makedirs(CARROT_STATE_DIR, exist_ok=True)
+      for name in _LEGACY_STATE_FILES:
+        src = os.path.join(legacy_dir, name)
+        dst = os.path.join(CARROT_STATE_DIR, name)
+        if os.path.isfile(src) and not os.path.exists(dst):
+          shutil.copy2(src, dst)
   except Exception:
     pass
