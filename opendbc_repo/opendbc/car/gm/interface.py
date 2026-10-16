@@ -148,6 +148,8 @@ class CarInterface(CarInterfaceBase):
         ret.pcmCruise = False
         ret.openpilotLongitudinalControl = True
         ret.safetyConfigs[0].safetyParam |= GMSafetyFlags.HW_CAM_LONG.value
+        if candidate == CAR.CHEVROLET_TRAVERSE:
+          ret.safetyConfigs[0].safetyParam |= GMSafetyFlags.HW_SDGM.value
 
       if candidate in ALT_ACCS:
         ret.alphaLongitudinalAvailable = False

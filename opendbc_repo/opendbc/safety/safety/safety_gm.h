@@ -37,6 +37,7 @@ static bool gm_pedal_long = false;
 static bool gm_cc_long = false;
 static bool gm_skip_relay_check = false;
 static bool gm_force_ascm = false;
+static bool gm_sdgm = false;
 
 static void gm_rx_hook(const CANPacket_t *to_push) {
 
@@ -186,7 +187,8 @@ static bool gm_tx_hook(const CANPacket_t *to_send) {
   // GAS/REGEN: safety check
   if (addr == 0x2CB) {
     bool apply = GET_BIT(to_send, 0U);
-    if (apply && !controls_allowed) {
+    // SDGM transmit requests must never restore permission after disengagement.
+    if (apply && !controls_allowed && !gm_sdgm) {
       controls_allowed = true;        
     }
     // convert float CAN signal to an int for gas checks: 22534 / 0.125 = 180272
@@ -259,6 +261,7 @@ static safety_config gm_init(uint16_t param) {
   const uint16_t GM_PARAM_NO_ACC = 32;
   const uint16_t GM_PARAM_PEDAL_LONG = 64;  // TODO: this can be inferred
   const uint16_t GM_PARAM_EV = 256;
+  const uint16_t GM_PARAM_HW_SDGM = 512;
 
   // common safety checks assume unscaled integer values
   static const int GM_GAS_TO_CAN = 8;  // 1 / 0.125
@@ -284,6 +287,10 @@ static safety_config gm_init(uint16_t param) {
 
   static const CanMsg GM_CAM_LONG_TX_MSGS[] = {{0x180, 0, 4}, {0x315, 0, 5}, {0x2CB, 0, 8}, {0x370, 0, 6}, {0x200, 0, 6}, {0x1E1, 0, 7},  // pt bus
                                                {0x184, 2, 8}};  // camera bus
+
+  // Traverse SDGM/SASCM harness: brake only on camera CAN, never on powertrain CAN.
+  static const CanMsg GM_SDGM_LONG_TX_MSGS[] = {{0x180, 0, 4}, {0x2CB, 0, 8}, {0x370, 0, 6}, {0x200, 0, 6}, {0x1E1, 0, 7},
+                                               {0x315, 2, 5}, {0x184, 2, 8}};
 
   // TODO: do checksum and counter checks. Add correct timestep, 0.1s for now.
   static RxCheck gm_rx_checks[] = {
@@ -331,12 +338,14 @@ static safety_config gm_init(uint16_t param) {
   } else {
   }
 
+  gm_cc_long = GET_FLAG(param, GM_PARAM_CC_LONG);
+  gm_sdgm = GET_FLAG(param, GM_PARAM_HW_SDGM);
+  gm_cam_long = false;
 #ifdef ALLOW_DEBUG
   const uint16_t GM_PARAM_HW_CAM_LONG = 2;
   gm_cam_long = GET_FLAG(param, GM_PARAM_HW_CAM_LONG) && !gm_cc_long;
 #endif
   gm_pedal_long = GET_FLAG(param, GM_PARAM_PEDAL_LONG);
-  gm_cc_long = GET_FLAG(param, GM_PARAM_CC_LONG);
   gm_pcm_cruise = (gm_hw == GM_CAM) && (!gm_cam_long || gm_cc_long) && !gm_force_ascm && !gm_pedal_long;
   gm_skip_relay_check = GET_FLAG(param, GM_PARAM_NO_CAMERA);
   gm_has_acc = !GET_FLAG(param, GM_PARAM_NO_ACC);
@@ -354,7 +363,11 @@ static safety_config gm_init(uint16_t param) {
       ret = BUILD_SAFETY_CFG(gm_rx_checks, GM_CC_LONG_TX_MSGS);
       print("GM CC Long\n");
     } else if (gm_cam_long) {
-      ret = BUILD_SAFETY_CFG(gm_rx_checks, GM_CAM_LONG_TX_MSGS);
+      if (gm_sdgm) {
+        ret = BUILD_SAFETY_CFG(gm_rx_checks, GM_SDGM_LONG_TX_MSGS);
+      } else {
+        ret = BUILD_SAFETY_CFG(gm_rx_checks, GM_CAM_LONG_TX_MSGS);
+      }
       print("GM CAM Long\n");
     } else {
       ret = BUILD_SAFETY_CFG(gm_rx_checks, GM_CAM_TX_MSGS);

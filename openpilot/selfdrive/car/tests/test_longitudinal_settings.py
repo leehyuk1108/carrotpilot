@@ -152,7 +152,7 @@ def test_traverse_longitudinal_opt_in_survives_three_drives(gm_params):
     cp = build(CAR.CHEVROLET_TRAVERSE, params.get_bool('AlphaLongitudinalEnabled'))
     assert cp.alphaLongitudinalAvailable and cp.openpilotLongitudinalControl
     assert not cp.pcmCruise and not cp.dashcamOnly
-    assert cp.safetyConfigs[0].safetyParam == GMSafetyFlags.HW_CAM | GMSafetyFlags.HW_CAM_LONG
+    assert cp.safetyConfigs[0].safetyParam == GMSafetyFlags.HW_CAM | GMSafetyFlags.HW_CAM_LONG | GMSafetyFlags.HW_SDGM
     fresh_cp_cleanup(cp, params)
     assert params.get_bool('AlphaLongitudinalEnabled')
 
