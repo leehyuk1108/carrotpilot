@@ -170,13 +170,45 @@ def test_account_switch_logs_out_before_new_login(monkeypatch):
 
   def client(entry, *args, **kwargs):
     calls.append(args)
+    if args == ('debug', 'prefs'):
+      return 0, '{"NetfilterMode":0}', ''
     return (0, '', '') if args == ('logout',) else (1, '{"AuthURL":"https://login.tailscale.com/a/test-only"}\n{}', '')
   monkeypatch.setattr(support, 'client', client)
   result = support.login(True, 'owner')
-  assert calls[0] == ('logout',) and calls[1][0] == 'up'
-  assert '--accept-dns=false' in calls[1] and '--ssh=false' in calls[1]
-  assert '--accept-routes=false' in calls[1]
+  assert calls[:2] == [('debug', 'prefs'), ('logout',)] and calls[2][0] == 'up'
+  assert '--accept-dns=false' in calls[2] and '--ssh=false' in calls[2]
+  assert '--accept-routes=false' in calls[2] and '--netfilter-mode=off' in calls[2]
   assert result['network']['auth_url'].endswith('/test-only')
+
+
+@pytest.mark.parametrize('mode,label', [(0, 'off'), (1, 'nodivert'), (2, 'on')])
+def test_wayon_login_preserves_existing_firewall_mode(monkeypatch, mode, label):
+  calls = []
+  monkeypatch.setattr(support, 'provider', lambda: ('wayon', None, None))
+  monkeypatch.setattr(support, 'network_status', lambda entry: {'backend': 'NeedsLogin', 'auth_url': ''})
+  def client(entry, *args, **kwargs):
+    calls.append(args)
+    return (0, json.dumps({'NetfilterMode': mode}), '') if args == ('debug', 'prefs') else (0, '{}', '')
+  monkeypatch.setattr(support, 'client', client)
+  support.login()
+  assert calls[0] == ('debug', 'prefs')
+  assert '--netfilter-mode=' + label in calls[1]
+
+
+@pytest.mark.parametrize('code,raw', [(1, '{}'), (0, '{}'), (0, 'invalid'), (0, 'null'),
+                                    (0, '{"NetfilterMode":true}'), (0, '{"NetfilterMode":3}')])
+def test_wayon_firewall_read_failure_never_logs_out(monkeypatch, code, raw):
+  calls = []
+  monkeypatch.setattr(support, 'provider', lambda: ('wayon', None, None))
+  monkeypatch.setattr(support, 'network_status', lambda entry: {'backend': 'Running', 'account': 'owner'})
+  monkeypatch.setattr(support, 'client', lambda entry, *args: (calls.append(args) or code, raw, ''))
+  with pytest.raises(RuntimeError, match='account unchanged'):
+    support.login(True, 'owner')
+  assert calls == [('debug', 'prefs')]
+
+
+def test_hl_login_does_not_disable_firewall():
+  assert not any('--netfilter-mode=' in arg for arg in support.setup.login_args())
 
 
 def test_existing_provider_install_is_noop(monkeypatch):

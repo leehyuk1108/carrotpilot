@@ -182,15 +182,28 @@ def login(switch=False, expected_account=None):
   if switch:
     if expected_account != before.get('account', ''):
       raise ValueError('The signed-in account changed. Refresh and confirm the current account again.')
+  elif before['backend'] == 'Running':
+    return {'changed': False, 'network': before}
+  firewall_args = []
+  if entry[0] == 'wayon':
+    # Wayon can own an SSH-only firewall separately. Preserve that policy when
+    # explicit `up` flags are used, including after an approved account switch.
+    code, raw, _ = client(entry, 'debug', 'prefs')
+    try:
+      mode = json.loads(raw)['NetfilterMode']
+      if code or type(mode) is not int or mode not in (0, 1, 2):
+        raise ValueError
+    except (ValueError, KeyError, TypeError):
+      raise RuntimeError('Could not read the existing Wayon firewall policy; account unchanged.') from None
+    firewall_args = ['--netfilter-mode=' + {0: 'off', 1: 'nodivert', 2: 'on'}[mode]]
+  if switch:
     code, _, _ = client(entry, 'logout')
     if code:
       raise RuntimeError('Could not sign out. The account was not replaced.')
-  elif before['backend'] == 'Running':
-    return {'changed': False, 'network': before}
   if entry[0] == 'hl':
     (setup.DIRECTORY / 'enabled').touch(mode=0o644)
     setup.ensure_service()
-  args = setup.login_args()[2:] + ['--json', '--timeout=5s']
+  args = setup.login_args()[2:] + firewall_args + ['--json', '--timeout=5s']
   code, output, _ = client(entry, *args)
   after = network_status(entry)
   # `up --json` emits a stream of objects and may time out while the user logs in.
