@@ -290,6 +290,10 @@ class AugmentedRoadView(CameraView):
       self._alert_renderer.render(self._content_rect)
       alert_ms += (time.monotonic() - _t) * 1000.0
 
+    _t = time.monotonic()
+    self._hud_renderer.draw_jetlink_status(self._content_rect, alert_to_render)
+    hud_ms += (time.monotonic() - _t) * 1000.0
+
     # Draw fake rounded border
     _t = time.monotonic()
     rl.draw_rectangle_rounded_lines_ex(self._content_rect, 0.2 * 1.02, 10, 50, rl.BLACK)

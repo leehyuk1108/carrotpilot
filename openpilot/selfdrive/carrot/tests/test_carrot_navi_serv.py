@@ -36,6 +36,7 @@ class _MemoryParams:
 
 def _serv():
   serv = CarrotServ.__new__(CarrotServ)
+  serv.navi_source = 0
   serv.carrot_navi_session_id = ""
   serv.carrot_navi_speed_sequence = -1
   serv.carrot_navi_current_sequence = -1

@@ -16,6 +16,15 @@
 # On failure the reason is left in $STATUS_FILE as well as on stderr, so the
 # openpilot side can say why the link is unavailable.
 set -euo pipefail
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+
+case "${1:-}" in
+  --latch-management) exec python3 "$SCRIPT_DIR/usb_management.py" boot ;;
+  --activate-management) exec python3 "$SCRIPT_DIR/usb_management.py" net ;;
+  --detach-management) exec python3 "$SCRIPT_DIR/usb_management.py" detach ;;
+  ''|--management|--teardown) ;;
+  *) echo 'Unsupported gadget action' >&2; exit 1 ;;
+esac
 
 GADGET=/sys/kernel/config/usb_gadget/jetlink
 FFS_MOUNT=${FFS_MOUNT:-/dev/ffs-jetlink}
@@ -41,6 +50,7 @@ fail() {
 if [[ "${1:-}" == "--teardown" ]]; then
   if [[ -d "$GADGET" ]]; then
     echo "" > "$GADGET/UDC" 2>/dev/null || true
+    python3 "$SCRIPT_DIR/usb_management.py" detach
     rm -f "$GADGET/configs/c.1/ffs.$FFS_NAME" 2>/dev/null || true
     rmdir "$GADGET/configs/c.1/strings/0x409" 2>/dev/null || true
     rmdir "$GADGET/configs/c.1" 2>/dev/null || true
@@ -99,6 +109,15 @@ for other in "$CONFIGFS"/usb_gadget/*/UDC; do
   fi
 done
 
+# Never change descriptors on an existing live inference connection.
+if [[ -e "$GADGET/UDC" ]]; then
+  bound=$(cat "$GADGET/UDC") || fail "cannot verify jetlink controller ownership"
+  [[ -z "$bound" ]] || fail "jetlink controller is still bound"
+fi
+if [[ "${1:-}" != "--management" && -L "$GADGET/configs/c.1/ncm.hlmaint" ]]; then
+  python3 "$SCRIPT_DIR/usb_management.py" detach
+fi
+
 mkdir -p "$GADGET" || fail "could not create the gadget at $GADGET"
 cd "$GADGET"
 
@@ -107,6 +126,8 @@ echo "$PID"   > idProduct
 echo 0x0100   > bcdDevice
 echo 0x0320   > bcdUSB            # 3.2: advertise SuperSpeed
 echo 0x00     > bDeviceClass      # class is per-interface (vendor specific)
+echo 0x00     > bDeviceSubClass
+echo 0x00     > bDeviceProtocol
 
 mkdir -p strings/0x409
 echo "zoompilot"                              > strings/0x409/manufacturer
@@ -149,6 +170,10 @@ mountpoint -q "$FFS_MOUNT" || mount -t functionfs ${FFS_OPTS:+-o "$FFS_OPTS"} "$
 # the client binds the UDC as the openpilot user, so hand it that one attribute
 if [ -n "$FFS_OPTS" ]; then
   chown "$FFS_USER" "$GADGET/UDC" 2>/dev/null || true
+fi
+
+if [[ "${1:-}" == "--management" ]]; then
+  python3 "$SCRIPT_DIR/usb_management.py" gadget
 fi
 
 status ok

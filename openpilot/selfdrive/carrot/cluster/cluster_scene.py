@@ -41,6 +41,7 @@ from cluster_config import (
     VEHICLE_LANE_CHANGE_SLOPE,
     VEHICLE_LENGTH_M,
     VEHICLE_WIDTH_M,
+    WHITE,
     cluster_camera_view_is_road_camera,
 )
 from cluster_models import (
@@ -132,6 +133,10 @@ MODEL_LINE_STRIP_GROUP_CACHE_POINT_GRID_M = 0.05
 MODEL_LINE_STRIP_GROUP_CACHE_COLOR: Color = (0, 0, 0, 0)
 MODEL_LINE_RENDER_POINT_KEY_CACHE_LIMIT = 256
 MODEL_LINE_RENDER_POINT_LIMIT = 0
+MODEL_LINE_RENDER_SMOOTH_START_M = 20.0
+MODEL_LINE_RENDER_SMOOTH_MIN_STEP_M = 0.35
+MODEL_LINE_RENDER_SMOOTH_MAX_STEP_M = 1.0
+MODEL_LINE_RENDER_SMOOTH_STEP_PER_M = 0.12
 LANE_OFFSET_STRIP_CACHE_LIMIT = 64
 LANE_OFFSET_STRIP_CACHE_OFFSET_GRID = 0.01
 LANE_OFFSET_STRIP_CACHE_STEERING_GRID = 0.002
@@ -187,6 +192,7 @@ EGO_VEHICLE_CENTER_FORWARD_M = EGO_FORWARD_M - VEHICLE_LENGTH_M * 0.5
 LANE_HIGHLIGHT_COLOR = (64, 148, 255)
 LANE_HIGHLIGHT_ALPHA = 220
 LANE_HIGHLIGHT_ROUTE_ALPHA = 170
+LIGHT_THEME_WHITE_LANE_MARKING = (208, 216, 224)
 BSD_LANE_MARKING_MATCH_TOLERANCE = 0.45
 LANE_DASH_LENGTH_M = 5.2
 LANE_DASH_GAP_M = 4.2
@@ -280,7 +286,7 @@ ModelLineStripCacheKey = tuple[
     ModelLineStripGeometrySpecs,
 ]
 _MODEL_LINE_STRIP_GROUP_CACHE: OrderedDict[ModelLineStripCacheKey, ModelLineStripGroups] = OrderedDict()
-ModelLineRenderPointKeyCacheKey = tuple[int, int]
+ModelLineRenderPointKeyCacheKey = tuple[int, int, bool]
 _MODEL_LINE_RENDER_POINT_KEY_CACHE: OrderedDict[
     ModelLineRenderPointKeyCacheKey,
     tuple[tuple[ModelPathPoint, ...], tuple[ModelPathPoint, ...], ModelLineStripPointKey],
@@ -1157,11 +1163,41 @@ def model_line_cache_point_key(model_points: tuple[ModelPathPoint, ...]) -> Mode
     )
 
 
+def smooth_model_line_points_for_render(
+    model_points: tuple[ModelPathPoint, ...],
+) -> tuple[ModelPathPoint, ...]:
+    if len(model_points) < 3:
+        return model_points
+
+    smoothed: list[ModelPathPoint] = [model_points[0]]
+    changed = False
+    for point in model_points[1:]:
+        lateral_m = point.lateral_m
+        previous = smoothed[-1]
+        if point.forward_m >= MODEL_LINE_RENDER_SMOOTH_START_M:
+            forward_delta_m = max(0.001, point.forward_m - previous.forward_m)
+            max_step_m = min(
+                MODEL_LINE_RENDER_SMOOTH_MAX_STEP_M,
+                max(
+                    MODEL_LINE_RENDER_SMOOTH_MIN_STEP_M,
+                    forward_delta_m * MODEL_LINE_RENDER_SMOOTH_STEP_PER_M,
+                ),
+            )
+            lateral_delta_m = lateral_m - previous.lateral_m
+            if abs(lateral_delta_m) > max_step_m:
+                lateral_m = previous.lateral_m + math.copysign(max_step_m, lateral_delta_m)
+                changed = True
+        smoothed.append(replace(point, lateral_m=lateral_m) if lateral_m != point.lateral_m else point)
+
+    return tuple(smoothed) if changed else model_points
+
+
 def model_line_render_points_and_key(
     model_points: tuple[ModelPathPoint, ...],
     point_limit: int,
+    smooth_model_points: bool = False,
 ) -> tuple[tuple[ModelPathPoint, ...], ModelLineStripPointKey]:
-    cache_key = (id(model_points), int(point_limit))
+    cache_key = (id(model_points), int(point_limit), smooth_model_points)
     cached = _MODEL_LINE_RENDER_POINT_KEY_CACHE.get(cache_key)
     if cached is not None:
         cached_model_points, render_points, point_key = cached
@@ -1184,6 +1220,8 @@ def model_line_render_points_and_key(
             selected.append(model_points[index])
             previous_index = index
         render_points = tuple(selected)
+    if smooth_model_points:
+        render_points = smooth_model_line_points_for_render(render_points)
 
     point_key = model_line_cache_point_key(render_points)
     _MODEL_LINE_RENDER_POINT_KEY_CACHE[cache_key] = (model_points, render_points, point_key)
@@ -1193,7 +1231,11 @@ def model_line_render_points_and_key(
 
 
 def model_line_points_for_render(model_points: tuple[ModelPathPoint, ...]) -> tuple[ModelPathPoint, ...]:
-    render_points, _ = model_line_render_points_and_key(model_points, MODEL_LINE_RENDER_POINT_LIMIT)
+    render_points, _ = model_line_render_points_and_key(
+        model_points,
+        MODEL_LINE_RENDER_POINT_LIMIT,
+        True,
+    )
     return render_points
 
 
@@ -1207,13 +1249,18 @@ def cached_model_line_strip_groups(
     longitudinal_scale: float = 1.0,
     profile_add: ProfileAdd | None = None,
     profile_prefix: str = "scene.model_line",
+    smooth_model_points: bool = False,
 ) -> ModelLineStripGroups:
     scale = max(0.001, float(longitudinal_scale))
     cache_start_m = model_line_cache_start_m(start_m)
     cache_end_m = model_line_cache_end_m(end_m)
     geometry_specs = model_line_geometry_specs(specs)
     profile_stage = profile_scene_start(profile_add)
-    render_points, point_key = model_line_render_points_and_key(model_points, MODEL_LINE_RENDER_POINT_LIMIT)
+    render_points, point_key = model_line_render_points_and_key(
+        model_points,
+        MODEL_LINE_RENDER_POINT_LIMIT,
+        smooth_model_points,
+    )
     profile_scene_add(profile_add, f"{profile_prefix}.key", profile_stage)
     key = (
         point_key,
@@ -1414,6 +1461,7 @@ def model_line_strip_groups(
     longitudinal_scale: float = 1.0,
     profile_add: ProfileAdd | None = None,
     profile_prefix: str = "scene.model_line",
+    smooth_model_points: bool = False,
 ) -> ModelLineStripGroups:
     groups = cached_model_line_strip_groups(
         model_points,
@@ -1425,6 +1473,7 @@ def model_line_strip_groups(
         longitudinal_scale,
         profile_add,
         profile_prefix,
+        smooth_model_points,
     )
     if groups is None:
         return None
@@ -3443,10 +3492,35 @@ def bsd_lane_marking_offsets(state: ClusterUiState) -> tuple[float, ...]:
 def lane_marking_color_for_state(
     marking: LaneMarking,
     bsd_marking_offsets: tuple[float, ...],
+    theme: ClusterTheme = LIGHT_CLUSTER_THEME,
 ) -> tuple[int, int, int]:
     if any(abs(marking.offset - offset) <= BSD_LANE_MARKING_MATCH_TOLERANCE for offset in bsd_marking_offsets):
         return RED
+    if not theme.is_dark and marking.color == WHITE:
+        return LIGHT_THEME_WHITE_LANE_MARKING
     return marking.color
+
+
+def lane_marking_specs_for_state(
+    marking: LaneMarking,
+    bsd_marking_offsets: tuple[float, ...],
+    theme: ClusterTheme = LIGHT_CLUSTER_THEME,
+) -> tuple[tuple[int, Color, float], ...]:
+    lane_color = rgba(lane_marking_color_for_state(marking, bsd_marking_offsets, theme))
+    if not theme.is_dark:
+        return ((marking.width, lane_color, LANE_MARKING_HEIGHT_M),)
+    return (
+        (
+            marking.width + LANE_MARKING_BORDER_EXTRA_WIDTH_PX,
+            theme.lane_marking_border,
+            LANE_MARKING_SHADOW_HEIGHT_M,
+        ),
+        (
+            marking.width,
+            lane_color,
+            LANE_MARKING_HEIGHT_M,
+        ),
+    )
 
 
 def data_geometry_mode_for_state(state: ClusterUiState) -> bool:
@@ -3615,18 +3689,7 @@ def build_cluster_scene(
     for marking in state.lanes:
         if not marking.visible:
             continue
-        marking_specs = (
-            (
-                marking.width + LANE_MARKING_BORDER_EXTRA_WIDTH_PX,
-                theme.lane_marking_border,
-                LANE_MARKING_SHADOW_HEIGHT_M,
-            ),
-            (
-                marking.width,
-                rgba(lane_marking_color_for_state(marking, bsd_marking_offsets)),
-                LANE_MARKING_HEIGHT_M,
-            ),
-        )
+        marking_specs = lane_marking_specs_for_state(marking, bsd_marking_offsets, theme)
         strip_groups: tuple[tuple[MeshStrip, ...], ...] | None = None
         if marking.model_points:
             profile_step = profile_scene_start(profile_add)
@@ -3641,6 +3704,7 @@ def build_cluster_scene(
                 longitudinal_scale,
                 profile_add,
                 "scene.lane_model",
+                smooth_model_points=True,
             )
             if profile_add is not None:
                 lane_model_ms += (time.perf_counter() - profile_step) * 1000.0
@@ -3658,9 +3722,8 @@ def build_cluster_scene(
             if profile_add is not None:
                 lane_offset_ms += (time.perf_counter() - profile_step) * 1000.0
         profile_step = profile_scene_start(profile_add)
-        backing_strips, foreground_strips = strip_groups
-        lane_strips.extend(backing_strips)
-        lane_strips.extend(foreground_strips)
+        for strips in strip_groups:
+            lane_strips.extend(strips)
         if profile_add is not None:
             lane_collect_ms += (time.perf_counter() - profile_step) * 1000.0
     profile_scene_add_elapsed(profile_add, "scene.build.lane_markings.model", lane_model_ms)

@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 DESIGN_WIDTH = 1920
 DESIGN_HEIGHT = 480
+KST_OFFSET_SECONDS = 9 * 60 * 60
 
 Color3 = tuple[int, int, int]
 Color4 = tuple[int, int, int, int]
@@ -47,6 +48,8 @@ class ClusterTheme:
 CLUSTER_THEME_AUTO = 0
 CLUSTER_THEME_DARK = 1
 CLUSTER_THEME_LIGHT = 2
+CLUSTER_DARK_BRIGHTNESS_PERCENT = 20
+CLUSTER_LIGHT_BRIGHTNESS_PERCENT = 60
 CLUSTER_ENCODER_AUTO = 0
 CLUSTER_ENCODER_JPEG = 1
 CLUSTER_ENCODER_HARDWARE = 2
@@ -497,6 +500,24 @@ def normalize_cluster_radar_source_color_mode(value: object) -> int:
     return CLUSTER_RADAR_SOURCE_COLOR_DEFAULT
 
 
+def kst_clock_text(*, include_seconds: bool = False, now: float | None = None) -> str:
+    timestamp = time.time() if now is None else float(now)
+    fmt = "%H:%M:%S" if include_seconds else "%H:%M"
+    return time.strftime(fmt, time.gmtime(timestamp + KST_OFFSET_SECONDS))
+
+
+def kst_time_tuple(now: float | None = None) -> time.struct_time:
+    timestamp = time.time() if now is None else float(now)
+    return time.gmtime(timestamp + KST_OFFSET_SECONDS)
+
+
+def kst_clock_text_12h(*, include_seconds: bool = False, now: float | None = None) -> str:
+    local_time = kst_time_tuple(now)
+    hour = local_time.tm_hour % 12 or 12
+    seconds = f":{local_time.tm_sec:02d}" if include_seconds else ""
+    return f"{hour}:{local_time.tm_min:02d}{seconds}"
+
+
 def current_cluster_theme(mode: object = "auto", now: float | None = None) -> ClusterTheme:
     normalized = normalize_cluster_theme_mode(mode)
     if normalized == "dark":
@@ -504,10 +525,15 @@ def current_cluster_theme(mode: object = "auto", now: float | None = None) -> Cl
     if normalized == "light":
         return LIGHT_CLUSTER_THEME
 
-    local_hour = time.localtime(now).tm_hour if now is not None else time.localtime().tm_hour
+    local_hour = kst_time_tuple(now).tm_hour
     if local_hour >= AUTO_DARK_START_HOUR or local_hour < AUTO_LIGHT_START_HOUR:
         return DARK_CLUSTER_THEME
     return LIGHT_CLUSTER_THEME
+
+
+def cluster_theme_brightness_percent(mode: object = "auto", now: float | None = None) -> int:
+    theme = current_cluster_theme(mode, now)
+    return CLUSTER_DARK_BRIGHTNESS_PERCENT if theme.is_dark else CLUSTER_LIGHT_BRIGHTNESS_PERCENT
 
 
 BG = LIGHT_CLUSTER_THEME.bg
@@ -531,6 +557,9 @@ CAR_DARK = LIGHT_CLUSTER_THEME.default_vehicle
 
 MAX_SPEED_KPH = 260.0
 MAX_ACCEL_MPS2 = 5.0
+AMBIENT_MAX_ACCEL_MPS2 = 5.0
+AMBIENT_ACCEL_DEADBAND_MPS2 = 0.08
+AMBIENT_ACCEL_SMOOTH_TAU_SECONDS = 0.30
 CONTROLLER_ACCEL_MPS2 = 3.2
 CONTROLLER_BRAKE_MPS2 = 5.0
 COAST_DECEL_MPS2 = 0.18

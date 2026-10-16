@@ -174,8 +174,10 @@ def filter_settings_catalog_for_brand(
   groups_list: List[Dict[str, Any]],
   categories: List[Dict[str, Any]] | None,
   brand: str,
+  *,
+  hidden_settings: frozenset[str] = frozenset(),
 ) -> tuple[Dict[str, list], List[Dict[str, Any]], List[Dict[str, Any]] | None, set[str]]:
-  """Return a catalog view with brand-restricted settings removed.
+  """Return a catalog view without restricted or legacy read-only controls.
 
   The process cache remains brand-neutral because the same server helpers are
   also used by tests and tools. Filtering copies only the response structures
@@ -186,10 +188,10 @@ def filter_settings_catalog_for_brand(
     str(item.get("name"))
     for items in groups.values()
     for item in items
-    if normalized_brand and normalized_brand in {
+    if item.get("name") in hidden_settings or (normalized_brand and normalized_brand in {
       str(hidden_brand).strip().lower()
       for hidden_brand in item.get("hidden_brands", [])
-    }
+    })
   }
   if not hidden_names:
     return dict(groups), list(groups_list), categories, set()

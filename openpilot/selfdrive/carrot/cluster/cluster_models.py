@@ -242,6 +242,26 @@ class NaviGuidanceImage:
 
 
 @dataclass(frozen=True, slots=True)
+class PhoneMediaInfo:
+    title: str = ""
+    artist: str = ""
+    package_name: str = ""
+    is_playing: bool = False
+    duration_ms: int | None = None
+    position_ms: int | None = None
+    art_base64: str = ""
+    art_mime: str = ""
+    art_hash: str = ""
+    art_source: str = ""
+    art_input_chars: int | None = None
+    art_bytes: int | None = None
+    art_format: str = ""
+    art_status: str = ""
+    updated_at_ms: int | None = None
+    received_at_ms: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class NaviMediaFrame:
     key: str
     sequence: int
@@ -418,6 +438,7 @@ class ClusterUiState:
     debug_plot: DebugPlotSnapshot | None = None
     trip_report: TripReportState | None = None
     navi_debug: NaviDebugInfo | None = None
+    phone_media: PhoneMediaInfo | None = None
     navi_live: NaviLiveState | None = None
     navi_dashboard: NaviDashboardState | None = None
     debug_ui_visible: bool = False

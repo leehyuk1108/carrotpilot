@@ -640,14 +640,18 @@ def test_cluster_autorun_falls_back_only_for_h264_initialization(monkeypatch):
   carrot_package = importlib.import_module("selfdrive.carrot")
   cluster_run = types.ModuleType("selfdrive.carrot.cluster_run")
   calls = []
+  lifecycle = []
 
   def run_cluster(*, exit_on_error):
     assert exit_on_error is False
+    assert lifecycle[0] == "graphics"
+    lifecycle.append("run")
     calls.append(sys.argv[:])
     if len(calls) == 1:
       raise H264PipelineInitializationError("native initialization failed")
 
   cluster_run.main = run_cluster
+  cluster_run.configure_cluster_graphics = lambda: lifecycle.append("graphics")
   monkeypatch.setattr(carrot_package, "cluster_run", cluster_run, raising=False)
   monkeypatch.setitem(sys.modules, "selfdrive.carrot.cluster_run", cluster_run)
   monkeypatch.setattr(
@@ -663,6 +667,7 @@ def test_cluster_autorun_falls_back_only_for_h264_initialization(monkeypatch):
 
   assert calls[0][calls[0].index("--usb-h264-backend") + 1] == "native"
   assert calls[1][calls[1].index("--usb-h264-backend") + 1] == "ffmpeg"
+  assert lifecycle == ["graphics", "run", "run"]
 
 
 def test_h264_start_classifies_only_initialization_errors(monkeypatch):
@@ -712,13 +717,17 @@ def test_cluster_autorun_does_not_fallback_after_runtime_failure(monkeypatch):
   carrot_package = importlib.import_module("selfdrive.carrot")
   cluster_run = types.ModuleType("selfdrive.carrot.cluster_run")
   calls = []
+  lifecycle = []
 
   def run_cluster(*, exit_on_error):
     assert exit_on_error is False
+    assert lifecycle[0] == "graphics"
+    lifecycle.append("run")
     calls.append(sys.argv[:])
     raise RuntimeError("render loop failed")
 
   cluster_run.main = run_cluster
+  cluster_run.configure_cluster_graphics = lambda: lifecycle.append("graphics")
   monkeypatch.setattr(carrot_package, "cluster_run", cluster_run, raising=False)
   monkeypatch.setitem(sys.modules, "selfdrive.carrot.cluster_run", cluster_run)
   monkeypatch.setattr(
@@ -734,6 +743,25 @@ def test_cluster_autorun_does_not_fallback_after_runtime_failure(monkeypatch):
       )
 
   assert len(calls) == 1
+  assert lifecycle == ["graphics", "run"]
+
+
+def test_cluster_autorun_does_not_fallback_when_graphics_cleanup_is_rejected(monkeypatch):
+  cluster_autorun = _import_cluster_autorun(monkeypatch)
+  carrot_package = importlib.import_module("selfdrive.carrot")
+  cluster_run = types.ModuleType("selfdrive.carrot.cluster_run")
+
+  def reject_graphics():
+    raise RuntimeError("unverified raylib binary")
+
+  cluster_run.configure_cluster_graphics = reject_graphics
+  cluster_run.main = lambda **_kwargs: pytest.fail("unverified graphics must not render")
+  monkeypatch.setattr(carrot_package, "cluster_run", cluster_run, raising=False)
+  monkeypatch.setitem(sys.modules, "selfdrive.carrot.cluster_run", cluster_run)
+  monkeypatch.setattr(cluster_autorun, "_encoder_sequence", lambda *_args: pytest.fail("must not try another encoder"))
+
+  with pytest.raises(RuntimeError, match="unverified raylib binary"):
+    cluster_autorun._run_cluster_once(hud_mode=0, encoder_mode=cluster_autorun.ENCODER_AUTO)
 
 
 def test_native_h264_queue_keeps_config_keyframe_and_latest_access_unit():

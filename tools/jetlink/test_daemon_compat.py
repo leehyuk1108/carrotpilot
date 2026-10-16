@@ -66,7 +66,9 @@ def test_phone_checks_data_role_not_power_role(tmp_path, monkeypatch, mode):
   ('auto', 'usb-unsafe'), ('auto', 'brief-detach'),
   ('auto', 'usb-late'), ('auto', 'ncm-cleanup-unsafe'),
 ])
-def test_daemon_wires_mode_protocol_and_separate_ios_owner(tmp_path, monkeypatch, mode, scenario):
+@pytest.mark.parametrize('management_enabled', [False, True])
+def test_daemon_wires_mode_protocol_and_separate_ios_owner(tmp_path, monkeypatch, mode, scenario, management_enabled):
+  from unittest.mock import Mock
   calls = []
   attached = [True]
   reports = []
@@ -83,6 +85,11 @@ def test_daemon_wires_mode_protocol_and_separate_ios_owner(tmp_path, monkeypatch
   monkeypatch.setattr(daemon, 'open', lambda *a: (tmp_path / 'owner.lock').open('w'), raising=False)
   monkeypatch.setattr(daemon.fcntl, 'flock', lambda *a: None)
   monkeypatch.setattr(daemon, 'transport_mode', lambda: mode)
+  monkeypatch.setattr(daemon, 'initialize_management', lambda: management_enabled)
+  safe = Mock(return_value=True)
+  safety_factory, activate = Mock(return_value=safe), Mock()
+  monkeypatch.setattr(daemon, 'management_safety', safety_factory)
+  monkeypatch.setattr(daemon, 'activate_management', activate)
   monkeypatch.setenv('JETLINK_PROTOCOL', '3' if scenario == 'usb-pinned' else 'auto')
   monkeypatch.setattr(daemon, 'TRANSPORT_MODE', 'usb')
   monkeypatch.setattr(daemon, 'update_affinity', lambda: None)
@@ -99,13 +106,18 @@ def test_daemon_wires_mode_protocol_and_separate_ios_owner(tmp_path, monkeypatch
       assert delay == 2
   monkeypatch.setattr(daemon.time, 'sleep', sleep)
   monkeypatch.setattr(daemon, 'gc', SimpleNamespace(disable=lambda: None, freeze=lambda: None, collect=lambda: None))
-  monkeypatch.setattr(daemon.os, 'sched_setscheduler', lambda *a: None)
-  monkeypatch.setattr(daemon.os, 'sched_setaffinity', lambda *a: None)
+  monkeypatch.setattr(daemon.os, 'sched_setscheduler', lambda *a: None, raising=False)
+  monkeypatch.setattr(daemon.os, 'SCHED_OTHER', 0, raising=False)
+  monkeypatch.setattr(daemon.os, 'sched_param', lambda value: value, raising=False)
+  monkeypatch.setattr(daemon.os, 'sched_setaffinity', lambda *a: None, raising=False)
   listener = SimpleNamespace(bind=lambda *a: None, listen=lambda *a: None, settimeout=lambda *a: None,
                              close=lambda: calls.append('listener.close'))
   monkeypatch.setattr(daemon.socket, 'socket', lambda *a: listener)
   monkeypatch.setattr(daemon.os, 'chmod', lambda *a: None)
-  monkeypatch.setattr(daemon, 'setup_gadget', lambda value: calls.append(('setup', value)))
+  def setup_gadget(value, management=False):
+    assert management is (management_enabled and mode == 'usb')
+    calls.append(('setup', value))
+  monkeypatch.setattr(daemon, 'setup_gadget', setup_gadget)
   owner = SimpleNamespace(close=lambda: calls.append('owner.close'), bound_udc='controller', _configured=lambda: True)
   if scenario in ('usb-success', 'usb-fail', 'usb-v2', 'usb-exhausted', 'usb-pinned', 'usb-unsafe', 'usb-late'):
     monkeypatch.setattr(daemon.AutoTransport, 'GRACE', 0.)
@@ -193,6 +205,8 @@ def test_daemon_wires_mode_protocol_and_separate_ios_owner(tmp_path, monkeypatch
   monkeypatch.setattr(daemon, 'serve_local', serve)
   with pytest.raises(KeyboardInterrupt):
     daemon.main()
+  assert safety_factory.call_count == int(management_enabled and mode == 'usb')
+  assert activate.call_count == (calls.count(('setup', mode)) if management_enabled and mode == 'usb' else 0)
   assert calls[0] == ('setup', mode)
   if scenario == 'constructor-unsafe':
     assert calls.count(('setup', mode)) == 1

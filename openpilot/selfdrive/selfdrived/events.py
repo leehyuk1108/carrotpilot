@@ -19,6 +19,7 @@ from openpilot.system.micd import SAMPLE_RATE, SAMPLE_BUFFER
 from openpilot.selfdrive.ui.feedback.feedbackd import FEEDBACK_MAX_DURATION
 from openpilot.system.hardware import HARDWARE
 from openpilot.system.ui.lib.multilang import tr, trn, tr_noop
+from openpilot.selfdrive.selfdrived import alert_presentation
 
 AlertSize = log.SelfdriveState.AlertSize
 AlertStatus = log.SelfdriveState.AlertStatus
@@ -118,6 +119,17 @@ class Events:
           # Static alerts are shared objects in EVENTS. Translate a copy so the
           # canonical English text remains available when the language changes.
           alert = copy.copy(alert)
+          if HARDWARE.get_device_type() == 'mici':
+            values = alert_presentation.format_values(
+              callback_args, display_speed=get_display_speed, min_speed_filter=MIN_SPEED_FILTER,
+              feedback_duration=FEEDBACK_MAX_DURATION, sample_buffer=SAMPLE_BUFFER, sample_rate=SAMPLE_RATE,
+              fields=alert_presentation.format_fields(EVENT_NAME[e], et))
+            angle_offset_invalid = False
+            if e == EventName.paramsdTemporaryError and et == ET.NO_ENTRY and len(callback_args) >= 3:
+              angle_offset_invalid = not callback_args[2]['liveParameters'].angleOffsetValid
+            alert_presentation.apply_text(
+              alert, EVENT_NAME[e], et, values, critical=alert.alert_status == AlertStatus.critical,
+              angle_offset_invalid=angle_offset_invalid)
           alert.alert_text_1 = tr(alert.alert_text_1)
           alert.alert_text_2 = tr(alert.alert_text_2)
 
@@ -1139,6 +1151,13 @@ EVENTS: dict[int, dict[str, Alert | AlertCallbackType]] = {
   },
   EventName.radarCutin: {
      ET.WARNING: EngagementAlert(AudibleAlert.radarCutin),
+  },
+  EventName.phoneLeadClosing: {
+    ET.WARNING: Alert(
+      "전방 주의",
+      "전방 차량과 접근중",
+      AlertStatus.userPrompt, AlertSize.mid,
+      Priority.MID, VisualAlert.none, AudibleAlert.prompt, 2.),
   },
   EventName.radarStationaryLead: {
     ET.WARNING: Alert(

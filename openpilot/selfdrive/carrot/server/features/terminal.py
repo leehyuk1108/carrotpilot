@@ -289,6 +289,22 @@ async def handle_download_tmux(request: web.Request) -> web.Response:
   )
 
 
+async def handle_download_cluster_ambient_diag(request: web.Request) -> web.Response:
+  for path in (
+    "/data/media/0/cluster_ambient_diag.log",
+    "/data/media/cluster_ambient_diag.log",
+    "/tmp/cluster_ambient_diag.log",
+  ):
+    if os.path.exists(path):
+      return web.FileResponse(
+        path,
+        headers={
+          "Content-Disposition": "attachment; filename=cluster_ambient_diag.log"
+        }
+      )
+  return web.json_response({"ok": False, "error": "file not found"}, status=404)
+
+
 def register(app: web.Application) -> None:
   app.router.add_get("/api/terminal_pty/status", handle_terminal_pty_status)
   app.router.add_get("/api/terminal_commands", handle_terminal_commands)
@@ -296,3 +312,4 @@ def register(app: web.Application) -> None:
   app.router.add_get("/ws/terminal", ws_terminal)
   app.router.add_get("/ws/terminal_pty", ws_terminal_pty)
   app.router.add_get("/download/tmux.log", handle_download_tmux)
+  app.router.add_get("/download/cluster_ambient_diag.log", handle_download_cluster_ambient_diag)

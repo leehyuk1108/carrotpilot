@@ -1,8 +1,26 @@
 # Carrot Cluster
 
-Standalone raylib cluster UI bundle for openpilot devices. The normal and road
-camera HUDs show available tire pressures around a fixed vehicle diagram beside
-the navigation panel; pressures below 31 psi are highlighted in red.
+Standalone raylib cluster UI bundle for openpilot devices. Modes 0 through 4
+use the custom 1920x480 ambient dashboard with Pretendard fonts, 700-weight
+phone music text, cover art and a one-way leftward title marquee. The KST clock
+uses 12-hour time without AM/PM at design x=1875. Blind-spot edges are 210px
+wide and fade over 0.35s: light RGB(255,152,88), dark RGB(204,88,0).
+Fullscreen 3D, trip report and the current navigation dashboard remain available
+as modes -1, 5 and 6. The latest alert overlay is drawn after every layout.
+
+Phone metadata is read from the CarrotLink sidecar by `cluster_phone_media.py`.
+Jetlink keeps the `carrot_hud_v1` cereal snapshot and its separate navigation
+media transport. Optional phone metadata and at most 8KiB of cover base64 are
+included per snapshot, within the existing 96KiB publisher bound. A cover is
+limited to 512KiB of base64, assembled atomically by SHA256, and shown only for
+the matching metadata key. Repeated fragment cycles recover dropped snapshots;
+stale telemetry clears the phone display. Sender/receiver wall-clock offsets
+do not distort playback progress.
+
+The latest graphics ownership, GBM/native cleanup, GC lifecycle and USB/NV12
+capture paths remain in place; the added fonts/textures are released by that
+same close path. Host verification does not validate comma/Jetson GPU drivers,
+physical panel output, long-duration memory stability or inference timing.
 
 ## Code and rendering flow
 
@@ -372,13 +390,13 @@ worker also explicitly selects `SCHED_OTHER` before `ls-remote`/`fetch`.
 Native H.264 callback output is queued as complete access units. The bounded
 queue retains the latest codec config, keyframe, and frame without waiting for
 USB; stale access units are dropped and reported instead of failing the run.
-When `--usb-brightness` is omitted, USB launches follow `ClusterHudBrightness`:
-`0` auto follows live `wideRoadCameraState.exposureValPercent` after samples are
-available, falling back to `deviceState.screenBrightnessPercent`; `1` through
-`100` are fixed brightness percentages. `ClusterHudOrientation` supports `0`
+Ambient USB brightness follows the selected theme: dark 20%, light 60%.
+Auto uses KST, light from 06:00 through 17:59 and dark otherwise. Legacy manual
+brightness arguments/Params and live exposure do not override these levels.
+Output gating still turns the panel off. `ClusterHudOrientation` supports `0`
 (0 degrees) and `2` (180 degrees); values `1` and `3` are ignored. The existing
 web settings UI stores both Params without a custom slider path. The running
-HUD checks the stored brightness and orientation every 100 ms. Brightness
+HUD checks theme-derived brightness and stored orientation every 100 ms. Brightness
 applies without restarting. A managed H.264 orientation change exits cleanly
 and autorun relaunches immediately. The new stream uses the captured
 `10, 111, 112, 13, 14, 52, 102, 15, 17` setup sequence, including the selected
@@ -433,14 +451,14 @@ Turn-signal arrows are hidden while off and only draw during their blink-on
 phase. The top HUD also uses `carState.gearShifter`, `gearStep`, `pcmCruiseGap`,
 `selfdriveState.personality`, and `carControl.latActive` to show gear
 (`P/R/N/D/1-8`) in a smaller transparent rounded-square outline, front gap bars,
-cruise set speed, and the LFA active icon. This top
+centered cruise set speed, and the LFA active icon. This top
 drive-status row uses the same top margin as the road speed-limit sign while
 bottom-aligning gear, gap, cruise set, and LFA elements to the measured
-bottom of the cruise-set text. The gap vehicle uses
-`selfdrive/assets/icons_mici/carrot_cruse_gap_trimmed.png` at its source aspect
-ratio and is taller than before while the gap bars keep their own size/spacing;
-all four gap bars stay visible, sit close together, and bottom-align to the
-vehicle while inactive bars are gray and active bars use `#bb3d91`. Cruise set
+bottom of the cruise-set text. Gear text and outline are black in the light
+theme and white in the dark theme for every gear value. The gap display now
+draws only the four bars, keeps them close together, and right-aligns them in
+the space between gear and the centered cruise set speed while inactive bars
+are gray and active bars use the same blue as the cruise set speed. Cruise set
 speed and `km/h` use the same font size and color; paused cruise keeps the set
 speed but draws it gray, and inactive cruise draws gray `--- km/h`. The
 deceleration override keeps the selected `carrotMan.desiredSource` control
@@ -613,6 +631,8 @@ vehicles such as front-center `radarState` leads; `1` leaves raw points
 unmerged for detail checks, including radar vehicle candidate boxes and
 radar-to-detected-vehicle speed merges. Vehicle/radar metric labels sit closer
 to the point/box top so speed and distance are less high above the vehicle.
+Detected vehicle markers use a smooth rounded vehicle-like blob instead of a
+plain cube, and vehicle ground shadows are not drawn.
 `LR`/`RR` rear-corner detections render as normal vehicle boxes at their actual
 detected positions. The older fixed rear-tire-depth 2D arrow/label is removed.
 The default drive camera sits closer to the ego roof, lower than the earlier

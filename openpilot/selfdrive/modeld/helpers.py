@@ -11,10 +11,12 @@ from pathlib import Path
 from typing import TypeVar
 
 from openpilot.common.file_chunker import get_manifest_path
-from openpilot.selfdrive.modeld.big_model import selected_manifest
+from openpilot.selfdrive.modeld.big_model import MAX_MODEL_SIZE, selected_manifest
 
 MODELS_DIR = Path(__file__).resolve().parent / 'models'
 TG_INPUT_DEVICES_PATH = MODELS_DIR / 'tg_input_devices.json'
+MAX_OOB_METADATA_SIZE = 64 << 20
+MAX_OOB_BUFFER_SIZE = MAX_MODEL_SIZE
 USBGPU_USB_IDS = ((0xADD1, 0x0001), (0x3801, 0x0001))
 USBGPU_MIN_SPEED_MBPS = 5000
 USBGPU_TRANSIENT_INIT_TEXT = (
@@ -86,18 +88,41 @@ def dump_oob(obj, f):
     shutil.copyfileobj(tmp, f)
 
 def load_oob(f):
-  opcodes = f.read(struct.unpack('<q', f.read(8))[0])
+  header = f.read(8)
+  if len(header) != 8:
+    raise ValueError("incomplete model metadata header")
+  size, = struct.unpack('<q', header)
+  if not 0 < size <= MAX_OOB_METADATA_SIZE:
+    raise ValueError("invalid model metadata size")
+  opcodes = f.read(size)
+  if len(opcodes) != size:
+    raise ValueError("incomplete model metadata")
+
+  # Keep buffer I/O failures distinct from malformed pickle metadata.
+  class IncompleteModelBuffer(EOFError):
+    pass
+
   def buffers():
     prev = None
     while (h := f.read(8)):
+      if len(h) != 8:
+        raise IncompleteModelBuffer("incomplete model buffer header")
+      size, = struct.unpack('<q', h)
+      if not 0 <= size <= MAX_OOB_BUFFER_SIZE:
+        raise ValueError("invalid model buffer size")
       if prev is not None:
         prev.release()
-      buf = bytearray(struct.unpack('<q', h)[0])
+      buf = bytearray(size)
       if f.readinto(buf) != len(buf):
-        raise EOFError("incomplete model buffer")
+        raise IncompleteModelBuffer("incomplete model buffer")
       prev = pickle.PickleBuffer(buf)
       yield prev
-  return pickle.load(io.BytesIO(opcodes), buffers=buffers())
+  try:
+    return pickle.load(io.BytesIO(opcodes), buffers=buffers())
+  except IncompleteModelBuffer:
+    raise
+  except (pickle.UnpicklingError, EOFError, OverflowError) as e:
+    raise ValueError("invalid model metadata") from e
 
 
 def validate_model_file(path: str | Path) -> None:

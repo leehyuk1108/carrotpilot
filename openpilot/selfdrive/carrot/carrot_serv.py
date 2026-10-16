@@ -20,6 +20,10 @@ from openpilot.selfdrive.navd.helpers import Coordinate
 from openpilot.common.constants import CV
 from openpilot.common.gps import get_gps_location_service
 from openpilot.selfdrive.carrot.carrot_navi_control import CarrotNaviControl, parse_carrot_navi_control
+from openpilot.selfdrive.navdy.navigation import NavigationReader
+
+NAVI_SOURCE_NETWORK = 0
+NAVI_SOURCE_NAVDY = 1
 
 nav_type_mapping = {
   12: ("turn", "left", 1),
@@ -87,6 +91,10 @@ class CarrotServ:
   def __init__(self):
     self.params = Params()
     self.params_memory = Params("/dev/shm/params")
+    # Latch at process startup; changing guidance sources while driving can
+    # otherwise mix route, camera and traffic-light data from different inputs.
+    self.navi_source = self.params.get_int("CarrotNaviSource")
+    self.navdy_navigation = NavigationReader()
 
     self.nRoadLimitSpeed = 30
     self.nRoadLimitSpeed_last = 30
@@ -943,8 +951,9 @@ class CarrotServ:
     self.szPosRoadName = ""
     self._clear_carrot_navi_traffic()
 
-  def _apply_carrot_navi_speed(self, navi: CarrotNaviControl):
+  def _apply_carrot_navi_speed(self, navi: CarrotNaviControl, *, preserve_navdy_distance=False):
     speed = navi.speed
+    previous_distance = self.xSpdDist
     self.carrot_navi_road_limit_valid = speed.road_limit_kph is not None
     if speed.road_limit_kph is not None:
       self.nRoadLimitSpeed = speed.road_limit_kph
@@ -989,6 +998,22 @@ class CarrotServ:
       self.nSdiPlusBlockSpeed = 0
       self.nSdiPlusBlockDist = 0
     self._update_sdi()
+
+    if self.accepts_navigation(NAVI_SOURCE_NAVDY):
+      # Compare only the hazard selected by the existing SDI policy. Road-limit
+      # and unselected-hazard updates must not replay its pre-motion distance.
+      hazard = None
+      if self.xSpdType >= 0 and self.xSpdLimit > 0:
+        if self.xSpdType == 22 and self.nSdiPlusType == 22:
+          hazard = ("secondary", self.nSdiPlusType, self.nSdiPlusSpeedLimit, self.nSdiPlusDist,
+                    self.nSdiPlusBlockType, self.nSdiPlusBlockSpeed, self.nSdiPlusBlockDist)
+        else:
+          hazard = ("primary", speed.section_active, self.nSdiType, self.nSdiSpeedLimit, self.nSdiDist,
+                    self.nSdiSection, self.nSdiBlockType, self.nSdiBlockSpeed, self.nSdiBlockDist)
+        hazard = (hazard, self.xSpdType, self.xSpdLimit)
+      if preserve_navdy_distance and hazard is not None and hazard == getattr(self, "_navdy_speed_hazard", None):
+        self.xSpdDist = previous_distance
+      self._navdy_speed_hazard = hazard
 
   def _apply_carrot_navi_vehicle(self, navi: CarrotNaviControl):
     vehicle = navi.vehicle
@@ -1065,14 +1090,16 @@ class CarrotServ:
       self.xDistToTurnNext = old_next_dist
 
   def _update_carrot_navi(self, sm):
-    service_active = sm.alive['carrotNavi'] and sm.valid['carrotNavi']
+    navdy_selected = self.accepts_navigation(NAVI_SOURCE_NAVDY)
+    service_active = not navdy_selected and sm.alive['carrotNavi'] and sm.valid['carrotNavi']
     if service_active and not sm.updated['carrotNavi']:
       if self.carrot_navi_active and self.carrot_navi_has_control:
         self.active_count = 80
         self.active_sdi_count = self.active_sdi_count_max
       return self.carrot_navi_active and self.carrot_navi_has_control
 
-    navi = parse_carrot_navi_control(sm['carrotNavi']) if service_active else None
+    navi = (self.navdy_navigation.read() if navdy_selected else
+            parse_carrot_navi_control(sm['carrotNavi']) if service_active else None)
     was_active = self.carrot_navi_active
     self.carrot_navi_active = navi is not None
     if navi is None:
@@ -1094,7 +1121,7 @@ class CarrotServ:
 
     if new_session or off_route_changed or navi.speed.sequence != self.carrot_navi_speed_sequence:
       self.carrot_navi_speed_sequence = navi.speed.sequence
-      self._apply_carrot_navi_speed(navi)
+      self._apply_carrot_navi_speed(navi, preserve_navdy_distance=navdy_selected and not new_session and not off_route_changed)
 
     # The cereal service repeats at 2 Hz even when item sequences do not change.
     # Refresh GPS and Params freshness from that heartbeat.
@@ -1262,7 +1289,12 @@ class CarrotServ:
 
     return atc_desired, atc_type, atc_speed, atc_dist
 
+  def accepts_navigation(self, source):
+    return self.navi_source == source
+
   def update_nav_instruction(self, sm):
+    if not self.accepts_navigation(NAVI_SOURCE_NETWORK):
+      return
     if sm.alive['navInstruction'] and sm.valid['navInstruction']:
       msg_nav = sm['navInstruction']
 
@@ -1283,6 +1315,8 @@ class CarrotServ:
       #print(f"navInstruction: {self.xTurnInfo}, {self.xDistToTurn}, {self.szTBTMainText}")
 
   def update_kisa(self, data):
+    if not self.accepts_navigation(NAVI_SOURCE_NETWORK):
+      return
     self.active_kisa_count = 100
     if "kisawazecurrentspd" in data:
       pass
@@ -1360,7 +1394,8 @@ class CarrotServ:
       self.active_carrot = 0
 
     limit_speed = 200
-    road_limit_valid = not carrot_navi_active or self.carrot_navi_road_limit_valid
+    road_limit_valid = self.carrot_navi_road_limit_valid if self.accepts_navigation(NAVI_SOURCE_NAVDY) else (
+      not carrot_navi_active or self.carrot_navi_road_limit_valid)
     if self.autoRoadSpeedLimitOffset >= 0 and self.active_carrot>=2 and road_limit_valid:
       if self.nRoadLimitSpeed >= 30:
         road_speed_limit_offset = self.autoRoadSpeedLimitOffset
@@ -1663,7 +1698,7 @@ class CarrotServ:
     except subprocess.CalledProcessError:
       print("timed.failed_setting_time")
 
-  def update(self, json):
+  def update(self, json, *, source=NAVI_SOURCE_NETWORK):
     def _i(v, default=0):
       return default if v is None else int(v)
     def _f(v, default=0.0):
@@ -1672,6 +1707,19 @@ class CarrotServ:
       return default if v is None else str(v)  
     if json is None:
       return
+    selected = self.accepts_navigation(source)
+    if not selected:
+      # UDP also carries clock sync, phone GPS and non-navigation commands.
+      # Do not let those packets refresh the selected navigation heartbeat.
+      json = {key: value for key, value in json.items() if key in (
+        "carrotIndex", "epochTime", "timezone", "carrotCmd", "carrotArg",
+        "latitude", "longitude", "heading", "accuracy", "gps_speed",
+      )}
+      if json.get("carrotCmd") == "DETECT":
+        json.pop("carrotCmd", None)
+        json.pop("carrotArg", None)
+      if not json:
+        return
     if "carrotIndex" in json:
       self.carrotIndex = int(json.get("carrotIndex") or self.carrotIndex + 1)
 
@@ -1694,7 +1742,8 @@ class CarrotServ:
       self.carrotArg = json.get("carrotArg")
       print(f"carrotCmd = {self.carrotCmd}, {self.carrotArg}")
 
-    self.active_count = 80
+    if selected:
+      self.active_count = 80
     now = time.monotonic()
 
     if "goalPosX" in json:

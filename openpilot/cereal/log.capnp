@@ -166,6 +166,7 @@ struct OnroadEvent @0xc4fa6047f024e718 {
     impactDashcamReboot @129;
 
     soundsUnavailableDEPRECATED @47;
+    phoneLeadClosing @130;
   }
 }
 

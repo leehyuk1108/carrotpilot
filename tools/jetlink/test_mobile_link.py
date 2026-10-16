@@ -438,6 +438,8 @@ def test_dhcp_helper_refuses_unowned_pid_without_signaling(scratch, monkeypatch,
   monkeypatch.setattr(os, 'kill', kill)
   monkeypatch.setattr(signal, 'pidfd_send_signal', kill, raising=False)
   monkeypatch.setattr(sys, 'argv', ['helper', str(scratch), 'stop', str(scratch / 'leases')])
+  exists = Path.exists
+  monkeypatch.setattr(Path, 'exists', lambda path: True if path == Path('/proc') / pid else exists(path))
   with pytest.raises(SystemExit, match='refusing DHCP'):
     exec(compile(source, 'setup_mobile.sh:dhcp_process', 'exec'), {})
   kill.assert_not_called()

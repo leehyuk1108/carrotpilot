@@ -552,9 +552,10 @@ def main(demo=False):
 
       action = get_action_from_model(model_output, prev_action, lat_action_t, long_action_t, v_ego, lat_smooth_seconds_dynamic, vEgoStopping)
       prev_action = action
+      model_output_valid = live_calib_seen and getattr(model, 'output_valid', True)
       fill_model_msg(modelv2_send, model_output, action,
                      publish_state, meta_main.frame_id, meta_extra.frame_id, frame_id,
-                     frame_drop_ratio, meta_main.timestamp_eof, model_execution_time, live_calib_seen)
+                     frame_drop_ratio, meta_main.timestamp_eof, model_execution_time, model_output_valid)
 
       desire_state = modelv2_send.modelV2.meta.desireState
       l_lane_change_prob = desire_state[log.Desire.laneChangeLeft]
@@ -586,7 +587,7 @@ def main(demo=False):
       # Slow PC inference can exceed locationd's rewind window. The simulator
       # pose represents current simulated motion, so timestamp it at publish.
       pose_timestamp_eof = time.monotonic_ns() if SIMULATION else meta_main.timestamp_eof
-      fill_pose_msg(posenet_send, model_output, meta_main.frame_id, vipc_dropped_frames, pose_timestamp_eof, live_calib_seen)
+      fill_pose_msg(posenet_send, model_output, meta_main.frame_id, vipc_dropped_frames, pose_timestamp_eof, model_output_valid)
       pm.send('modelV2', modelv2_send)
       pm.send('drivingModelData', drivingdata_send)
       pm.send('cameraOdometry', posenet_send)

@@ -1,7 +1,25 @@
-from openpilot.selfdrive.carrot import cluster_autorun
+import importlib
+import sys
+import types
+
+import pytest
 
 
-def test_device_cluster_uses_standalone_carrot_navi_ipc():
+@pytest.fixture
+def cluster_autorun(monkeypatch):
+  # These argument/error-classification tests do not need native Params or hardware.
+  params_module = types.ModuleType("openpilot.common.params")
+  params_module.Params = lambda *_args, **_kwargs: pytest.fail("argument tests must not open device Params")
+  hardware_module = types.ModuleType("openpilot.system.hardware")
+  hardware_module.TICI = False
+  monkeypatch.setitem(sys.modules, "openpilot.common.params", params_module)
+  monkeypatch.setitem(sys.modules, "openpilot.system.hardware", hardware_module)
+  module_name = "openpilot.selfdrive.carrot.cluster_autorun"
+  monkeypatch.delitem(sys.modules, module_name, raising=False)
+  return importlib.import_module(module_name)
+
+
+def test_device_cluster_uses_standalone_carrot_navi_ipc(cluster_autorun):
   args = cluster_autorun._cluster_args(
     hud_mode=1,
     configured_encoder_mode=cluster_autorun.ENCODER_AUTO,
@@ -14,7 +32,7 @@ def test_device_cluster_uses_standalone_carrot_navi_ipc():
   assert args[args.index("--output") + 1] == "usb"
 
 
-def test_device_cluster_caps_external_display_fps_while_egpu_is_active():
+def test_device_cluster_caps_external_display_fps_while_egpu_is_active(cluster_autorun):
   args = cluster_autorun._cluster_args(
     hud_mode=1,
     configured_encoder_mode=cluster_autorun.ENCODER_AUTO,
@@ -26,7 +44,7 @@ def test_device_cluster_caps_external_display_fps_while_egpu_is_active():
   assert args[args.index("--fps") + 1] == str(cluster_autorun.USBGPU_DISPLAY_FPS)
 
 
-def test_usb_hot_unplug_is_recognized_through_wrapped_pipeline_errors():
+def test_usb_hot_unplug_is_recognized_through_wrapped_pipeline_errors(cluster_autorun):
   try:
     try:
       raise RuntimeError("TURZX USB display disconnected")

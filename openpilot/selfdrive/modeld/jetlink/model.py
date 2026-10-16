@@ -7,7 +7,7 @@ import time
 
 import numpy as np
 
-from openpilot.selfdrive.modeld.jetlink.link import ClientConnection, SPEC, FAULT, state
+from openpilot.selfdrive.modeld.jetlink.link import ClientConnection, SPEC, FAULT, FAULT_HOLD_SECONDS, state
 from openpilot.selfdrive.modeld.jetlink.prepare import WarpPreparation
 from openpilot.selfdrive.modeld.jetlink.contracts import model_name, parse_outputs
 from openpilot.selfdrive.modeld.model_join import may_join
@@ -126,8 +126,13 @@ class JoiningModel:
     self.ready = False
     self.reset = True
     self.error = ''
+    self.fault_until = 0.
     self.small_runs = 0
     self.last_slow_log = 0.
+
+  @property
+  def output_valid(self):
+    return time.monotonic() >= self.fault_until
 
   def update(self, sm, metadata):
     self.source_sof = metadata.timestamp_sof if self.phase_enabled else 0
@@ -139,8 +144,12 @@ class JoiningModel:
       record = {'active': self.active, 'ready': self.ready, 'model': model_name(self.spec), 'sha256': self.spec.sha256,
                 'error': self.error, 'updated': now}
       tmp = MODEL_STATUS.with_suffix('.tmp')
-      tmp.write_text(json.dumps(record))
-      os.replace(tmp, MODEL_STATUS)
+      try:
+        tmp.write_text(json.dumps(record))
+        os.replace(tmp, MODEL_STATUS)
+      except OSError:
+        from openpilot.common.swaglog import cloudlog
+        cloudlog.warning('Jetlink status unavailable; retaining inference and in-memory fault state')
       self.next_status = now + 1
 
   def _reset_small(self):
@@ -238,16 +247,26 @@ class JoiningModel:
       except Exception as exc:
         cloudlog.exception('Jetlink failed; restoring local model')
         self.error = str(exc)
-        self.client.close()
+        was_active = self.active
+        failed_at = time.monotonic()
+        if was_active:
+          # IPC validity must carry the fault even if /dev/shm is unavailable.
+          self.fault_until = failed_at + FAULT_HOLD_SECONDS
+        client = self.client
         self.client = None
-        if self.active:
-          # Existing commIssue event requests disengagement even if local
-          # inference recovers immediately; never silently switch under control.
-          FAULT.write_text(str(time.monotonic()))
-          self._reset_small()
         self.active = False
-        self.next_join = time.monotonic() + 5
+        self.next_join = failed_at + 5
         self.next_status = 0
+        try:
+          client.close()
+        except Exception:
+          cloudlog.exception('Jetlink client cleanup failed during native fallback')
+        if was_active:
+          try:
+            FAULT.write_text(str(failed_at))
+          except OSError:
+            cloudlog.exception('Jetlink fault marker unavailable; IPC remains invalid during native fallback')
+          self._reset_small()
     result = self.small.run(bufs, transforms, inputs, prepare_only)
     if result is not None:
       # Loading the PKL alone leaves its first execution cold (~0.8 s on C4).

@@ -10,7 +10,7 @@ from ..services.device_info import (
   get_device_setting_values,
 )
 from ..services.param_changes import observe_param_values
-from ..services.params import HAS_PARAMS, ParamKeyType, Params, get_param_values
+from ..services.params import HAS_PARAMS, READ_ONLY_PARAMS, ParamKeyType, Params, get_param_values
 from ..services.popular_values import read_popular_values_memory, schedule_popular_value_refresh
 from ..services.setting_favorites import read_setting_favorites
 from ..services.setting_profiles import read_setting_profiles
@@ -24,7 +24,7 @@ def _settings_catalog_payload(cache_parts: tuple | None = None, vehicle_brand: s
   data, groups, _by_name, groups_list = cache_parts or get_settings_cached()
   brand = current_vehicle_brand() if vehicle_brand is None else vehicle_brand
   groups, groups_list, categories, _hidden_names = filter_settings_catalog_for_brand(
-    groups, groups_list, settings_cache.get("categories"), brand,
+    groups, groups_list, settings_cache.get("categories"), brand, hidden_settings=READ_ONLY_PARAMS,
   )
   return {
     "path": path,

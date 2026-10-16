@@ -163,6 +163,8 @@ window.CarrotTranslations.register("zh", {
     device_group_network: "网络",
     device_group_toggles: "开关",
     device_group_software: "软件",
+    device_group_remote_support: "远程支持",
+    device_group_jetson: "Jetson",
     device_group_developer: "开发者",
     language_setting: "系统",
     branch: "分支",

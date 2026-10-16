@@ -9,6 +9,8 @@ from . import (
   intro,
   mapbox_tokens,
   params,
+  phone_media,
+  remote_support,
   screenrecord,
   settings,
   setting_favorites,
@@ -46,6 +48,8 @@ def register_all(app: web.Application) -> None:
   web_settings.register(app)
   ssh_keys.register(app)
   cars.register(app)
+  phone_media.register(app)
+  remote_support.register(app)
   system.register(app)
   terminal.register(app)
   dashcam.register(app)

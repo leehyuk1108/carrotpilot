@@ -21,7 +21,7 @@ def nm(*args):
 
 
 def collect():
-  active = nm('-t', '-f', 'UUID', 'connection', 'show', '--active').splitlines()
+  active = set(nm('-t', '-f', 'UUID', 'connection', 'show', '--active').splitlines())
   rows = nm('-t', '-f', 'UUID,TYPE', 'connection', 'show').splitlines()
   ids = [row.split(':')[0] for row in rows if row.endswith(':802-11-wireless')]
   ids.sort(key=lambda uid: uid not in active)
@@ -29,25 +29,29 @@ def collect():
   for uid in ids[:8]:
     if not re.fullmatch('[0-9a-f-]{36}', uid):
       continue
-    fields = nm('--show-secrets', '-g',
-      '802-11-wireless.ssid,802-11-wireless.mode,802-11-wireless.hidden,802-11-wireless-security.key-mgmt,802-11-wireless-security.psk',
-      'connection', 'show', 'uuid', uid).split('\n')
-    # Empty trailing fields are meaningful; query output is normalized below.
-    fields += [''] * (5 - len(fields))
-    if len(fields) != 5:
-      continue
-    ssid, mode, hidden, security, password = fields
-    if mode not in ('infrastructure', ''):
-      continue  # Never import comma's access-point/tethering profile as a client.
-    if security in ('wpa-psk', 'sae') and not password:
-      raise RuntimeError('Saved Wi-Fi secret unavailable')
-    profile = dict(id=uid, ssid=ssid, hidden=hidden in ('yes', 'true'), active=uid in active,
-                   security=security or 'open', password=password)
     try:
+      fields = nm('--show-secrets', '-g',
+        '802-11-wireless.ssid,802-11-wireless.mode,802-11-wireless.hidden,802-11-wireless-security.key-mgmt,802-11-wireless-security.psk',
+        'connection', 'show', 'uuid', uid).split('\n')
+      # Empty trailing fields are meaningful; query output is normalized below.
+      fields += [''] * (5 - len(fields))
+      if len(fields) != 5:
+        raise ValueError('Invalid Wi-Fi profile response')
+      ssid, mode, hidden, security, password = fields
+      if mode not in ('infrastructure', ''):
+        continue  # Never import comma's access-point/tethering profile as a client.
+      profile = dict(id=uid, ssid=ssid, hidden=hidden in ('yes', 'true'), active=uid in active,
+                     security=security or 'open', password=password)
       validate(dict(version=1, owner='0' * 64, profiles=[profile]))
-    except ValueError:
+    except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired):
+      # Preserve the current network if an old profile is unreadable; never
+      # publish a fallback as active when the active client cannot be exported.
+      if uid in active:
+        raise RuntimeError('Active Wi-Fi profile unavailable') from None
       continue
     profiles.append(profile)
+  if set(nm('-t', '-f', 'UUID', 'connection', 'show', '--active').splitlines()) != active:
+    raise RuntimeError('Active network changed during Wi-Fi collection')
   return profiles
 
 
@@ -63,6 +67,7 @@ def road_state(raw):
 
 
 def main(fd):
+  sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
   from openpilot.common.params import Params
   params = Params()
   owner = hashlib.sha256(Path('/etc/machine-id').read_bytes()).hexdigest()

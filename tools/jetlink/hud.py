@@ -10,7 +10,7 @@ import types
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / 'openpilot/selfdrive/carrot/cluster'))
-from hud_protocol import read_snapshot, SERVICES
+from hud_protocol import read_snapshot, SERVICES, PhoneMediaReceiver
 
 
 def require_usb_display(scan, expected):
@@ -185,6 +185,14 @@ def main():
     def close(self):
       self.pump.close()
   cluster_navi_source.NaviIpcMediaSource = RemoteNaviSource
+  import cluster_live
+  class RemotePhoneMediaReader:
+    def __init__(self):
+      self.receiver = PhoneMediaReceiver()
+
+    def read(self):
+      return self.receiver.decode(read_snapshot())
+  cluster_live.PhoneMediaReader = RemotePhoneMediaReader
   vehicle_stats = VehicleSystemStats()
   import main as cluster
   from hud_health import HealthRenderer

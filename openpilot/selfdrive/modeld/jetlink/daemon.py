@@ -18,6 +18,7 @@ from openpilot.selfdrive.modeld.jetlink.phase import Publisher as PhasePublisher
 from openpilot.selfdrive.modeld.jetlink.mac import prepare, PreparationDeferred
 from openpilot.selfdrive.modeld.jetlink.compat import ProtocolChoice
 from openpilot.selfdrive.modeld.jetlink.mobile import transport_mode, setup_gadget, MobileCable, AutoTransport, MobileLinkError
+from openpilot.selfdrive.modeld.jetlink.mobile import initialize_management, activate_management, deactivate_management
 from openpilot.selfdrive.modeld.jetlink.contracts import model_name
 from openpilot.selfdrive.modeld.jetlink.selection import ModelChanged, check_loaded
 from openpilot.selfdrive.modeld.jetlink.startup import CAPABILITY as BOOT_UPDATE_CAPABILITY, wait_for_boot_update
@@ -42,6 +43,31 @@ from wifi_protocol import CAPABILITY as WIFI_CAPABILITY, Publisher as WifiPublis
 
 class UnsafeCleanupError(LinkError):
   pass
+
+
+def management_safety():
+  try:
+    from tools.jetlink.manage_jetson import Safety
+    return Safety()
+  except Exception:
+    log.exception('USB management safety unavailable; retaining ordinary inference USB')
+    return None
+
+
+def management_allowed(safe, timeout=0.):
+  if safe is None:
+    return False
+  deadline = time.monotonic() + timeout
+  try:
+    while True:
+      if safe():
+        return True
+      if time.monotonic() >= deadline:
+        return False
+      time.sleep(min(.05, max(0., deadline - time.monotonic())))
+  except Exception:
+    log.exception('USB management offroad check failed; retaining ordinary inference USB')
+    return False
 
 
 def update_affinity():
@@ -167,6 +193,9 @@ class CarrotTransport(FfsTransport):
         raise UnsafeCleanupError(f'Cannot verify FunctionFS controller cleanup: {exc}') from exc
       if bound:
         raise UnsafeCleanupError(f'FunctionFS controller remains bound to {bound}; refusing to rebind')
+    if getattr(self, 'management', False):
+      deactivate_management()
+      self.management = False
 
   def _widen_affinity(self):
     os.sched_setaffinity(0, set(range(min(4, os.cpu_count() or 1))))
@@ -348,6 +377,8 @@ def main():
   os.sched_setaffinity(0, set(range(min(4, os.cpu_count() or 1))))
   lock = open('/dev/shm/carrot-jetlink.lock', 'w')
   fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+  management_requested = initialize_management()
+  management_safe = management_safety() if management_requested and TRANSPORT_MODE == 'usb' else None
   Path(SOCKET).unlink(missing_ok=True)
   listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
   listener.bind(SOCKET)
@@ -398,9 +429,13 @@ def main():
         if owner is None:
           # Optional iOS networking must not make existing bulk USB depend on
           # NCM, dnsmasq or a firewall backend. Cleanup is verified below first.
-          setup_gadget('usb' if mobile_unavailable else TRANSPORT_MODE)
+          management = TRANSPORT_MODE == 'usb' and management_allowed(management_safe, timeout=1.)
+          setup_gadget('usb' if mobile_unavailable else TRANSPORT_MODE, management=management)
           udc = next(Path('/sys/class/udc').iterdir()).name
           owner = CarrotTransport('/dev/ffs-jetlink', gadget=GADGET, udc=udc)
+          owner.management = management
+          if management and management_allowed(management_safe):
+            activate_management()
           if TRANSPORT_MODE in ('auto', 'ios') and not mobile_unavailable:
             cable = MobileCable(owner)
             cable.start()

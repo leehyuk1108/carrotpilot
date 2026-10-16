@@ -18,6 +18,7 @@ from ..services.param_changes import (
 from ..services.params import (
   HAS_PARAMS,
   INTERNAL_SESSION_PARAMS,
+  READ_ONLY_PARAMS,
   ParamKeyType,
   build_params_qr_payload,
   clamp_numeric,
@@ -85,6 +86,11 @@ async def api_param_set(request: web.Request) -> web.Response:
     return web.json_response({"ok": False, "error": "missing name"}, status=400)
   if name in INTERNAL_SESSION_PARAMS:
     return web.json_response({"ok": False, "error": "driver monitoring is controlled by the vehicle CANCEL gesture"}, status=403)
+  if name in READ_ONLY_PARAMS:
+    return web.json_response({"ok": False, "error": "cluster brightness is controlled by the selected theme"}, status=403)
+
+  if name == "CarrotNaviSource" and (type(value) not in (int, str) or str(value) not in ("0", "1")):
+    return web.json_response({"ok": False, "error": "CarrotNaviSource must be 0 (network) or 1 (Navdy)"}, status=400)
 
   # clamp using settings if numeric
   p = None

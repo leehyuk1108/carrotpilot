@@ -9,7 +9,7 @@ from opendbc.car.common.basedir import BASEDIR
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.gm.carcontroller import CarController
 from opendbc.car.gm.carstate import CarState
-from opendbc.car.gm.radar_interface import RadarInterface, RADAR_HEADER_MSG
+from opendbc.car.gm.radar_interface import RadarInterface, RADAR_HEADER_MSG, LAST_RADAR_MSG
 from opendbc.car.gm.values import CAR, CarControllerParams, EV_CAR, CAMERA_ACC_CAR, CanBus, GMFlags, CC_ONLY_CAR, SDGM_CAR, CruiseButtons, GMSafetyFlags, ALT_ACCS
 from opendbc.car.interfaces import CarInterfaceBase, TorqueFromLateralAccelCallbackType, FRICTION_THRESHOLD, LatControlInputs, NanoFFModel
 
@@ -122,9 +122,14 @@ class CarInterface(CarInterfaceBase):
     ret.longitudinalTuning.kiBP = [0.]
 
     if candidate in (CAMERA_ACC_CAR | SDGM_CAR):
-      ret.alphaLongitudinalAvailable = candidate not in SDGM_CAR
+      # Traverse already uses the camera-long controller; keep its opt-in across drives.
+      ret.alphaLongitudinalAvailable = (candidate not in SDGM_CAR or candidate == CAR.CHEVROLET_TRAVERSE) and candidate not in ALT_ACCS
       ret.networkLocation = NetworkLocation.fwdCamera
-      ret.radarUnavailable = True  # no radar
+      # Some Traverse harnesses expose the full stock radar stream on bus 1.
+      ret.radarUnavailable = not (
+        candidate == CAR.CHEVROLET_TRAVERSE and
+        all(fingerprint[CanBus.OBSTACLE].get(msg) == 8 for msg in range(RADAR_HEADER_MSG, LAST_RADAR_MSG + 1))
+      )
       ret.pcmCruise = True
       ret.safetyConfigs[0].safetyParam |= GMSafetyFlags.HW_CAM.value
       ret.minEnableSpeed = -1 * CV.KPH_TO_MS
@@ -139,7 +144,7 @@ class CarInterface(CarInterfaceBase):
       ret.startingState = True
       ret.startAccel = 1.0
 
-      if alpha_long:
+      if alpha_long and ret.alphaLongitudinalAvailable:
         ret.pcmCruise = False
         ret.openpilotLongitudinalControl = True
         ret.safetyConfigs[0].safetyParam |= GMSafetyFlags.HW_CAM_LONG.value

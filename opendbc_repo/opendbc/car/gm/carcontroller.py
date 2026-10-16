@@ -267,7 +267,8 @@ class CarController(CarControllerBase):
 
       # Radar needs to know current speed and yaw rate (50hz),
       # and that ADAS is alive (10hz)
-      if not self.CP.radarUnavailable:
+      # Traverse receives stock radar traffic without these ASCM replacement messages.
+      if not self.CP.radarUnavailable and self.CP.carFingerprint != CAR.CHEVROLET_TRAVERSE:
         tt = self.frame * DT_CTRL
         time_and_headlights_step = 10
         if self.frame % time_and_headlights_step == 0:

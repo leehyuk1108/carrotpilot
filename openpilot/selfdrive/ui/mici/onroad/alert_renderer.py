@@ -12,6 +12,7 @@ from openpilot.system.hardware import TICI
 from openpilot.system.ui.lib.application import gui_app, FontWeight, TextAlignment
 from openpilot.system.ui.widgets import Widget
 from openpilot.system.ui.widgets.label import UnifiedLabel
+from openpilot.selfdrive.selfdrived.alert_presentation import font_sizes
 
 AlertSize = log.SelfdriveState.AlertSize
 AlertStatus = log.SelfdriveState.AlertStatus
@@ -90,10 +91,10 @@ class AlertRenderer(Widget):
   def __init__(self):
     super().__init__()
 
-    self._alert_text1_label = UnifiedLabel(text="", font_size=ALERT_FONT_BIG, font_weight=FontWeight.DISPLAY, line_height=0.86,
-                                           letter_spacing=-0.02)
-    self._alert_text2_label = UnifiedLabel(text="", font_size=ALERT_FONT_SMALL, font_weight=FontWeight.ROMAN, line_height=0.86,
-                                           letter_spacing=0.025)
+    self._alert_text1_label = UnifiedLabel(text="", font_size=ALERT_FONT_BIG, font_weight=FontWeight.DISPLAY, elide=False)
+    self._alert_text2_label = UnifiedLabel(text="", font_size=ALERT_FONT_SMALL, font_weight=FontWeight.ROMAN, elide=False)
+    self._text_layout_key = None
+    self._text_layout_heights = (0.0, 0.0)
 
     self._prev_alert: Alert | None = None
     self._text_gen_time = 0
@@ -204,13 +205,13 @@ class AlertRenderer(Widget):
 
     # create text rect based on icon presence
     text_x = self._rect.x + ALERT_MARGIN
-    text_width = self._rect.width - ALERT_MARGIN
+    text_width = self._rect.width - 2 * ALERT_MARGIN
     if icon_side == 'left':
-      text_x = self._rect.x + self._txt_turn_signal_right.width
-      text_width = self._rect.width - ALERT_MARGIN - self._txt_turn_signal_right.width
+      text_x = self._rect.x + txt_icon.width + icon_margin_x + ALERT_MARGIN
+      text_width = self._rect.width - txt_icon.width - icon_margin_x - 2 * ALERT_MARGIN
     elif icon_side == 'right':
       text_x = self._rect.x + ALERT_MARGIN
-      text_width = self._rect.width - ALERT_MARGIN - self._txt_turn_signal_right.width
+      text_width = self._rect.width - txt_icon.width - icon_margin_x - 2 * ALERT_MARGIN
 
     text_rect = rl.Rectangle(
       text_x,
@@ -298,41 +299,8 @@ class AlertRenderer(Widget):
 
   def _draw_text(self, alert: Alert, alert_layout: AlertLayout) -> None:
     icon_side = alert_layout.icon.side if alert_layout.icon is not None else None
-
-    # TODO: hack
-    alert_text1 = alert.text1.lower().replace('calibrating: ', 'calibrating:\n')
-    can_draw_second_line = False
-    # TODO: there should be a common way to determine font size based on text length to maximize rect
-    if len(alert_text1) <= 12:
-      can_draw_second_line = True
-      font_size = 60 # 92 - 10
-    elif len(alert_text1) <= 16:
-      can_draw_second_line = True
-      font_size = 50 #70
-    else:
-      font_size = 40 #64 - 10
-
-    if icon_side is not None:
-      font_size -= 10
-
-    color = rl.Color(255, 255, 255, int(255 * 0.9 * self._alpha_filter.x))
-
-    text1_y_offset = 11 if font_size >= 70 else 4
-    text_rect1 = rl.Rectangle(
-      alert_layout.text_rect.x,
-      alert_layout.text_rect.y - text1_y_offset,
-      alert_layout.text_rect.width,
-      alert_layout.text_rect.height,
-    )
-    self._alert_text1_label.set_text(alert_text1)
-    self._alert_text1_label.set_text_color(color)
-    self._alert_text1_label.set_font_size(font_size)
-    self._alert_text1_label.set_alignment(TextAlignment.LEFT if icon_side != 'left' else TextAlignment.RIGHT)
-    self._alert_text1_label.render(text_rect1)
-
-    alert_text2 = alert.text2.lower()
-
-    #print(f"Alert: {alert.text1} | {alert.text2} | {alert.size} | {alert.status} | {alert.visual_alert} | {alert.alert_type}")
+    event_name, _, event_type = alert.alert_type.partition('/')
+    alert_text2 = alert.text2
 
     # randomize chars and length for testing
     if DEBUG:
@@ -341,25 +309,49 @@ class AlertRenderer(Widget):
         self._text_gen_time = time.monotonic()
       alert_text2 = self._alert_text2_gen or alert_text2
 
-    if (can_draw_second_line or alert.size != AlertSize.small) and alert_text2:
-      last_line_h = self._alert_text1_label.rect.y + self._alert_text1_label.get_content_height(int(alert_layout.text_rect.width))
-      last_line_h -= 4
-      if len(alert_text2) > 24:
-        small_font_size = 32
-      elif len(alert_text2) > 16:
-        small_font_size = 36
-      else:
-        small_font_size = 40
-      text_rect2 = rl.Rectangle(
-        alert_layout.text_rect.x,
-        last_line_h,
-        alert_layout.text_rect.width,
-        alert_layout.text_rect.height - last_line_h
-      )
-      color = rl.Color(255, 255, 255, int(255 * 0.65 * self._alpha_filter.x))
+    title_size, subtitle_size = font_sizes(event_name, event_type, alert.text1, alert_text2, icon_side is not None)
+    width = max(1, int(alert_layout.text_rect.width))
+    height = max(1, int(alert_layout.text_rect.height) - 16)
+    title_height, subtitle_height = self._fit_text(alert.text1, alert_text2, title_size, subtitle_size, width, height)
+    alignment = TextAlignment.LEFT if icon_side != 'left' else TextAlignment.RIGHT
+    top = alert_layout.text_rect.y + 4
+    for label, y, content_height, alpha in (
+      (self._alert_text1_label, top, title_height, 0.9),
+      (self._alert_text2_label, top + title_height + 4, subtitle_height, 0.65),
+    ):
+      if content_height:
+        label.set_alignment(alignment)
+        label.set_text_color(rl.Color(255, 255, 255, int(255 * alpha * self._alpha_filter.x)))
+        label.render(rl.Rectangle(alert_layout.text_rect.x, y, width, content_height))
 
-      self._alert_text2_label.set_text(alert_text2)
-      self._alert_text2_label.set_text_color(color)
-      self._alert_text2_label.set_font_size(small_font_size)
-      self._alert_text2_label.set_alignment(TextAlignment.LEFT if icon_side != 'left' else TextAlignment.RIGHT)
-      self._alert_text2_label.render(text_rect2)
+  def _fit_text(self, title: str, subtitle: str, title_size: int, subtitle_size: int,
+                width: int, height: int) -> tuple[float, float]:
+    key = (title, subtitle, title_size, subtitle_size, width, height)
+    if key == self._text_layout_key:
+      return self._text_layout_heights
+    self._alert_text1_label.set_text(title)
+    self._alert_text2_label.set_text(subtitle)
+
+    def measure(percent):
+      self._alert_text1_label.set_font_size(max(1, title_size * percent // 100))
+      self._alert_text2_label.set_font_size(max(1, subtitle_size * percent // 100))
+      return (self._alert_text1_label.get_content_height(width) if title else 0.0,
+              self._alert_text2_label.get_content_height(width) if subtitle else 0.0)
+
+    title_height, subtitle_height = measure(100)
+    gap = 4 if subtitle else 0
+    if title_height + subtitle_height + gap > height:
+      # Bounded search avoids generating dozens of cached wraps for a changing
+      # diagnostic, while retaining the largest fitting reference font sizes.
+      low, high, best = 1, 99, 1
+      while low <= high:
+        percent = (low + high) // 2
+        h1, h2 = measure(percent)
+        if h1 + h2 + gap <= height:
+          best, low = percent, percent + 1
+        else:
+          high = percent - 1
+      title_height, subtitle_height = measure(best)
+    self._text_layout_key = key
+    self._text_layout_heights = (title_height, subtitle_height)
+    return self._text_layout_heights

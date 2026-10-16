@@ -9,7 +9,7 @@ import tarfile
 
 ROOT = Path(__file__).resolve().parents[2]
 PATHS = ['LICENSE', 'opendbc_repo/LICENSE', 'openpilot/__init__.py', 'openpilot/common', 'openpilot/cereal',
-         'openpilot/selfdrive/carrot/cluster', 'openpilot/selfdrive/carrot/carrot_navi.py',
+         'openpilot/selfdrive/carrot/cluster', 'openpilot/selfdrive/navdy', 'openpilot/selfdrive/carrot/carrot_navi.py',
          'openpilot/selfdrive/carrot/carrot_navi_cereal.py', 'openpilot/selfdrive/carrot/deceleration_source.py',
          'openpilot/selfdrive/controls/lib', 'openpilot/selfdrive/modeld/constants.py',
          'openpilot/selfdrive/modeld/jetlink/cinque_v2.json', 'openpilot/selfdrive/assets',

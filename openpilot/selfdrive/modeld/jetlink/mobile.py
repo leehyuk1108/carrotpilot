@@ -13,6 +13,8 @@ Never call send/recv on the ep0 owner in iOS mode: that would open bulk endpoint
 Keep the cable alive across accept timeouts; recreate it after a UDC rebind (the
 kernel may assign a new netdev). close() deliberately does not close the owner.
 USB/android retain the original setup_gadget.sh and do not create a listener.
+Explicit USB can add boot-latched management when the daemon's offroad guard
+permits it; automatic fallback to USB and all phone modes never opt into it.
 Android's explicit speed policy belongs to the daemon, not this transport.
 HELLO backend/device fields are peer assertions, not authenticated phone identity.
 For persistent manual setup, write usb, ios or android plus a newline to
@@ -21,6 +23,7 @@ auto; existing files remain overrides. Auto uses bounded sequential discovery,
 not a claim that USB enumeration identifies a host; see AutoTransport below.
 """
 import ipaddress
+import json
 import logging
 import math
 import os
@@ -86,14 +89,14 @@ def _root(script, *args):
       prefix += ['env', 'JETLINK_TRANSPORT=ios']
     command = [*prefix, *command]
   try:
-    subprocess.run(command, env=env, check=True, capture_output=True, text=True, timeout=15)
+    return subprocess.run(command, env=env, check=True, capture_output=True, text=True, timeout=15).stdout
   except subprocess.CalledProcessError as exc:
     raise MobileLinkError(f'{script} failed: {(exc.stderr or exc.stdout or str(exc)).strip()}') from exc
   except (OSError, subprocess.TimeoutExpired) as exc:
     raise MobileLinkError(f'{script} unavailable: {exc}') from exc
 
 
-def setup_gadget(mode=None):
+def setup_gadget(mode=None, *, management=False):
   """Run the existing plain setup for USB, or add NCM before ep0/UDC binding."""
   mode = transport_mode() if mode is None else transport_mode({'JETLINK_TRANSPORT': mode})
   if mode in ('auto', 'ios'):
@@ -104,13 +107,36 @@ def setup_gadget(mode=None):
       # A retained, detached NCM function requires no further teardown.
       # The helper refuses bound/unowned NCM rather than altering another owner.
       teardown_gadget()
-    _root('setup_gadget.sh')
+    _root('setup_gadget.sh', *(['--management'] if mode == 'usb' and management else []))
   return mode
 
 
 def teardown_gadget():
   """Detach helper-owned NCM only for an explicit switch to a plain gadget."""
   _root('setup_mobile.sh', '--teardown')
+
+
+def initialize_management():
+  """Latch the opt-in once per OS boot, without touching USB or networking."""
+  try:
+    result = json.loads(_root('setup_gadget.sh', '--latch-management'))
+    return isinstance(result, dict) and result.get('enabled_this_boot') is True
+  except (MobileLinkError, ValueError, TypeError) as exc:
+    log.warning('USB management boot mode unavailable: %s', exc)
+    return False
+
+
+def activate_management():
+  """A management network failure must not close a working bulk owner."""
+  try:
+    _root('setup_gadget.sh', '--activate-management')
+  except MobileLinkError as exc:
+    log.warning('USB management network unavailable: %s', exc)
+
+
+def deactivate_management():
+  """Detach only after the FunctionFS owner has verified that UDC is unbound."""
+  _root('setup_gadget.sh', '--detach-management')
 
 
 def _timeout(value):

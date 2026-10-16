@@ -1,5 +1,11 @@
 # Driver monitoring
 
+## Wayon phone indication and approach warning (migration branch)
+
+On C4, fresh phone detection fades the driver figure into a gently moving phone icon. Attention colors transition between green and orange. The phone indication fades out when monitoring is disabled or its data becomes stale.
+
+Phone detection combined with a rapidly closing lead triggers a two-second forward-attention message and prompt, with at least four seconds between new risk entries. This additive warning commands no braking or steering and does not relax existing DM/DM2 alerts, deceleration or lockout. The phone-monitoring bypass is not imported. Detection or absence of an alert is not a safety guarantee.
+
 `DriverMonitoringEnabled` defaults to ON and saves your choice across drives and restarts. While monitoring is enabled, `DriverMonitoringMode` defaults to `0: Standard`; select `1: Experimental` separately. Mode changes apply live at roughly half-second intervals without rebooting. Switching preserves accumulated monitoring time, warning counts and lockout, and ends the previous interaction grace and forward-attention streak. Old `DisableDM` values do not opt into experimental monitoring.
 
 > [!CAUTION]

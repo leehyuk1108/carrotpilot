@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from openpilot.common.constants import CV
 from openpilot.selfdrive.carrot.deceleration_source import deceleration_source_presentation
 from openpilot.selfdrive.ui.onroad.exp_button import ExpButton
+from openpilot.selfdrive.ui.onroad.jetlink_badge import draw_jetlink_badge, draw_jetlink_detail
 from openpilot.selfdrive.ui.ui_state import ui_state, UIStatus
 from openpilot.system.hardware.usbgpu import usbgpu_badge_state
 from openpilot.system.ui.lib.application import gui_app, FontWeight
@@ -323,6 +324,16 @@ class HudRenderer(Widget):
     return self._exp_button.is_pressed
 
   def _draw_egpu_badge(self, rect: rl.Rectangle) -> None:
+    if (getattr(ui_state, 'jetlink_badge', None) and not ui_state.usbgpu_active and
+        not getattr(ui_state, 'usbgpu_recovery_badge', None)):
+      badge_right = rect.x + rect.width - UI_CONFIG.border_size - UI_CONFIG.button_size - 24
+      draw_jetlink_badge(ui_state.jetlink_badge,
+                        rl.Rectangle(rect.x + 350, rect.y + 24, badge_right - rect.x - 350, 66), 38)
+      detail_width = min(780, badge_right - rect.x - 350)
+      draw_jetlink_detail(ui_state.jetlink_detail,
+                         rl.Rectangle(badge_right - detail_width, rect.y + 100, detail_width, 150),
+                         26, time.monotonic() - ui_state.jetlink_detail_since)
+      return
     # Keep runtime state visible while the shared USB hub re-enumerates; a
     # transient missing sysfs sample must not hide loading or failure details.
     if not (getattr(ui_state, 'jetlink_badge', None) or getattr(ui_state, 'usbgpu_delivery_badge', None) or

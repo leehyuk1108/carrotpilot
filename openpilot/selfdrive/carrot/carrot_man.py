@@ -32,7 +32,7 @@ from openpilot.system.hardware import PC, TICI
 from openpilot.selfdrive.navd.helpers import Coordinate
 from openpilot.common.constants import CV
 
-from openpilot.selfdrive.carrot.carrot_serv import CarrotServ
+from openpilot.selfdrive.carrot.carrot_serv import CarrotServ, NAVI_SOURCE_NETWORK, NAVI_SOURCE_NAVDY
 from openpilot.selfdrive.carrot.curve_speed import VisionCurveSpeed, curve_speed
 from openpilot.selfdrive.carrot.carrot_navi_control import CarrotNaviControl, parse_carrot_navi_control
 from openpilot.selfdrive.carrot.server.services.web_settings import read_web_settings
@@ -315,6 +315,9 @@ class CarrotMan:
     self.pm = messaging.PubMaster(['carrotMan', "navRoute", "navInstructionCarrot"])
 
     self.carrot_serv = CarrotServ()
+    if not self.carrot_serv.accepts_navigation(NAVI_SOURCE_NETWORK):
+      for key in ("TrafficLight", NAVI_DEBUG_PARAM, NAVI_IMAGE_PARAM):
+        self.params_memory.remove(key)
 
     self.broadcast_ip = self.get_broadcast_address()
     self.broadcast_port = 7705
@@ -405,7 +408,7 @@ class CarrotMan:
         if navd_route_updated:
           self.send_routes(self.sm['navRouteNavd'].coordinates, True)
         carrot_navi_service_active = self.sm.alive['carrotNavi'] and self.sm.valid['carrotNavi']
-        if (
+        if self.carrot_serv.accepts_navigation(NAVI_SOURCE_NETWORK) and (
           self.sm.updated['carrotNavi'] or navd_route_updated
           or (self.carrot_navi_route_session_id and not carrot_navi_service_active)
         ):
@@ -1318,6 +1321,8 @@ class CarrotMan:
 
 
   def send_routes(self, coords, from_navd=False):
+    if from_navd and not self.carrot_serv.accepts_navigation(NAVI_SOURCE_NETWORK):
+      return
     original_count = len(coords)
     coords = limit_route_points(coords, NAVI_ROUTE_MAX_POINTS)
     if original_count > len(coords):
@@ -1351,6 +1356,9 @@ class CarrotMan:
     self.pm.send('navRoute', msg)
 
   def carrot_route(self):
+    if not self.carrot_serv.accepts_navigation(NAVI_SOURCE_NETWORK):
+      self.send_routes([])
+      return
     host = '0.0.0.0'  # 혹은 다른 호스트 주소
     port = 7709  # 포트 번호
 
@@ -2108,6 +2116,12 @@ class CarrotMan:
     if not isinstance(obj, dict):
       return self.handle_unknown(obj)
 
+    if not self.carrot_serv.accepts_navigation(NAVI_SOURCE_NETWORK):
+      rgdata = obj.get("rgdata")
+      if isinstance(rgdata, dict):
+        self.carrot_serv.update(self._normalize_rgdata(rgdata))
+      return False
+
     event_type = self._detect_navi_event_type(obj)
     event_time_ms = self._get_timestamp_ms(obj)
     try:
@@ -2152,6 +2166,7 @@ class CarrotMan:
 
     if not handled:
       self.handle_unknown({"type": event_type, "keys": list(obj.keys())[:10]})
+    return handled
 
   def _safe_dispatch_handler(self, label: str, handler: Any, *args: Any):
     try:
@@ -2252,11 +2267,13 @@ class CarrotMan:
       self.remote_addr = (peer[0], self.broadcast_port)
 
     try:
-      self._dispatch_obj(obj)
+      accepted = self._dispatch_obj(obj)
       #print(f"[HTTP] dispatch ok version={tmap_version}")
       #print(obj)
       return web.json_response({
         "ok": True,
+        "accepted": bool(accepted),
+        "navigationSource": self.carrot_serv.navi_source,
         "tmap_version": tmap_version
       })
     except Exception as e:
@@ -2282,9 +2299,16 @@ class CarrotMan:
         "summary": last_event.get("summary", {}),
       }
 
+    navdy_status = self.carrot_serv.navdy_navigation.status()
     return web.json_response({
       "ok": True,
       "service": "carrot_navi_http",
+      "navigationSource": self.carrot_serv.navi_source,
+      "configuredNavigationSource": self.params.get_int("CarrotNaviSource"),
+      "navigationSourceRestartRequired": self.params.get_int("CarrotNaviSource") != self.carrot_serv.navi_source,
+      "navdyRelayImplemented": True,
+      "navdy": navdy_status,
+      "navigationSourceReason": navdy_status["reason"] if self.carrot_serv.navi_source == NAVI_SOURCE_NAVDY else "",
       "lastEvent": last_summary,
       "receivedTypes": sorted(by_type.keys()),
     })

@@ -49,6 +49,7 @@ def joining_model(monkeypatch):
   m.ready = m.join_allowed = True
   m.next_join = m.next_status = 0
   m.active = False
+  m.fault_until = 0.
   m.error = ''
   m.small = NS(run=lambda *a: 'local')
   m.packed = np.zeros(link.SPEC.packed_nelem, np.float32)

@@ -7,6 +7,7 @@ import openpilot.cereal.messaging as messaging
 
 from openpilot.cereal import car, log
 from msgq.visionipc import VisionIpcClient, VisionStreamType
+from opendbc.safety import ALTERNATIVE_EXPERIENCE
 
 
 from openpilot.common.params import Params
@@ -24,6 +25,7 @@ from openpilot.selfdrive.selfdrived.helpers import ExcessiveActuationCheck
 from openpilot.selfdrive.selfdrived.state import StateMachine
 from openpilot.selfdrive.selfdrived.impact_detector import ImpactDetector
 from openpilot.selfdrive.controls.lib.radar_only_warning import RadarOnlyWarning
+from openpilot.selfdrive.controls.lib.phone_forward_risk import PhoneForwardRisk
 from openpilot.selfdrive.carrot.radar_motion.timing import front_radar_distance_delay_s
 from openpilot.selfdrive.selfdrived.alertmanager import AlertManager, set_offroad_alert
 from openpilot.selfdrive.controls.lib.cutin_alert import (
@@ -145,6 +147,7 @@ class SelfdriveD:
     self.dm_lockout_set = self.params.get_bool("DriverTooDistracted")
     self.cutin_audio_tracker = CutinAlertTracker()
     self.radar_only_warning = RadarOnlyWarning(front_radar_distance_delay_s(self.CP))
+    self.phone_forward_risk = PhoneForwardRisk()
     self.car_state_time_s = 0.0
     self.dm_uncertain_alerted = False
     self.dm_disabled_prev = False
@@ -162,11 +165,12 @@ class SelfdriveD:
     self.atc_type_last = ""
 
 
-    # some comma three with NVMe experience NVMe dropouts mid-drive that
-    # cause loggerd to crash on write, so ignore it only on that platform
-    self.ignored_processes = set()
+    # Remote access, maintenance and the optional display do not supply driving data.
+    # Manager still logs their failures and restarts them.
+    self.ignored_processes = {'jetson_maintenance', 'comma_remote', 'carrot_cluster', 'navdy_bridge'}
+    # Some comma three with NVMe experience dropouts mid-drive that crash loggerd.
     if HARDWARE.get_device_type() == 'tici' and os.path.exists('/dev/nvme0'):
-      self.ignored_processes = {'loggerd', }
+      self.ignored_processes.add('loggerd')
 
     # Determine startup event
     self.startup_event = EventName.startup #if build_metadata.openpilot.comma_remote and build_metadata.tested_channel else EventName.startupMaster
@@ -184,6 +188,14 @@ class SelfdriveD:
       set_offroad_alert("Offroad_CarUnrecognized", True)
     elif self.CP.passive:
       self.events.add(EventName.dashcamMode, static=True)
+
+  def _update_phone_forward_risk(self, CS):
+    if self.phone_forward_risk.update_live(
+      self.car_state_time_s if REPLAY else time.monotonic(), CS, self.sm,
+      self.initialized and not self.CP.passive and not self.CP.notCar,
+      car_state_time_s=self.car_state_time_s,
+    ):
+      self.events.add(EventName.phoneLeadClosing)
 
   def _big_model_settling(self) -> bool:
     """Allow modeld to settle after eGPU startup or runtime fallback."""
@@ -295,6 +307,8 @@ class SelfdriveD:
         set_offroad_alert("Offroad_DriverMonitoringUncertain", True)
         self.dm_uncertain_alerted = True
 
+    self._update_phone_forward_risk(CS)
+
     self.events.add_from_msg(self.sm['longitudinalPlan'].events)  ## carrot
 
     # Add car events, ignore if CAN isn't valid
@@ -309,7 +323,10 @@ class SelfdriveD:
           self.events.add(EventName.pcmEnable)
 
       # Disable on rising edge of accelerator or brake. Also disable on brake when speed > 0
-      if (CS.gasPressed and not self.CS_prev.gasPressed and self.params.get_bool("DisengageOnAccelerator")) or \
+      # Enabling pedal disengagement takes effect immediately; disabling waits for new safety config.
+      disengage_on_gas = self.params.get_bool("DisengageOnAccelerator") or not (
+        self.CP.alternativeExperience & ALTERNATIVE_EXPERIENCE.DISABLE_DISENGAGE_ON_GAS)
+      if (CS.gasPressed and not self.CS_prev.gasPressed and disengage_on_gas) or \
         (CS.brakePressed and (not self.CS_prev.brakePressed or not CS.standstill)) or \
         (CS.regenBraking and (not self.CS_prev.regenBraking or not CS.standstill)):
         self.events.add(EventName.pedalPressed)

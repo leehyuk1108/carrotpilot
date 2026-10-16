@@ -371,6 +371,7 @@ def put_typed(params: "Params", key: str, value: Any, p: Optional[Dict[str, Any]
 
 
 INTERNAL_SESSION_PARAMS = frozenset({"DriverMonitoringSessionDisabled", "JetsonLegacyUpdatePending"})
+READ_ONLY_PARAMS = frozenset({"ClusterHudBrightness"})
 BACKUP_EXCLUDED_PARAMS = frozenset({"DriverMonitoringEnabled"})
 
 
@@ -391,6 +392,8 @@ def read_param_backup_values(path: str) -> dict[str, Any]:
 
 
 def set_param_value(name: str, value: Any, p: Optional[Dict[str, Any]] = None) -> None:
+  if name in READ_ONLY_PARAMS:
+    raise ValueError(f"{name} is controlled by the cluster theme")
   if name in INTERNAL_SESSION_PARAMS:
     raise ValueError(f"{name} is controlled internally")
   if not HAS_PARAMS:
@@ -526,7 +529,7 @@ def restore_param_values_from_backup(values: Dict[str, Any], source: str = "rest
   fails = []
 
   for key, value in values.items():
-    if key in INTERNAL_SESSION_PARAMS:
+    if key in INTERNAL_SESSION_PARAMS or key in READ_ONLY_PARAMS:
       continue
     if source != "reset_defaults" and key in BACKUP_EXCLUDED_PARAMS:
       continue
@@ -1288,7 +1291,11 @@ def preview_param_restore_values(values: Dict[str, Any], selected_keys: Optional
     type_name = "unknown"
     normalized_value: Any = raw_value
 
-    if key in INTERNAL_SESSION_PARAMS:
+    if key in READ_ONLY_PARAMS:
+      status = "skipped"
+      reason = "controlled by the cluster theme"
+      can_apply = False
+    elif key in INTERNAL_SESSION_PARAMS:
       status = "invalid"
       reason = "controlled internally"
       can_apply = False

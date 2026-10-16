@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 import json
 import math
+import os
 import sys
 import time
 from pathlib import Path
@@ -19,9 +20,11 @@ from cluster_models import (
     NaviDebugInfo,
     NaviGuidanceImage,
     NaviTrafficLightInfo,
+    PhoneMediaInfo,
 )
 from cluster_navi import fresh_carrot_navi, parse_carrot_navi, resolve_navi_speed_limit
 from cluster_navi_source import NaviIpcMediaSource
+from cluster_phone_media import PhoneMediaReader, PHONE_MEDIA_DEFAULT_PATHS
 from cluster_route_replay import RouteLogParser, finite_float, frame_to_state, safe_get, safe_optional_float
 from cluster_utils import clamp
 
@@ -175,6 +178,7 @@ class OpenpilotLiveSource:
             print(f"Carrot navigation media IPC unavailable: {exc}", flush=True)
             self._carrot_navi_media = None
         self._standby_state = standby_state()
+        self._phone_media_reader = PhoneMediaReader()
         self.profile_enabled = False
         self._profile_samples: list[tuple[str, float]] = []
         try:
@@ -315,7 +319,7 @@ class OpenpilotLiveSource:
             state = frame_to_state(frame)
             self._profile_add("source.live.frame_to_state", profile_stage)
 
-            self.last_state = self._with_live_hud_state(self._with_debug_state(state))
+            self.last_state = self._with_phone_media(self._with_live_hud_state(self._with_debug_state(state)))
             self.frames += 1
             return self.last_state
 
@@ -323,7 +327,7 @@ class OpenpilotLiveSource:
         state = self._standby_state
         self._profile_add("source.live.standby_state", profile_stage)
 
-        self.last_state = self._with_live_hud_state(self._with_debug_state(state))
+        self.last_state = self._with_phone_media(self._with_live_hud_state(self._with_debug_state(state)))
         return self.last_state
 
     def _with_live_hud_state(self, state: ClusterUiState) -> ClusterUiState:
@@ -600,6 +604,27 @@ class OpenpilotLiveSource:
         if self._carrot_navi_media is not None:
             self._carrot_navi_media.close()
         return None
+
+    @staticmethod
+    def _resolve_phone_media_paths() -> tuple[Path, ...]:
+        paths: list[Path] = []
+        env_path = str(os.environ.get("CARROTLINK_PHONE_MEDIA_PATH", "")).strip()
+        if env_path:
+            paths.append(Path(env_path))
+        for value in PHONE_MEDIA_DEFAULT_PATHS:
+            candidate = Path(value)
+            if candidate not in paths:
+                paths.append(candidate)
+        return tuple(paths)
+
+    def _with_phone_media(self, state: ClusterUiState) -> ClusterUiState:
+        media = self._read_phone_media_info()
+        if media == state.phone_media:
+            return state
+        return replace(state, phone_media=media)
+
+    def _read_phone_media_info(self) -> PhoneMediaInfo | None:
+        return self._phone_media_reader.read()
 
     def _apply_service_update(self, service: str, event_t: float) -> None:
         data = self.sm[service]

@@ -341,7 +341,7 @@ An APN label remaining in the `ShowRouteInfo` description refers to route-input 
 
 `ShowModelView` (Driving Screen Layout) selects the C4 view: `0` camera + lanes/path, `1` camera only, `2` lanes/path on a black background, or `3` hide both. Lane/path graphics include lead-vehicle markers. It applies at every brightness setting, including automatic and 100%, with no additional wait after entering driving mode. Changes while driving appear within about five seconds without rebooting. Speed, alerts, and driver status stay visible; camera capture, driving decisions, and vehicle control are unchanged. This setting does not apply to C3/C3X. While an external HUD is connected, `ShowCameraWithCluster=0` hides both the on-device camera and lane/path graphics regardless of this choice.
 
-`ClusterHudBrightness=0` follows camera exposure automatically; values `1` through `100` select fixed brightness. `ClusterHudOrientation` supports only `0` (0 degrees) and `2` (180 degrees); values `1` and `3` are ignored. The running TURZX process checks both stored settings every 100 ms. Brightness applies live; a managed H.264 orientation change automatically restarts the HUD and applies it through the capture-compatible stream setup.
+This migration branch's Ambient HUD commands **20% in dark theme and 60% in light theme**. Stored `ClusterHudBrightness` and camera exposure are ignored; manual web changes are rejected. Automatic `ClusterHudTheme=0` switching remains available. These are device commands, not measured light-output percentages. `ClusterHudOrientation` supports only `0` (0 degrees) and `2` (180 degrees). The TURZX process checks theme brightness and orientation every 100 ms; a managed H.264 orientation change restarts the HUD.
 
 `ClusterHudPanelLayout=0` places the driving view selected by `ClusterHudCameraViewMode` on the left and the information panel selected by the screen, debug, and navigation state on the right. `1` swaps them, placing information on the left and the driving view on the right. The running HUD applies the setting within about one second without a restart. Modes without two side regions, such as the full-screen graph and full-screen navigation, are unchanged. `ClusterHudDebug` forces always-on output and optional debug UI or navigation input; any resulting debug or navigation information panel follows the selected layout.
 
@@ -390,6 +390,10 @@ The 12 system settings cover recording, power, network, maps, sound, and softwar
 | Software | `SoftwareMenu` | Carrot Web software-menu availability |
 
 Check storage use for recording and network use, heat, and privacy before enabling live streaming.
+
+In this migration branch, `MaxTimeOffroadMin` supports up to `4320` minutes (three days); existing saved values are unchanged. Shutdown is blocked while ignition is on. Offroad shutdown occurs after the configured time or below `11.3V` filtered battery voltage. The one-hour boot condition, five-minute offroad delay and estimated battery-capacity cutoff are not used. Long operation and a low voltage threshold increase depletion and no-start risk.
+
+`CarrotNaviSource`, under Speed and deceleration, selects `0` network guidance or `1` Navdy USB. Restart after saving. Direct USB is tried first, then a previously paired Jetson relay. Navdy mode does not fall back to network guidance; music and clock synchronization remain available. See [input and expiry rules](speed-deceleration.md#navdy-input).
 
 `SoundVolumeAdjust` changes general sound volume. DM's first audible warning has a 70% minimum output gain; its final warning always uses 100%, regardless of volume settings or ambient-noise attenuation. The preceding visual-only notice remains silent. See [driver monitoring](driver-monitoring.md) for details.
 

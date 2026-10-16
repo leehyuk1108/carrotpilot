@@ -12,6 +12,7 @@ from openpilot.selfdrive.carrot.deceleration_source import (
 )
 # from openpilot.selfdrive.ui.mici.onroad.torque_bar import TorqueBar # 아이콘에 토크 적용: 토크바 미사용
 from openpilot.selfdrive.ui.mici.onroad import blend_colors
+from openpilot.selfdrive.ui.onroad.jetlink_badge import draw_jetlink_badge, draw_jetlink_detail
 from openpilot.selfdrive.ui.ui_state import ui_state, UIStatus
 from openpilot.system.hardware.usbgpu import usbgpu_badge_state
 from openpilot.system.ui.lib.application import gui_app, FontWeight
@@ -32,6 +33,11 @@ EventName = log.OnroadEvent.EventName
 SET_SPEED_NA = 255
 KM_TO_MILE = 0.621371
 CRUISE_DISABLED_CHAR = '–'
+KST_OFFSET_SECONDS = 9 * 60 * 60
+
+
+def kst_datetime() -> datetime:
+  return datetime.utcfromtimestamp(time.time() + KST_OFFSET_SECONDS)
 
 SET_SPEED_PERSISTENCE = 2.5  # seconds
 DEFAULT_MAX_LAT_ACCEL = 3.0  # m/s^2
@@ -319,6 +325,9 @@ class HudRenderer(Widget):
 
 
   def _draw_egpu_badge(self, rect: rl.Rectangle) -> None:
+    if (getattr(ui_state, 'jetlink_badge', None) and not ui_state.usbgpu_active and
+        not getattr(ui_state, 'usbgpu_recovery_badge', None)):
+      return  # Jetlink is drawn after the cached HUD and ordinary alerts.
     # Keep runtime state visible while the shared USB hub re-enumerates; a
     # transient missing sysfs sample must not hide loading or failure details.
     if not (getattr(ui_state, 'jetlink_badge', None) or getattr(ui_state, 'usbgpu_delivery_badge', None) or
@@ -366,6 +375,25 @@ class HudRenderer(Widget):
       0,
       color,
     )
+
+  def draw_jetlink_status(self, rect: rl.Rectangle, alert=None) -> None:
+    if ui_state.usbgpu_active or getattr(ui_state, 'usbgpu_recovery_badge', None):
+      return
+    if alert is not None:
+      if alert.status != log.SelfdriveState.AlertStatus.normal or alert.size == log.SelfdriveState.AlertSize.full:
+        return
+      draw_jetlink_badge(ui_state.jetlink_badge, rl.Rectangle(rect.x + rect.width - 96, rect.y + rect.height - 110, 90, 58),
+                        18, stacked=True)
+      return
+    # Keep the clock, traffic countdown and speed/gear panel unobstructed.
+    if ui_state.jetlink_detail:
+      draw_jetlink_badge(ui_state.jetlink_badge, rl.Rectangle(rect.x + rect.width - 96, rect.y + rect.height - 114, 90, 42),
+                        13, stacked=True)
+      draw_jetlink_detail(ui_state.jetlink_detail, rl.Rectangle(rect.x + rect.width - 96, rect.y + rect.height - 70, 90, 52),
+                         10, time.monotonic() - ui_state.jetlink_detail_since)
+    else:
+      draw_jetlink_badge(ui_state.jetlink_badge, rl.Rectangle(rect.x + rect.width - 96, rect.y + rect.height - 76, 90, 58),
+                        18, stacked=True)
 
   def _update_cruise_speed_animation(self, cruise_text: str) -> None:
     if self._cruise_speed_text_last == cruise_text:
@@ -504,7 +532,7 @@ class HudRenderer(Widget):
 
 
   def _draw_wheel_side_info(self, wheel_txt, pos_x: int, pos_y: int) -> None:
-    now = datetime.now()
+    now = kst_datetime()
 
     try:
       show_date_time = int(ui_state.show_date_time)

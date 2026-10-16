@@ -85,6 +85,12 @@ TMUX_START_DIR = "/data/openpilot"
 # Params backup file (referenced by params.backup, tools.actions.settings, features.params.routes)
 PARAMS_BACKUP_PATH = "/data/media/params_backup.json"
 
+# Phone media bridge
+PHONE_MEDIA_PATH = "/data/media/0/carrotlink_sidecar/phone_media.json"
+PHONE_MEDIA_FALLBACK_PATH = "/tmp/carrotlink_phone_media.json"
+PHONE_MEDIA_ART_BASE64_MAX_CHARS = 512 * 1024
+PHONE_MEDIA_TEXT_MAX_CHARS = 160
+
 # UI
 UNIT_CYCLE = [1, 2, 5, 10, 50, 100]
 

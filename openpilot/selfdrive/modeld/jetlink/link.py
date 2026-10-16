@@ -19,6 +19,7 @@ SPEC = DEFAULT_SPEC
 SOCKET = '/dev/shm/carrot-jetlink.sock'
 STATUS = Path('/dev/shm/carrot-jetlink.json')
 FAULT = Path('/dev/shm/carrot-jetlink-fault')
+FAULT_HOLD_SECONDS = 5.
 REQUEST = struct.Struct('<IIQ')
 REPLY = struct.Struct('<I3I')
 MAX_PACKET = 1 << 20
@@ -128,7 +129,7 @@ def validate_spec(spec):
 
 def fault_active():
   try:
-    return 0 <= time.monotonic() - float(FAULT.read_text()) < 5
+    return 0 <= time.monotonic() - float(FAULT.read_text()) < FAULT_HOLD_SECONDS
   except (OSError, ValueError):
     return False
 

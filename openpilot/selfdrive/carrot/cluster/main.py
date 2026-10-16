@@ -38,6 +38,8 @@ from cluster_config import (
     DESIGN_HEIGHT,
     DESIGN_WIDTH,
     normalize_cluster_brightness_percent,
+    cluster_theme_brightness_percent,
+    kst_clock_text_12h,
     cluster_camera_view_is_road_camera,
     normalize_cluster_camera_view_mode,
     normalize_cluster_encoder_mode,
@@ -580,17 +582,11 @@ def resolved_usb_brightness(
     live_source: OpenpilotLiveSource | None,
     *,
     auto_enabled: bool,
+    theme_mode: str = "auto",
 ) -> int:
-    normalized = normalize_cluster_brightness_percent(setting)
-    if normalized > 0 or not auto_enabled:
-        return normalized
-
-    if live_source is not None:
-        auto_brightness = live_source.screen_brightness_percent()
-        if auto_brightness is not None:
-            return normalize_cluster_brightness_percent(auto_brightness)
-
-    return DEFAULT_USB_BRIGHTNESS
+    # Ambient panels follow the theme, including the KST automatic schedule.
+    # Retain the legacy call arguments without applying manual/device brightness.
+    return cluster_theme_brightness_percent(theme_mode)
 
 
 def build_rgba_color_test_pattern(width: int, height: int) -> bytearray:
@@ -723,10 +719,14 @@ def run_demo(
     active_hud_mirror_mode = hud_mirror_param_reader.read()
 
     usb_brightness_auto_enabled = usb_brightness_param_reader is not None
+    theme_override = normalize_cluster_theme_mode(theme_mode) if theme_mode is not None else None
+    theme_param_reader = ClusterThemeParamReader() if theme_override is None else None
+    active_theme_mode = theme_override or (theme_param_reader.read() if theme_param_reader is not None else "auto")
     initial_usb_brightness = resolved_usb_brightness(
         active_brightness_setting,
         None,
         auto_enabled=usb_brightness_auto_enabled,
+        theme_mode=active_theme_mode,
     )
     if output_mode in ("usb", "both"):
         usb_display = create_display(
@@ -780,9 +780,6 @@ def run_demo(
         raise RuntimeError(
             f"H264 USB output requires even encoder dimensions, got {h264_width}x{h264_height}"
         )
-    theme_override = normalize_cluster_theme_mode(theme_mode) if theme_mode is not None else None
-    theme_param_reader = ClusterThemeParamReader() if theme_override is None else None
-    active_theme_mode = theme_override or (theme_param_reader.read() if theme_param_reader is not None else "auto")
     display_pref_param_reader = (
         ClusterDisplayPreferencesParamReader()
         if language is None or is_metric is None
@@ -1356,7 +1353,7 @@ def run_demo(
                         flush=True,
                     )
                     break
-                center_clock_text = time.strftime("%H:%M:%S") if active_clock_visible else None
+                center_clock_text = kst_clock_text_12h() if active_clock_visible else None
                 profile.add_samples(live_source.profile_samples())
                 profile.add_elapsed("source.live_update", profile_stage)
             elif input_mode == "navi" and navi_source is not None:
@@ -1602,6 +1599,7 @@ def run_demo(
                     active_brightness_setting,
                     live_source,
                     auto_enabled=usb_brightness_auto_enabled,
+                    theme_mode=renderer.theme_mode,
                 )
                 usb_display.set_brightness(next_usb_brightness)
                 next_orientation = usb_orientation_param_reader.read()

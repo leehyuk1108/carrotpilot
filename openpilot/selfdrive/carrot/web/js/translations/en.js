@@ -202,6 +202,8 @@ window.CarrotTranslations.register("en", {
     device_group_network: "Network",
     device_group_toggles: "Toggles",
     device_group_software: "Software",
+    device_group_remote_support: "Remote support",
+    device_group_jetson: "Jetson",
     device_group_developer: "Developer",
     language_setting: "System",
     branch: "Branch",

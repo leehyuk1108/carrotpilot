@@ -22,6 +22,13 @@ Change them in **Carrot Web → Settings → Driving control → Speed and decel
 
 ## The lowest candidate becomes the final desired speed
 
+<a id="navdy-input"></a>
+### Navigation input (migration branch)
+
+`CarrotNaviSource=0` retains network guidance; `1` uses direct comma USB or a paired Jetson relay for Navdy. Restart after saving. Navdy mode does not mix or fall back to network guidance; music and clock synchronization remain separate.
+
+Extended HUD v157 forwards turns, remaining distance/time, limits, cameras, bumps and signals. Link silence expires after two seconds and guidance after at most four seconds from source receipt. Signals require revised v157 `validForMs` and its shorter source deadline. Identical payloads and repeated ACKs cannot renew freshness, so unchanged guidance may disappear. These inputs feed existing Carrot settings; parser tests do not establish vehicle deceleration or stopping safety.
+
 The code collects several candidates and selects their minimum as `desired_speed`:
 
 | Candidate | Representative setting/input |
