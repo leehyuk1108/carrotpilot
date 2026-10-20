@@ -194,7 +194,7 @@ class CAR(Platforms):
   )
   CHEVROLET_TRAVERSE = GMPlatformConfig(
     [GMCarDocs("Chevrolet Traverse 2022-23", "RS, Premier, or High Country Trim")],
-    CarSpecs(mass=1955, wheelbase=3.07, steerRatio=17.9, centerToFrontRatio=0.4),
+    CarSpecs(mass=2090, wheelbase=3.07, steerRatio=17.9, centerToFrontRatio=0.7),
   )
   # Separate car def is required when there is no ASCM
   # (for now) unless there is a way to detect it when it has been unplugged...

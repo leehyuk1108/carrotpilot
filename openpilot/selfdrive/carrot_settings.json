@@ -139,6 +139,16 @@
               ]
             },
             {
+              "id": "STEER_VEHICLE_SPECS",
+              "ko": "차량 제원",
+              "en": "Vehicle Specifications",
+              "zh": "车辆参数",
+              "params": [
+                "VehicleMass",
+                "VehicleCenterToFrontRatio"
+              ]
+            },
+            {
               "id": "STEER_LANECHANGE",
               "ko": "차로 변경 (자동 턴)",
               "en": "Lane Change (Auto Turn)",
@@ -1142,6 +1152,43 @@
       "default": 100,
       "unit": 1,
       "display_unit": "percent"
+    },
+    {
+      "group": "차량 제원",
+      "name": "VehicleMass",
+      "title": "차량 공차중량 (kg)",
+      "descr": "차량 공차중량을 kg으로 입력합니다. 기본값 버튼은 설치된 차량의 공차중량으로 복원합니다. 탑승자·짐 가정값 136kg은 별도로 더해집니다.\n주행 중에도 약 0.5초 내 읽어 초당 최대 100kg씩 서서히 반영합니다. 타이어 강성과 회전관성도 함께 변경됩니다. 잘못된 제원은 조향 계산에 영향을 줍니다. 운전자가 직접 조작하지 마세요.",
+      "egroup": "Vehicle Specifications",
+      "etitle": "Vehicle Curb Weight (kg)",
+      "edescr": "Curb weight in kg, excluding the separately added 136kg payload. Default restores the installed vehicle's curb weight. Read within about 0.5s and ramped at up to 100kg/s, including inertia and tire stiffness. Incorrect specifications affect steering calculations. The driver must not operate these controls while driving.",
+      "cgroup": "车辆参数",
+      "ctitle": "车辆整备质量 (kg)",
+      "cdescr": "输入车辆整备质量，单位kg，另加136kg载荷。默认按钮恢复已安装车型的整备质量。行驶中约0.5秒读取，按最大100kg/秒逐步生效，同时更新惯量与轮胎刚度。驾驶员请勿在行驶中操作。",
+      "min": 500,
+      "max": 5000,
+      "default": null,
+      "vehicle_default": true,
+      "unit": 10,
+      "risk": "high"
+    },
+    {
+      "group": "차량 제원",
+      "name": "VehicleCenterToFrontRatio",
+      "title": "무게중심 앞축 거리 비율",
+      "descr": "앞바퀴 축에서 무게중심까지 거리 ÷ 축간거리 비율을 소수로 입력합니다. 예: 0.70. 앞축 하중 비율이나 무게중심 높이가 아닙니다. 기본값 버튼은 설치된 차량의 비율로 복원합니다.\n주행 중에도 약 0.5초 내 읽어 초당 최대 0.02씩 서서히 반영합니다. 실측 근거 없이 조향감을 맞추는 용도로 바꾸지 마세요.",
+      "egroup": "Vehicle Specifications",
+      "etitle": "Front Axle to CG Ratio",
+      "edescr": "Front axle to center of gravity distance divided by wheelbase, entered as a decimal such as 0.70; not front axle load or CG height. Default restores the installed vehicle's ratio. Read within about 0.5s and ramped at up to 0.02/s. Use measured specifications, not steering-feel guesses.",
+      "cgroup": "车辆参数",
+      "ctitle": "前轴至重心距离比例",
+      "cdescr": "前轴至重心距离除以轴距，以0.70等小数输入，不是前轴载荷或重心高度。默认按钮恢复已安装车型的比例。行驶中约0.5秒读取，按最大每秒0.02逐步生效。请依据实测数据设置。",
+      "min": 0.1,
+      "max": 0.9,
+      "default": null,
+      "vehicle_default": true,
+      "unit": 0.01,
+      "display_decimals": 2,
+      "risk": "high"
     },
     {
       "group": "가속설정",

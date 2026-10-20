@@ -3,6 +3,7 @@ import json
 import os
 
 from aiohttp import web
+from openpilot.common.vehicle_dynamics import validate_vehicle_spec
 
 from ..config import PARAMS_BACKUP_PATH
 from ..services.param_changes import (
@@ -91,6 +92,11 @@ async def api_param_set(request: web.Request) -> web.Response:
 
   if name == "CarrotNaviSource" and (type(value) not in (int, str) or str(value) not in ("0", "1")):
     return web.json_response({"ok": False, "error": "CarrotNaviSource must be 0 (network) or 1 (Navdy)"}, status=400)
+
+  try:
+    value = validate_vehicle_spec(name, value)
+  except ValueError as exc:
+    return web.json_response({"ok": False, "error": str(exc)}, status=400)
 
   # clamp using settings if numeric
   p = None

@@ -11,6 +11,7 @@ import pytest
 from openpilot.cereal import car, log
 from openpilot.common.realtime import DT_CTRL
 from openpilot.common.constants import CV
+from openpilot.common.vehicle_dynamics import VehicleDynamics, read_live_vehicle_dynamics
 from opendbc.car.vehicle_model import VehicleModel
 from opendbc.car.interfaces import CarInterfaceBase
 from openpilot.selfdrive.controls.lib.drive_helpers import clip_curvature, get_lag_adjusted_curvature
@@ -34,6 +35,7 @@ def control_fixture():
         'LaneChangeDirection': log.LaneChangeDirection, 'ACTUATOR_FIELDS': tuple(car.CarControl.Actuators.schema.fields),
         'clip_curvature': clip_curvature, 'get_lag_adjusted_curvature': get_lag_adjusted_curvature,
         'resolve_vehicle_model_steer_ratio': resolve_vehicle_model_steer_ratio,
+        'read_live_vehicle_dynamics': read_live_vehicle_dynamics,
         'lateral_vehicle_parameters': lateral_vehicle_parameters,
         'cloudlog': NS(error=lambda msg: pytest.fail(msg))}
   exec(compile(ast.Module(body=nodes, type_ignores=[]), str(path), 'exec'), ns)
@@ -66,6 +68,23 @@ def control_fixture():
                desired_curvature=0.0, lateral_startup=LateralStartupGate(), lateral_started=False,
                steer_limited_by_safety=False)
   return control, lambda: ns['state_control'](control)
+
+
+def test_full_control_loop_consumes_live_dynamics_without_replacing_controller():
+  control, step = control_fixture()
+  controller = control.LaC
+  dynamics = VehicleDynamics.from_car_params(control.CP).scaled(2200, 1.5)
+  control.sm["liveParameters"].vehicleDynamics = dynamics.to_message()
+  control.lateral_startup.ready = True
+  step()
+  assert control.LaC is controller
+  assert control.VM.m == 2200
+  assert control.VM.aF == 1.5
+  assert control.CP.mass == 1600
+  control.sm.valid["liveParameters"] = False
+  control.sm["liveParameters"].vehicleDynamics.mass = 9999
+  step()
+  assert control.VM.m == 2200
 
 
 @pytest.mark.parametrize('enabled', [False, True])

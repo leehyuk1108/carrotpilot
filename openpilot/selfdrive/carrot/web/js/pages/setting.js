@@ -784,7 +784,7 @@ function getSettingControlConfig(p) {
   const override = SETTING_CONTROL_KINDS.includes(p?.control) ? { kind: p.control } : {};
   const min = Number(p?.min);
   const max = Number(p?.max);
-  const unit = Math.max(1, Number(p?.unit) || 1);
+  const unit = Number(p?.unit) > 0 ? Number(p.unit) : 1;
   const optionCount = Number.isFinite(min) && Number.isFinite(max) ? Math.floor(max - min + 1) : 0;
   let kind = override.kind || "slider";
 
@@ -849,7 +849,11 @@ function formatSettingDisplayValue(p, value) {
   }
   const declaredOptionLabel = getDeclaredSettingOptionLabel(p?.name, value);
   if (declaredOptionLabel !== null) return declaredOptionLabel;
-  const text = String(value);
+  const decimals = Number(p?.display_decimals ?? findSettingItemByName(String(p?.name || ""))?.item?.display_decimals);
+  const numeric = Number(value);
+  const text = Number.isInteger(decimals) && decimals > 0 && decimals <= 6 && Number.isFinite(numeric)
+    ? numeric.toLocaleString("en-US", { minimumFractionDigits: decimals, maximumFractionDigits: 6, useGrouping: false })
+    : String(value);
   const unit = getSettingDisplayUnit(p?.name);
   return unit ? `${text}${unit}` : text;
 }
@@ -2821,6 +2825,8 @@ async function renderItems(group, options = {}) {
 
       const min = Number(p.min);
       const max = Number(p.max);
+      if (p.vehicle_default && (num < min || num > max ||
+          (Number.isInteger(min) && Number.isInteger(max) && !Number.isInteger(num)))) return null;
       let next = clamp(num, min, max);
       if (Number.isInteger(min) && Number.isInteger(max)) {
         next = Math.round(next);
@@ -2956,9 +2962,9 @@ async function renderItems(group, options = {}) {
         plusButton: btnPlus,
         getValue: () => Number(val.dataset.rawValue),
         getFallback: () => Number(p.default),
-        getStep: () => getSettingUnitValue(name),
+        getStep: () => (controlConfig.unit < 1 ? controlConfig.unit : 1) * getSettingUnitValue(name),
         getRange: () => ({ min: Number(p.min), max: Number(p.max) }),
-        commit: (next) => commitSettingValue(next),
+        commit: (next) => commitSettingValue(Number(next.toFixed(6))),
       });
     }
 

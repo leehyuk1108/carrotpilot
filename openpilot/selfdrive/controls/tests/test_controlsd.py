@@ -20,6 +20,7 @@ def run_lateral_gate(*, brand="tesla", supported=True, speed=0.0, stopped=True, 
     "math": math, "car": car, "MIN_LATERAL_CONTROL_SPEED": 0.3,
     "resolve_vehicle_model_steer_ratio": lambda *_args: 15.0,
     "lateral_vehicle_parameters": lambda sm, _cp: sm["liveParameters"],
+    "read_live_vehicle_dynamics": lambda *_args: None,
   }
   exec(compile(tree, str(path), "exec"), namespace)
   controls = namespace["Controls"].__new__(namespace["Controls"])

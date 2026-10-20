@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Tuple
 
 from ..config import DEFAULT_SETTINGS_PATH
 from openpilot.selfdrive.carrot.cruise_gap import supported_gap_levels
+from openpilot.common.vehicle_dynamics import vehicle_spec_defaults
 
 
 # mtime-based cache for carrot_settings.json
@@ -259,6 +260,43 @@ def current_max_gap_levels(params=None) -> int:
     return 3
 
 
+def current_vehicle_spec_defaults(params=None) -> dict:
+  if params is None:
+    from .params import HAS_PARAMS, Params
+    if not HAS_PARAMS or Params is None:
+      return {}
+    params = Params()
+  try:
+    raw = params.get("CarParamsPersistent")
+    if raw:
+      from openpilot.cereal import car
+      with car.CarParams.from_bytes(raw) as cp:
+        return vehicle_spec_defaults(cp)
+  except Exception:
+    pass
+  return {}
+
+
+def with_vehicle_spec_defaults(cache_parts: tuple, defaults: dict) -> tuple:
+  data, groups, by_name, groups_list = cache_parts
+  changed = {
+    name: {**setting, "default": defaults.get(name)}
+    for name, setting in by_name.items() if setting.get("vehicle_default")
+  }
+  if not changed:
+    return cache_parts
+
+  def adapted(items):
+    return [changed.get(item.get("name"), item) for item in items]
+
+  return (
+    {**data, "params": adapted(data["params"])},
+    {group: adapted(items) for group, items in groups.items()},
+    {**by_name, **changed},
+    groups_list,
+  )
+
+
 def with_vehicle_gap_limits(cache_parts: tuple, maximum: int) -> tuple:
   data, groups, by_name, groups_list = cache_parts
   setting = by_name.get("CruiseGapLevels")
@@ -293,9 +331,9 @@ def get_settings_cached() -> Tuple[Dict[str, Any], Dict[str, list], Dict[str, Di
       "groups_list": groups_list,
       "categories": build_menu_categories(data, by_name),
     })
-  return with_vehicle_gap_limits((
+  return with_vehicle_spec_defaults(with_vehicle_gap_limits((
     settings_cache["data"],
     settings_cache["groups"],
     settings_cache["by_name"],
     settings_cache["groups_list"],
-  ), current_max_gap_levels())
+  ), current_max_gap_levels()), current_vehicle_spec_defaults())

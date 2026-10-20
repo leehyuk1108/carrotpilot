@@ -23,8 +23,10 @@ def _settings_catalog_payload(cache_parts: tuple | None = None, vehicle_brand: s
   path = settings_cache["path"]
   data, groups, _by_name, groups_list = cache_parts or get_settings_cached()
   brand = current_vehicle_brand() if vehicle_brand is None else vehicle_brand
+  unavailable_specs = {name for name, item in _by_name.items()
+                       if item.get("vehicle_default") and item.get("default") is None}
   groups, groups_list, categories, _hidden_names = filter_settings_catalog_for_brand(
-    groups, groups_list, settings_cache.get("categories"), brand, hidden_settings=READ_ONLY_PARAMS,
+    groups, groups_list, settings_cache.get("categories"), brand, hidden_settings=READ_ONLY_PARAMS | unavailable_specs,
   )
   return {
     "path": path,

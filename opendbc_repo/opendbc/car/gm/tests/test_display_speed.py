@@ -76,6 +76,13 @@ def build_cp(runtime, candidate=CAR.CHEVROLET_TRAVERSE, alpha=True):
   return runtime.interface.CarInterface.get_params(candidate, gen_empty_fingerprint(), [], alpha, True, False)
 
 
+def test_traverse_preserves_installed_physical_baseline(runtime):
+  cp = build_cp(runtime)
+  assert CAR.CHEVROLET_TRAVERSE.config.specs.mass == 2090
+  assert cp.mass == pytest.approx(2090 + 136)
+  assert cp.centerToFront / cp.wheelbase == pytest.approx(.7)
+
+
 def parser_state(runtime, candidate=CAR.CHEVROLET_TRAVERSE, flags=0):
   cp = build_cp(runtime, candidate)
   cp.flags |= int(flags)

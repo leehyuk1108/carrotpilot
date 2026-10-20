@@ -10,6 +10,7 @@ import openpilot.cereal.messaging as messaging
 from openpilot.cereal import log
 
 from openpilot.common.params import Params
+from openpilot.common.vehicle_dynamics import read_live_vehicle_dynamics
 #from openpilot.selfdrive.controls.lib.lane_planner import LanePlanner
 from openpilot.selfdrive.controls.lib.lane_planner_2 import LanePlanner
 from openpilot.selfdrive.controls.lib.lane_model_speed import LaneModelSpeedGuard
@@ -33,6 +34,7 @@ STEERING_RATE_COST = 700.0
 class LateralPlanner:
   def __init__(self, CP, debug=False):
     #self.DH = DesireHelper()
+    self.CP = CP
 
     # Vehicle model parameters used to calculate lateral movement of car
     self.factor1 = CP.wheelbase - CP.centerToFront
@@ -83,6 +85,10 @@ class LateralPlanner:
 
   def update(self, sm, carrot):
     global LATERAL_ACCEL_COST, LATERAL_JERK_COST, STEERING_RATE_COST
+    dynamics = read_live_vehicle_dynamics(sm, self.CP)
+    if dynamics is not None:
+      self.factor1 = dynamics.wheelbase - dynamics.centerToFront
+      self.factor2 = dynamics.centerToFront * dynamics.mass / (dynamics.wheelbase * dynamics.tireStiffnessRear)
     self.readParams -= 1
     if self.readParams <= 0:
       self.readParams = 10

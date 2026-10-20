@@ -10,6 +10,7 @@ from openpilot.common.params import Params
 from openpilot.common.pid import MultiplicativeUnwindPID
 from openpilot.common.realtime import config_realtime_process, Priority, Ratekeeper
 from openpilot.common.swaglog import cloudlog
+from openpilot.common.vehicle_dynamics import read_live_vehicle_dynamics
 import numpy as np
 from collections import deque
 
@@ -117,6 +118,9 @@ class Controls:
     lateral_ready = self.lateral_startup.update(self.sm, CS, 'carState')
 
     # Update VehicleModel
+    dynamics = read_live_vehicle_dynamics(self.sm, self.CP)
+    if dynamics is not None:
+      self.VM.update_dynamics(dynamics)
     lp = self.sm['liveParameters'] if lateral_ready else lateral_vehicle_parameters(self.sm, self.CP)
     x = max(lp.stiffnessFactor, 0.1)
     # All platforms, including VW MEB, honor the manual ratio and live scaling.

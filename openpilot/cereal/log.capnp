@@ -2351,6 +2351,17 @@ struct LiveParametersData {
   steerRatioValid @19 :Bool = true;
   stiffnessFactorValid @20 :Bool = true;
 
+  vehicleDynamics @21 :VehicleDynamics;
+
+  struct VehicleDynamics {
+    valid @0 :Bool;
+    mass @1 :Float64;
+    wheelbase @2 :Float64;
+    centerToFront @3 :Float64;
+    rotationalInertia @4 :Float64;
+    tireStiffnessFront @5 :Float64;
+    tireStiffnessRear @6 :Float64;
+  }
 
   struct FilterState {
     value @0 : List(Float64);

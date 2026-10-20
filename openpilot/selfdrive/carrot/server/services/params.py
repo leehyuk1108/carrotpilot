@@ -9,6 +9,7 @@ import tempfile
 import threading
 import zlib
 from typing import Any, Dict, List, Optional
+from openpilot.common.vehicle_dynamics import SPEC_LIMITS, resolve_stored_vehicle_spec, validate_vehicle_spec
 
 try:
   import brotli
@@ -77,6 +78,8 @@ def infer_type_from_setting(p: Optional[Dict[str, Any]]) -> str:
   """
   if not p:
     return "string"
+  if p.get("name") in SPEC_LIMITS:
+    return "int" if p["name"] == "VehicleMass" else "float"
   mn, mx, d = p.get("min"), p.get("max"), p.get("default")
 
   # bool heuristic: min=0 max=1 and default is 0/1
@@ -122,6 +125,13 @@ def _unregistered_param_paths(params: "Params", key: str) -> tuple[str, str]:
 
 
 def _read_param_value(params: "Params", name: str, default: Any) -> Any:
+  if name in SPEC_LIMITS:
+    from .settings import current_vehicle_spec_defaults
+    try:
+      return resolve_stored_vehicle_spec(name, params.get(name), current_vehicle_spec_defaults(params))
+    except (KeyError, TypeError, ValueError):
+      return default
+
   try:
     t = params.get_type(name)
 
@@ -392,6 +402,7 @@ def read_param_backup_values(path: str) -> dict[str, Any]:
 
 
 def set_param_value(name: str, value: Any, p: Optional[Dict[str, Any]] = None) -> None:
+  value = validate_vehicle_spec(name, value)
   if name in READ_ONLY_PARAMS:
     raise ValueError(f"{name} is controlled by the cluster theme")
   if name in INTERNAL_SESSION_PARAMS:
@@ -1319,6 +1330,7 @@ def preview_param_restore_values(values: Dict[str, Any], selected_keys: Optional
             reason = "unsupported type"
             can_apply = False
           else:
+            raw_value = validate_vehicle_spec(key, raw_value)
             normalized_value = _normalize_param_value(t, raw_value)
             current_value = current_values.get(key, "")
             if _values_equal(t, current_value, normalized_value):

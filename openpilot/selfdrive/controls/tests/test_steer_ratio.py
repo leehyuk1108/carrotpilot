@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from openpilot.common.vehicle_dynamics import read_live_vehicle_dynamics
 from openpilot.selfdrive.controls.lib.steer_ratio import resolve_vehicle_model_steer_ratio
 from openpilot.selfdrive.controls.lib.lateral_readiness import LateralStartupGate, lateral_vehicle_parameters
 
@@ -41,7 +42,8 @@ def test_controlsd_applies_live_setting_changes_to_vehicle_model(is_vw_meb):
   method.body = method.body[:end + 1]
   module = ast.Module(body=[method], type_ignores=[])
   namespace = {"resolve_vehicle_model_steer_ratio": resolve_vehicle_model_steer_ratio,
-               "lateral_vehicle_parameters": lateral_vehicle_parameters}
+               "lateral_vehicle_parameters": lateral_vehicle_parameters,
+               "read_live_vehicle_dynamics": read_live_vehicle_dynamics}
   exec(compile(module, str(path), "exec"), namespace)
   settings = {"CustomSR": 0.0, "SteerRatioRate": 100.0}
   live = SimpleNamespace(stiffnessFactor=0.69, steerRatio=14.97, valid=True, sensorValid=True,
