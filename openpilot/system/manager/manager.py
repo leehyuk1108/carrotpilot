@@ -17,6 +17,7 @@ from openpilot.common.stopping_params import get_stopping_speed
 from openpilot.common.repo_update import release_boot_lock
 from openpilot.common.text_window import TextWindow
 from openpilot.system.hardware import HARDWARE
+from openpilot.system.hardware.automatic_shutdown import try_automatic_shutdown
 from openpilot.system.manager.camera_config import configure_wide_camera
 from openpilot.selfdrive.monitoring.config import configure_monitoring
 from openpilot.system.manager.helpers import unblock_stdout, write_onroad_params, save_bootlog
@@ -190,7 +191,7 @@ def manager_thread(update_status: UpdateStatus) -> None:
     ignore += ["micd", "soundd", "loggerd"]
     params.put_bool("RecordAudio", False)
 
-  sm = messaging.SubMaster(['deviceState', 'carParams', 'pandaStates', 'selfdriveState', 'modelV2', 'carState'], poll='deviceState')
+  sm = messaging.SubMaster(['deviceState', 'carParams', 'pandaStates', 'peripheralState', 'selfdriveState', 'modelV2', 'carState'], poll='deviceState')
   pm = messaging.PubMaster(['managerState'])
   xiaoge_startup = XiaogeStartupGate()
 
@@ -259,6 +260,12 @@ def manager_thread(update_status: UpdateStatus) -> None:
         cloudlog.warning(f"Shutting down manager - {param} set")
 
     if shutdown:
+      break
+
+    automatic_reason = try_automatic_shutdown(sm, params, HARDWARE.shutdown)
+    if automatic_reason is not None:
+      params.put("LastManagerExitReason", f"AutomaticShutdown {automatic_reason} {datetime.datetime.now()}")
+      cloudlog.warning("Automatic poweroff requested", reason=automatic_reason)
       break
 
 def main() -> None:

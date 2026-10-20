@@ -23,6 +23,7 @@ from openpilot.system.loggerd.config import get_available_percent
 from openpilot.system.statsd import statlog
 from openpilot.common.swaglog import cloudlog
 from openpilot.system.hardware.power_monitoring import PowerMonitoring
+from openpilot.system.hardware.automatic_shutdown import REQUEST_KEY, message_is_fresh
 from openpilot.system.hardware.fan_controller import FanController
 from openpilot.system.hardware.tici.pins import GPIO
 from openpilot.system.version import terms_version, training_version
@@ -210,6 +211,7 @@ def hardware_thread(end_event, hw_queue) -> None:
   params = Params()
   cp_cache = _CarParamsCache()
   power_monitor = PowerMonitoring()
+  power_shutdown_pending = False
 
   uptime_offroad: float = params.get("UptimeOffroad", return_default=True)
   uptime_onroad: float = params.get("UptimeOnroad", return_default=True)
@@ -393,7 +395,9 @@ def hardware_thread(end_event, hw_queue) -> None:
         off_ts = time.monotonic()
 
     # Offroad power monitoring
-    voltage = None if peripheralState.pandaType == log.PandaState.PandaType.unknown else peripheralState.voltage
+    power_now = time.monotonic()
+    power_data_fresh = all(message_is_fresh(sm, service, power_now) for service in ("pandaStates", "peripheralState"))
+    voltage = peripheralState.voltage if power_data_fresh and peripheralState.pandaType != log.PandaState.PandaType.unknown else None
     power_monitor.calculate(voltage, onroad_conditions["ignition"], in_car)
     msg.deviceState.offroadPowerUsageUwh = power_monitor.get_power_used()
     msg.deviceState.carBatteryCapacityUwh = max(0, power_monitor.get_car_battery_capacity())
@@ -406,9 +410,19 @@ def hardware_thread(end_event, hw_queue) -> None:
     msg.deviceState.somPowerDrawW = som_power_draw
 
     # Check if we need to shut down
-    if (not tesla_no_sleep) and power_monitor.should_shutdown(onroad_conditions["ignition"], in_car, off_ts, started_seen):
-      cloudlog.warning(f"shutting device down, offroad since {off_ts}")
-      params.put_bool("DoShutdown", True)
+    power_reason = power_monitor.shutdown_reason(onroad_conditions["ignition"], in_car, off_ts)
+    if tesla_no_sleep or not message_is_fresh(sm, "pandaStates", time.monotonic()):
+      power_reason = None
+    if power_reason:
+      if not power_shutdown_pending:
+        cloudlog.warning("automatic shutdown requested", reason=power_reason, offroad_since=off_ts,
+                         voltage=voltage, filtered_voltage=power_monitor.car_voltage_mV)
+      params.put(REQUEST_KEY, {"reason": power_reason, "monotonicTime": time.monotonic()})
+      power_shutdown_pending = True
+    elif power_shutdown_pending:
+      params.remove(REQUEST_KEY)
+      power_shutdown_pending = False
+      cloudlog.info("automatic shutdown request cancelled")
 
     msg.deviceState.started = started_ts is not None
     msg.deviceState.startedMonoTime = int(1e9*(started_ts or 0))

@@ -5,6 +5,7 @@ from openpilot.common.params import Params
 from openpilot.system.hardware import HARDWARE
 from openpilot.common.swaglog import cloudlog
 from openpilot.system.statsd import statlog
+from openpilot.system.hardware.automatic_shutdown import LOW_VOLTAGE_MV, MAX_SAMPLE_AGE_S
 
 CAR_VOLTAGE_LOW_PASS_K = 0.011 # LPF gain for 45s tau (dt/tau / (dt/tau + 1))
 
@@ -12,7 +13,8 @@ CAR_VOLTAGE_LOW_PASS_K = 0.011 # LPF gain for 45s tau (dt/tau / (dt/tau + 1))
 CAR_BATTERY_CAPACITY_uWh = 30e6
 CAR_CHARGING_RATE_W = 45
 
-VBATT_PAUSE_CHARGING = 11.3           # Shutdown threshold for the filtered car battery voltage
+VBATT_PAUSE_CHARGING = LOW_VOLTAGE_MV / 1000
+LOW_VOLTAGE_CONFIRMATION_S = 10.0
 
 class PowerMonitoring:
   def __init__(self):
@@ -24,6 +26,8 @@ class PowerMonitoring:
     self.car_voltage_mV = 12e3                  # Low-passed version of peripheralState voltage
     self.car_voltage_instant_mV = 12e3          # Last value of peripheralState voltage
     self.integration_lock = threading.Lock()
+    self.low_voltage_since = None
+    self.last_voltage_measurement = None
 
     car_battery_capacity_uWh = self.params.get("CarBatteryCapacity") or 0
 
@@ -37,6 +41,8 @@ class PowerMonitoring:
 
       # USB bench power is not a car battery, even when Panda reports a voltage.
       if voltage is None or not in_car:
+        self.low_voltage_since = None
+        self.last_voltage_measurement = None
         with self.integration_lock:
           self.last_measurement_time = None
           self.next_pulsed_measurement_time = None
@@ -47,6 +53,17 @@ class PowerMonitoring:
       self.car_voltage_instant_mV = voltage
       self.car_voltage_mV = ((voltage * CAR_VOLTAGE_LOW_PASS_K) + (self.car_voltage_mV * (1 - CAR_VOLTAGE_LOW_PASS_K)))
       statlog.gauge("car_voltage", self.car_voltage_mV / 1e3)
+
+      if (self.last_voltage_measurement is None or
+          not 0 <= now - self.last_voltage_measurement <= MAX_SAMPLE_AGE_S):
+        self.low_voltage_since = None
+      self.last_voltage_measurement = now
+      if not ignition and 0 < voltage < LOW_VOLTAGE_MV and self.car_voltage_mV < LOW_VOLTAGE_MV:
+        if self.low_voltage_since is None:
+          self.low_voltage_since = now
+      else:
+        # Raw voltage recovery cancels immediately, without waiting for the LPF.
+        self.low_voltage_since = None
 
       # Cap the car battery power and save it in a param every 10-ish seconds
       self.car_battery_capacity_uWh = max(self.car_battery_capacity_uWh, 0)
@@ -102,11 +119,23 @@ class PowerMonitoring:
 
   # See if we need to shutdown
   def should_shutdown(self, ignition: bool, in_car: bool, offroad_timestamp: float | None, started_seen: bool):
+    return self.shutdown_reason(ignition, in_car, offroad_timestamp) is not None
+
+  def shutdown_reason(self, ignition: bool, in_car: bool, offroad_timestamp: float | None):
     # Never let a shutdown override ignition, including on a low car battery.
     if ignition or offroad_timestamp is None:
-      return False
+      self.low_voltage_since = None
+      return None
 
-    offroad_time = time.monotonic() - offroad_timestamp
+    now = time.monotonic()
+    offroad_time = now - offroad_timestamp
     max_time_offroad_s = self.params.get_int("MaxTimeOffroadMin") * 60
-    low_car_battery = in_car and self.car_voltage_mV < VBATT_PAUSE_CHARGING * 1e3
-    return offroad_time > max_time_offroad_s or low_car_battery
+    if offroad_time > max_time_offroad_s:
+      return "offroad_timeout"
+    if not in_car:
+      self.low_voltage_since = None
+    low_car_battery = (in_car and self.low_voltage_since is not None and
+                       self.last_voltage_measurement is not None and
+                       0 <= now - self.last_voltage_measurement <= MAX_SAMPLE_AGE_S and
+                       now - self.low_voltage_since >= LOW_VOLTAGE_CONFIRMATION_S)
+    return "low_voltage" if low_car_battery else None
