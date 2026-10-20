@@ -15,6 +15,10 @@ def installed(tmp_path):
   for name in ('navdy_management.py', 'transport.py', 'bin/adb', 'sdk/usr/bin/adb'):
     path = tmp_path / name
     path.parent.mkdir(parents=True, exist_ok=True)
+    for parent in (path.parent, *path.parent.parents):
+      if parent == tmp_path:
+        break
+      parent.chmod(0o755)
     path.write_bytes(b'fixture')
     path.chmod(0o644)
     files[name] = hashlib.sha256(path.read_bytes()).hexdigest()
@@ -35,6 +39,12 @@ def test_corruption_rejected(installed):
 
 def test_writable_payload_rejected(installed):
   (installed / 'bin/adb').chmod(0o666)
+  with pytest.raises(ValueError, match='permissions'):
+    management.verify(installed, os.getuid())
+
+
+def test_writable_parent_directory_rejected(installed):
+  (installed / 'bin').chmod(0o775)
   with pytest.raises(ValueError, match='permissions'):
     management.verify(installed, os.getuid())
 

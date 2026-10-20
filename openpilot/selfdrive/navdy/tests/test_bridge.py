@@ -191,6 +191,7 @@ def test_bad_receipt_time_is_rejected_and_diagnostics_are_json_safe(sm, received
 def run_fake_bridge(monkeypatch, tmp_path, *, connect_delay=0, invalidate=False, engaged=True, disconnect=False):
   from openpilot import cereal
 
+  monkeypatch.setattr(bridge, 'read_override', lambda: None)
   clock = NS(now=100.0)
   monkeypatch.setattr(bridge.time, 'monotonic', lambda: clock.now)
   monkeypatch.setattr(bridge.time, 'sleep', lambda seconds: setattr(clock, 'now', clock.now + seconds))
@@ -231,7 +232,9 @@ def run_fake_bridge(monkeypatch, tmp_path, *, connect_delay=0, invalidate=False,
     atomic_json(path, value)
 
   monkeypatch.setattr(bridge, 'atomic_json', capture)
-  bridge.run(feedback=tmp_path / 'feedback.json', status=tmp_path / 'status.json', duration=2.6 if disconnect else 0.6)
+  bridge.run(feedback=tmp_path / 'feedback.json', status=tmp_path / 'status.json',
+             bluetooth_config=tmp_path / 'unconfigured-bluetooth.json',
+             duration=2.6 if disconnect else 0.6)
   assert json.loads((tmp_path / 'status.json').read_text())['reason'] == 'bridge_stopped'
   assert not (tmp_path / 'feedback.json').exists()
   return sent, statuses, connections
