@@ -1,5 +1,5 @@
 import abc
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import aiortc
 
@@ -47,8 +47,9 @@ class WebRTCOfferBuilder(WebRTCStreamBuilder):
 
 
 class WebRTCAnswerBuilder(WebRTCStreamBuilder):
-  def __init__(self, offer_sdp: str):
+  def __init__(self, offer_sdp: str, *, configuration: Optional[aiortc.RTCConfiguration] = None):
     self.offer_sdp = offer_sdp
+    self.configuration = configuration
     self.video_tracks: Dict[str, aiortc.MediaStreamTrack] = dict()
     self.requested_audio = False
     self.audio_tracks: List[aiortc.MediaStreamTrack] = []
@@ -76,4 +77,5 @@ class WebRTCAnswerBuilder(WebRTCStreamBuilder):
       video_producer_tracks=list(self.video_tracks.values()),
       audio_producer_tracks=self.audio_tracks,
       should_add_data_channel=False,
+      configuration=self.configuration,
     )

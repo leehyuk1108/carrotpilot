@@ -1,8 +1,37 @@
 # Navdy Bluetooth bring-up
 
-Status: investigation/preflight only. No OS, boot manifest, startup service,
-vehicle-control code, radio setting or Navdy APK is changed by these tools.
-The existing navigation-source selector still has no Navdy receiver.
+For USB-attached Bluetooth diagnostics, the existing private
+`/data/navdy/bluetooth.json` accepts optional boolean `bluetooth_only`. When
+true, only the configured paired Bluetooth peer carries display/navigation
+traffic: no direct USB writer/probe and no Jetson fallback. USB ADB on port5038
+remains available for logs and screenshots. A missing/disabled peer reports a
+disconnected state instead of silently returning to USB. The choice is checked
+every five seconds and persists across bridge/device restarts. False or omission
+restores the normal USB-first policy. Preserve the existing peer/bond and write
+the configuration atomically; no new pairing or radio reset is needed. Runtime
+status includes `transportPolicy` separately from the actual `transport`.
+
+Production follow-up, 2026-10-19: the paired Navdy v158 APK and Comma bridge now
+support USB-first, automatic Bluetooth fallback and automatic USB return. See
+[implementation and actual-device verification](../../docs/navdy_wireless_fallback_20261019.md)
+and the [bounded wire protocol](WIRELESS_PROTOCOL.md). This requires the matching
+Navdy APK, explicit peer configuration/bond and a Bluetooth-capable OS; a source
+pull alone does not provision the other device. The earlier trials below are
+historical, not the current installed state.
+
+Earlier on 2026-10-19: native encrypted RFCOMM was measured on the actual
+comma/Navdy pair, with the existing USB bridge left active. This is an isolated
+synthetic benchmark, NOT a production Bluetooth HUD/navigation transport.
+See [measured results and limits](../../docs/navdy_bluetooth_benchmark_20261019.md)
+and [benchmark tools](bluetooth_bench/README.md). The radio was temporarily enabled
+for the explicitly authorized pairing/test and restored afterward. No OS flash,
+production Navdy APK replacement or vehicle-control change was made by this trial.
+The 2026-10-16 inspection below is historical, not the current installed state.
+
+The [latest-state/compression follow-up](../../docs/navdy_bluetooth_snapshot_20261019.md)
+measures the same full JSON raw/compressed, bounded coalescing under sender stalls,
+and receiver rejection/expiry of stale state. It remains an isolated test sink,
+not a production navigation/HUD transport.
 
 ## Pinned upstream implementation
 

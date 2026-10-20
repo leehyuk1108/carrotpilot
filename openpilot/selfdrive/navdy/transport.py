@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import shutil
 import socket
@@ -11,7 +12,35 @@ import sys
 
 MAX_FRAME_BYTES = 32768
 ADB_PORT = 5038
+ADB_DISCOVERY_TIMEOUT = 15
+ADB_COMMAND_TIMEOUT = 3
 SERVICE = 'com.navdy.hud.app/.openpilot.OpenpilotStateService'
+
+
+def parse_response(raw):
+  def invalid_constant(value):
+    raise ValueError('Non-finite Navdy response')
+
+  try:
+    value = json.loads(raw.decode('utf-8'), parse_constant=invalid_constant)
+  except RecursionError as error:
+    raise ValueError('Navdy response nesting is too deep') from error
+  if not isinstance(value, dict):
+    raise ValueError('Navdy response is not an object')
+  pending = [(value, 0)]
+  while pending:
+    item, depth = pending.pop()
+    if depth > 32:
+      raise ValueError('Navdy response nesting is too deep')
+    if isinstance(item, dict):
+      pending.extend((child, depth + 1) for child in item.values())
+    elif isinstance(item, list):
+      pending.extend((child, depth + 1) for child in item)
+    elif isinstance(item, float) and not math.isfinite(item):
+      raise ValueError('Non-finite Navdy response')
+  if not any(key in value for key in ('roadPreview', 'navigationFeedback', 'cameraSpeedKph')):
+    raise ValueError('Navdy service returned an unsupported response')
+  return value
 
 
 def encode_frame(payload):
@@ -35,24 +64,7 @@ class LineReader:
       if (boundary < 0 and len(self.buffer) > MAX_FRAME_BYTES) or boundary >= MAX_FRAME_BYTES:
         raise ValueError('Oversized Navdy response')
     line, self.buffer = self.buffer.split(b'\n', 1)
-    try:
-      value = json.loads(line)
-    except RecursionError as error:
-      raise ValueError('Navdy response nesting is too deep') from error
-    if not isinstance(value, dict):
-      raise ValueError('Navdy response is not an object')
-    pending = [(value, 0)]
-    while pending:
-      item, depth = pending.pop()
-      if depth > 32:
-        raise ValueError('Navdy response nesting is too deep')
-      if isinstance(item, dict):
-        pending.extend((child, depth + 1) for child in item.values())
-      elif isinstance(item, list):
-        pending.extend((child, depth + 1) for child in item)
-    if not any(key in value for key in ('roadPreview', 'navigationFeedback', 'cameraSpeedKph')):
-      raise ValueError('Navdy service returned an unsupported response')
-    return value
+    return parse_response(line)
 
 
 class AdbTransport:
@@ -71,7 +83,9 @@ class AdbTransport:
     cmd = [self.adb, '-P', str(ADB_PORT)]
     if target:
       cmd += ['-s', target]
-    result = self.command(cmd + args, capture_output=True, text=True, timeout=3, check=True)
+    # Discovery can start the dedicated server; cold startup exceeds 3 s on AGNOS.
+    timeout = ADB_DISCOVERY_TIMEOUT if args == ['devices', '-l'] else ADB_COMMAND_TIMEOUT
+    result = self.command(cmd + args, capture_output=True, text=True, timeout=timeout, check=True)
     return result.stdout.strip()
 
   def discover(self):

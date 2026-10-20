@@ -85,6 +85,7 @@ class GMSafetyFlags(IntFlag):
   GAS_INTERCEPTOR = 128
   EV = 256
   HW_SDGM = 512  # Camera-side friction brake routing for the Traverse SDGM harness
+  MANUAL_AUTO_HOLD = 1024  # Disengaged, driver-armed stationary friction brake only
 
 @dataclass
 class GMCarDocs(CarDocs):

@@ -31,12 +31,12 @@ class PowerMonitoring:
     self.car_battery_capacity_uWh = max((CAR_BATTERY_CAPACITY_uWh / 10), car_battery_capacity_uWh)
 
   # Calculation tick
-  def calculate(self, voltage: int | None, ignition: bool):
+  def calculate(self, voltage: int | None, ignition: bool, in_car: bool):
     try:
       now = time.monotonic()
 
-      # If peripheralState is None, we're probably not in a car, so we don't care
-      if voltage is None:
+      # USB bench power is not a car battery, even when Panda reports a voltage.
+      if voltage is None or not in_car:
         with self.integration_lock:
           self.last_measurement_time = None
           self.next_pulsed_measurement_time = None
@@ -102,10 +102,11 @@ class PowerMonitoring:
 
   # See if we need to shutdown
   def should_shutdown(self, ignition: bool, in_car: bool, offroad_timestamp: float | None, started_seen: bool):
-    # Keep the legacy call signature, but never let a shutdown override ignition.
+    # Never let a shutdown override ignition, including on a low car battery.
     if ignition or offroad_timestamp is None:
       return False
 
     offroad_time = time.monotonic() - offroad_timestamp
     max_time_offroad_s = self.params.get_int("MaxTimeOffroadMin") * 60
-    return offroad_time > max_time_offroad_s or self.car_voltage_mV < VBATT_PAUSE_CHARGING * 1e3
+    low_car_battery = in_car and self.car_voltage_mV < VBATT_PAUSE_CHARGING * 1e3
+    return offroad_time > max_time_offroad_s or low_car_battery

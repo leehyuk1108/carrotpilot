@@ -35,6 +35,8 @@ FRICTION_THRESHOLD = 0.3
 
 NEURAL_PARAMS_PATH = os.path.join(BASEDIR, 'torque_data/neural_ff_weights.json')
 TORQUE_NN_MODEL_PATH = os.path.join(BASEDIR, 'torque_data/lat_models')
+# Experimental, explicit donor models; never substitute vehicle or safety parameters.
+NNFF_MODEL_SUBSTITUTES = {"CHEVROLET_TRAVERSE": "CHEVROLET_TRAILBLAZER"}
 
 TORQUE_PARAMS_PATH = os.path.join(BASEDIR, 'torque_data/params.toml')
 TORQUE_OVERRIDE_PATH = os.path.join(BASEDIR, 'torque_data/override.toml')
@@ -166,7 +168,7 @@ class FluxModel:
     y = self.evaluate([10.0, 0.0, 0.2])
     self.friction_override = (y < 0.1)
 
-def get_nn_model_path(car, eps_firmware) -> tuple[str | None, float]:
+def get_nn_model_path(car, eps_firmware, *, allow_substitute=False) -> str | None:
   def check_nn_path(check_model):
     model_path = None
     max_similarity = -1.0
@@ -189,15 +191,21 @@ def get_nn_model_path(car, eps_firmware) -> tuple[str | None, float]:
   else:
     check_model = car
   model_path, max_similarity = check_nn_path(check_model)
-  if car not in model_path or 0.0 <= max_similarity < 0.9:
+  if model_path is None or car not in model_path or 0.0 <= max_similarity < 0.9:
     check_model = car
     model_path, max_similarity = check_nn_path(check_model)
-    if car not in model_path or 0.0 <= max_similarity < 0.9:
+    if model_path is None or car not in model_path or 0.0 <= max_similarity < 0.9:
       model_path = None
+  if model_path is None and allow_substitute:
+    substitute = NNFF_MODEL_SUBSTITUTES.get(car)
+    if substitute is not None:
+      substitute_path = os.path.join(TORQUE_NN_MODEL_PATH, f"{substitute}.json")
+      if os.path.isfile(substitute_path):
+        model_path = substitute_path
   return model_path
 
-def get_nn_model(car, eps_firmware) -> tuple[FluxModel | None, float]:
-  model = get_nn_model_path(car, eps_firmware)
+def get_nn_model(car, eps_firmware, *, allow_substitute=False) -> FluxModel | None:
+  model = get_nn_model_path(car, eps_firmware, allow_substitute=allow_substitute)
   if model is not None:
     model = FluxModel(model)
   return model
@@ -324,7 +332,7 @@ class CarInterfaceBase(ABC):
     return car in data
 
   def initialize_lat_torque_nn(self, car, eps_firmware) -> bool:
-    self.lat_torque_nn_model = get_nn_model(car, eps_firmware)
+    self.lat_torque_nn_model = get_nn_model(car, eps_firmware, allow_substitute=Params().get_bool("NNFF"))
     return self.lat_torque_nn_model is not None
     
 
@@ -367,9 +375,13 @@ class CarInterfaceBase(ABC):
     if ret.steerControlType != structs.CarParams.SteerControlType.angle and Params().get_bool("NNFF"):
       CarInterfaceBase.configure_torque_tune(candidate, ret.lateralTuning)
       eps_firmware = str(next((fw.fwVersion for fw in car_fw if fw.ecu == "eps"), ""))
-      model = get_nn_model_path(candidate, eps_firmware)
+      model = get_nn_model_path(candidate, eps_firmware, allow_substitute=True)
       if model is not None:
-        Params().put_nonblocking("NNFFModelName", candidate.replace("_", " "))
+        model_name = candidate.replace("_", " ")
+        substitute = NNFF_MODEL_SUBSTITUTES.get(candidate)
+        if substitute is not None and os.path.basename(model) == f"{substitute}.json":
+          model_name = f"{substitute.replace('_', ' ')} (substitute)"
+        Params().put_nonblocking("NNFFModelName", model_name)
         print(f"NNFF loaded... {model}")
     
 

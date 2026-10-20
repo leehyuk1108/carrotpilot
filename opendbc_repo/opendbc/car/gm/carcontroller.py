@@ -6,6 +6,8 @@ from opendbc.can.packer import CANPacker
 from opendbc.car import Bus, DT_CTRL, apply_driver_steer_torque_limits, structs, create_gas_interceptor_command
 from opendbc.car.gm import gmcan
 from opendbc.car.common.conversions import Conversions as CV
+from opendbc.car.gm.cluster_speed import gm_raw_display_kph_from_cluster_display_kph
+from opendbc.car.gm.manual_auto_hold import manual_hold_supported
 from opendbc.car.gm.values import DBC, CanBus, CarControllerParams, CruiseButtons, GMFlags, GMSafetyFlags, CC_ONLY_CAR, EV_CAR, AccState, CC_REGEN_PADDLE_CAR, CAR
 from opendbc.car.interfaces import CarControllerBase
 from openpilot.selfdrive.controls.lib.drive_helpers import apply_deadzone
@@ -25,6 +27,13 @@ MIN_STEER_MSG_INTERVAL_MS = 15
 PITCH_DEADZONE = 0.01 # [radians] 0.01 ? 1% grade
 BRAKE_PITCH_FACTOR_BP = [5., 10.] # [m/s] smoothly revert to planned accel at low speeds
 BRAKE_PITCH_FACTOR_V = [0., 1.] # [unitless in [0,1]]; don't touch
+
+
+def get_acc_dashboard_speed_kph(CP, cluster_target_kph):
+  if CP.carFingerprint == CAR.CHEVROLET_TRAVERSE:
+    return gm_raw_display_kph_from_cluster_display_kph(cluster_target_kph)
+  return cluster_target_kph
+
 
 class CarController(CarControllerBase):
   def __init__(self, dbc_names, CP):
@@ -141,6 +150,8 @@ class CarController(CarControllerBase):
       can_sends.append(gmcan.create_steering_control(self.packer_pt, CanBus.POWERTRAIN, apply_torque, idx, CC.latActive))
 
     if self.CP.openpilotLongitudinalControl:
+      hold = getattr(CS, "manual_auto_hold", None)
+      manual_brake = hold.command(CS.out, CC.enabled or CC.longActive) if hold is not None and manual_hold_supported(self.CP) else 0
 
       if self.CP.carFingerprint in (CAR.CHEVROLET_VOLT):
         button_counter = (CS.buttons_counter + 1) % 4
@@ -163,7 +174,7 @@ class CarController(CarControllerBase):
             self.activateCruise_after_brake = True # 브레이크신호는 한번만 보내고 초기화
       else:
         auto_cruise_control = self.v_cruise_carrot.autoCruiseControl
-        if (CS.out.activateCruise or auto_cruise_control > 0) and \
+        if not manual_brake and (CS.out.activateCruise or auto_cruise_control > 0) and \
            not CS.out.cruiseState.enabled:
           if (self.frame - self.last_button_frame) * DT_CTRL > 0.04:
             self.last_button_frame = self.frame
@@ -249,19 +260,23 @@ class CarController(CarControllerBase):
           else:
             acc_engaged = CC.enabled
 
-          if actuators.longControlState in [LongCtrlState.stopping, LongCtrlState.starting]:
+          if not manual_brake and actuators.longControlState in [LongCtrlState.stopping, LongCtrlState.starting]:
             if (self.frame - self.last_button_frame) * DT_CTRL > 0.04:
               self.last_button_frame = self.frame
               can_sends.append(gmcan.create_buttons(self.packer_pt, CanBus.POWERTRAIN, (CS.buttons_counter + 1) % 4, CruiseButtons.RES_ACCEL))
           # GasRegenCmdActive needs to be 1 to avoid cruise faults. It describes the ACC state, not actuation
           can_sends.append(gmcan.create_gas_regen_command(self.packer_pt, CanBus.POWERTRAIN, self.apply_gas, idx, acc_engaged, at_full_stop))
+          if manual_brake:
+            self.apply_brake = manual_brake
+            near_stop, at_full_stop = True, False
           can_sends.append(gmcan.create_friction_brake_command(self.packer_ch, friction_brake_bus, self.apply_brake,
                                                                idx, CC.enabled, near_stop, at_full_stop, self.CP))
 
           # Send dashboard UI commands (ACC status)
           send_fcw = hud_alert == VisualAlert.fcw
+          dashboard_speed_kph = get_acc_dashboard_speed_kph(self.CP, hud_v_cruise * CV.MS_TO_KPH)
           can_sends.append(gmcan.create_acc_dashboard_command(self.packer_pt, CanBus.POWERTRAIN, CC.enabled,
-                                                              hud_v_cruise * CV.MS_TO_KPH, hud_control, send_fcw))
+                                                              dashboard_speed_kph, hud_control, send_fcw))
       else:
         # to keep accel steady for logs when not sending gas
         accel += self.accel_g

@@ -1,5 +1,6 @@
 import json
 import socket
+import subprocess
 from types import SimpleNamespace
 
 import pytest
@@ -84,3 +85,31 @@ def test_multiple_targets_fail_closed():
     return SimpleNamespace(stdout='a device\nb device\n' if cmd[-2:] == ['devices', '-l'] else 'package:/base.apk')
   with pytest.raises(ConnectionError, match='Multiple'):
     AdbTransport(adb='adb', command=run).discover()
+
+
+def test_only_discovery_allows_bounded_cold_server_startup():
+  calls = []
+
+  def run(cmd, **kwargs):
+    calls.append((cmd, kwargs))
+    return SimpleNamespace(stdout='navdy device\n' if cmd[-2:] == ['devices', '-l'] else 'package:/base.apk')
+
+  transport = AdbTransport(adb='adb', command=run)
+  assert transport.discover() == 'navdy'
+  transport.run(['forward', 'tcp:0', 'tcp:8765'], serial='navdy')
+  assert [options['timeout'] for _, options in calls] == [15, 3, 3]
+  assert all(options['check'] for _, options in calls)
+  assert all(cmd[1:3] == ['-P', '5038'] for cmd, _ in calls)
+
+
+def test_cold_start_timeout_propagates_without_reset_or_retry():
+  calls = []
+
+  def run(cmd, **kwargs):
+    calls.append(cmd)
+    raise subprocess.TimeoutExpired(cmd, kwargs['timeout'])
+
+  with pytest.raises(subprocess.TimeoutExpired) as failure:
+    AdbTransport(adb='adb', command=run).discover()
+  assert failure.value.timeout == 15
+  assert calls == [['adb', '-P', '5038', 'devices', '-l']]

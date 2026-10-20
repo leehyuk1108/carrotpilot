@@ -3,8 +3,9 @@ import json
 import os
 from openpilot.cereal import car
 from math import fabs, exp
+from time import monotonic_ns
 from openpilot.common.params import Params
-from opendbc.car import get_safety_config, get_friction, structs
+from opendbc.car import Bus, get_safety_config, get_friction, structs
 from opendbc.car.common.basedir import BASEDIR
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.gm.carcontroller import CarController
@@ -38,6 +39,34 @@ class CarInterface(CarInterfaceBase):
   CarState = CarState
   CarController = CarController
   RadarInterface = RadarInterface
+
+  def _update_manual_hold(self, c=None, now_nanos=None):
+    hold = self.CS.manual_auto_hold
+    if hold is not None:
+      if c is not None:
+        self.CS.manual_hold_controls_active = c.enabled or c.longActive
+      now_nanos = monotonic_ns() if now_nanos is None else now_nanos
+      signals = (("ECMAcceleratorPos", "BrakePedalPos"), ("ECMEngineStatus", "BrakePressed"),
+                 ("AcceleratorPedal2", "AcceleratorPedal2"), ("EBCMWheelSpdFront", "FLWheelSpd"),
+                 ("EBCMWheelSpdRear", "RLWheelSpd"), ("ECMPRDNL2", "PRNDL2"),
+                 ("BCMGeneralPlatformStatus", "ParkBrakeSwActive"))
+      timestamps = self.can_parsers[Bus.pt].ts_nanos
+      fresh = all(0 < timestamps.get(msg, {}).get(signal, 0) <= now_nanos and
+                  now_nanos - timestamps[msg][signal] <= 500_000_000 for msg, signal in signals)
+      if fresh:
+        hold.update(self.CS.out, self.CS.brake_pedal_position, self.CS.manual_hold_controls_active)
+      else:
+        hold.reset()
+      self.CS.out.brakeHoldActive = hold.active
+
+  def update(self, can_packets):
+    ret = super().update(can_packets)
+    self._update_manual_hold()
+    return ret
+
+  def apply(self, c, now_nanos=None, model_v2=None, radar_state=None):
+    self._update_manual_hold(c, now_nanos)
+    return super().apply(c, now_nanos, model_v2, radar_state)
 
   @staticmethod
   def get_pid_accel_limits(CP, current_speed, cruise_speed):
@@ -150,6 +179,8 @@ class CarInterface(CarInterfaceBase):
         ret.safetyConfigs[0].safetyParam |= GMSafetyFlags.HW_CAM_LONG.value
         if candidate == CAR.CHEVROLET_TRAVERSE:
           ret.safetyConfigs[0].safetyParam |= GMSafetyFlags.HW_SDGM.value
+          if not ret.enableGasInterceptorDEPRECATED:
+            ret.safetyConfigs[0].safetyParam |= GMSafetyFlags.MANUAL_AUTO_HOLD.value
 
       if candidate in ALT_ACCS:
         ret.alphaLongitudinalAvailable = False

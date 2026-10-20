@@ -131,9 +131,14 @@ def pair(state, host, host_key, expected):
 
 
 def candidates(config, state, discovered=()):
+  try:
+    from .usb_internet import mobile_candidates
+  except ImportError:
+    from usb_internet import mobile_candidates
   saved = read_json(state / 'last-host.json', {})
   usb = usb_candidate()
-  values = [*usb, *discovered, saved.get('host'), config.get('host')]
+  mobile = mobile_candidates() if (state / 'usb-internet.enabled').is_file() else []
+  values = [*usb, *mobile, *discovered, saved.get('host'), config.get('host')]
   result = []
   for value in values[:10]:
     try:
@@ -383,6 +388,8 @@ def daemon():
   retry_commit, retry_after, retry_delay = None, 0., 30.
   while True:
     try:
+      if (STATE / 'usb-internet.enabled').is_file():
+        run(['sudo', '-n', '/usr/bin/python3', str(ROOT / 'tools/jetlink/usb_internet.py'), 'start-service'], timeout=20)
       config = read_json(STATE / 'config.json', {})
       permitted = safe()
       stable_since = (stable_since or time.monotonic()) if permitted else None

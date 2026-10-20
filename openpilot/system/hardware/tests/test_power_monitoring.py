@@ -37,7 +37,7 @@ class TestPowerMonitoring:
   def test_panda_state_present(self):
     pm = PowerMonitoring()
     for _ in range(10):
-      pm.calculate(None, None)
+      pm.calculate(None, False, True)
     assert pm.get_power_used() == 0
     assert pm.get_car_battery_capacity() == (CAR_BATTERY_CAPACITY_uWh / 10)
 
@@ -45,7 +45,7 @@ class TestPowerMonitoring:
   def test_offroad_ignition(self):
     pm = PowerMonitoring()
     for _ in range(10):
-      pm.calculate(GOOD_VOLTAGE, True)
+      pm.calculate(GOOD_VOLTAGE, True, True)
     assert pm.get_power_used() == 0
 
   # Test to see that it integrates with discharging battery
@@ -54,7 +54,7 @@ class TestPowerMonitoring:
     pm_patch(mocker, "HARDWARE.get_current_power_draw", POWER_DRAW)
     pm = PowerMonitoring()
     for _ in range(TEST_DURATION_S + 1):
-      pm.calculate(GOOD_VOLTAGE, False)
+      pm.calculate(GOOD_VOLTAGE, False, True)
     expected_power_usage = ((TEST_DURATION_S/3600) * POWER_DRAW * 1e6)
     assert abs(pm.get_power_used() - expected_power_usage) < 10
 
@@ -65,7 +65,7 @@ class TestPowerMonitoring:
     pm = PowerMonitoring()
     pm.car_battery_capacity_uWh = 0
     for _ in range(TEST_DURATION_S + 1):
-      pm.calculate(GOOD_VOLTAGE, True)
+      pm.calculate(GOOD_VOLTAGE, True, True)
     expected_capacity = ((TEST_DURATION_S/3600) * CAR_CHARGING_RATE_W * 1e6)
     assert abs(pm.get_car_battery_capacity() - expected_capacity) < 10
 
@@ -76,7 +76,7 @@ class TestPowerMonitoring:
     pm = PowerMonitoring()
     pm.car_battery_capacity_uWh = CAR_BATTERY_CAPACITY_uWh - 1000
     for _ in range(TEST_DURATION_S + 1):
-      pm.calculate(GOOD_VOLTAGE, True)
+      pm.calculate(GOOD_VOLTAGE, True, True)
     estimated_capacity = CAR_BATTERY_CAPACITY_uWh + (CAR_CHARGING_RATE_W / 3600 * 1e6)
     assert abs(pm.get_car_battery_capacity() - estimated_capacity) < 10
 
@@ -87,7 +87,7 @@ class TestPowerMonitoring:
     pm = PowerMonitoring()
     pm.car_battery_capacity_uWh = CAR_BATTERY_CAPACITY_uWh
     for _ in range(TEST_DURATION_S + 1):
-      pm.calculate(GOOD_VOLTAGE, False)
+      pm.calculate(GOOD_VOLTAGE, False, True)
     expected_capacity = CAR_BATTERY_CAPACITY_uWh - ((TEST_DURATION_S/3600) * POWER_DRAW * 1e6)
     assert abs(pm.get_car_battery_capacity() - expected_capacity) < 10
 
@@ -98,18 +98,19 @@ class TestPowerMonitoring:
     pm = PowerMonitoring()
     pm.car_battery_capacity_uWh = 1000
     for _ in range(TEST_DURATION_S + 1):
-      pm.calculate(GOOD_VOLTAGE, False)
+      pm.calculate(GOOD_VOLTAGE, False, True)
     estimated_capacity = 0 - ((1/3600) * POWER_DRAW * 1e6)
     assert abs(pm.get_car_battery_capacity() - estimated_capacity) < 10
 
   @pytest.mark.parametrize("minutes", [0, 60, 4320])
   @pytest.mark.parametrize("offset, expected", [(0, False), (1, True)])
-  def test_max_time_offroad(self, mocker, minutes, offset, expected):
+  @pytest.mark.parametrize("in_car", [False, True])
+  def test_max_time_offroad(self, mocker, minutes, offset, expected, in_car):
     self.params.put_int("MaxTimeOffroadMin", minutes)
     pm = PowerMonitoring()
     start_time = 10.
     mocker.patch("time.monotonic", return_value=start_time + minutes * 60 + offset)
-    assert pm.should_shutdown(False, False, start_time, False) == expected
+    assert pm.should_shutdown(False, in_car, start_time, False) == expected
 
   def test_car_voltage(self, mocker):
     POWER_DRAW = 0 # To stop shutting down for other reasons
@@ -121,7 +122,7 @@ class TestPowerMonitoring:
     ignition = False
     start_time = ssb
     for i in range(TEST_TIME):
-      pm.calculate(VOLTAGE_BELOW_PAUSE_CHARGING, ignition)
+      pm.calculate(VOLTAGE_BELOW_PAUSE_CHARGING, ignition, True)
       if i % 10 == 0:
         assert pm.should_shutdown(ignition, True, start_time, True) == \
                           (pm.car_voltage_mV < VBATT_PAUSE_CHARGING * 1e3)
@@ -141,7 +142,55 @@ class TestPowerMonitoring:
     mocker.patch("time.monotonic", return_value=elapsed)
     pm = PowerMonitoring()
     pm.car_voltage_mV = 11200
-    assert pm.should_shutdown(False, False, 0., False)
+    assert pm.should_shutdown(False, True, 0., False)
+
+  @pytest.mark.parametrize("voltage", [0, 5000, 9000, 11200])
+  def test_bench_voltage_never_triggers_car_battery_shutdown(self, voltage):
+    self.params.put_int("MaxTimeOffroadMin", 4320)
+    pm = PowerMonitoring()
+    pm.car_voltage_mV = voltage
+    assert not pm.should_shutdown(False, False, 0., False)
+
+  @pytest.mark.parametrize("voltage", [0, 5000, 9000])
+  def test_bench_voltage_does_not_pollute_car_battery_filter(self, voltage):
+    self.params.put_int("MaxTimeOffroadMin", 4320)
+    pm = PowerMonitoring()
+    capacity = pm.get_car_battery_capacity()
+    for _ in range(600):
+      pm.calculate(voltage, False, False)
+      assert not pm.should_shutdown(False, False, 0., False)
+    assert pm.car_voltage_mV == GOOD_VOLTAGE
+    assert pm.last_measurement_time is None
+    assert pm.get_power_used() == 0
+    assert pm.get_car_battery_capacity() == capacity
+
+    # Connecting a healthy car must not inherit the bench supply's low voltage.
+    pm.calculate(GOOD_VOLTAGE, False, True)
+    assert not pm.should_shutdown(False, True, 0., False)
+
+  def test_bench_to_low_car_battery_still_shuts_down(self):
+    self.params.put_int("MaxTimeOffroadMin", 4320)
+    pm = PowerMonitoring()
+    for _ in range(600):
+      pm.calculate(5000, False, False)
+    for _ in range(350):
+      pm.calculate(VOLTAGE_BELOW_PAUSE_CHARGING, False, True)
+    assert pm.should_shutdown(False, True, 0., False)
+
+  def test_disconnect_stops_battery_integration_and_voltage_shutdown(self, mocker):
+    self.params.put_int("MaxTimeOffroadMin", 4320)
+    pm_patch(mocker, "HARDWARE.get_current_power_draw", 4)
+    pm = PowerMonitoring()
+    for _ in range(350):
+      pm.calculate(VOLTAGE_BELOW_PAUSE_CHARGING, False, True)
+    assert pm.should_shutdown(False, True, 0., False)
+    capacity = pm.get_car_battery_capacity()
+    for _ in range(100):
+      pm.calculate(5000, False, False)
+      assert not pm.should_shutdown(False, False, 0., False)
+    assert pm.last_measurement_time is None
+    assert pm.get_power_used() == 0
+    assert pm.get_car_battery_capacity() == capacity
 
   @pytest.mark.parametrize("capacity", [0, -1])
   def test_empty_estimated_capacity_does_not_shutdown(self, capacity):

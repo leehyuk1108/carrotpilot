@@ -5,6 +5,8 @@ from openpilot.common.params import Params #kans
 import numpy as np
 from opendbc.car import Bus, create_button_events, structs
 from opendbc.car.common.conversions import Conversions as CV
+from opendbc.car.gm.cluster_speed import gm_cluster_cruise_speed_from_raw_ms
+from opendbc.car.gm.manual_auto_hold import ManualAutoHold, manual_hold_supported
 from opendbc.car.interfaces import CarStateBase
 from opendbc.car.gm.values import DBC, AccState, CruiseButtons, STEER_THRESHOLD, CAR, DBC, CanBus, GMFlags, CC_ONLY_CAR, CAMERA_ACC_CAR
 
@@ -31,6 +33,9 @@ class CarState(CarStateBase):
     self.pt_lka_steering_cmd_counter = 0
     self.cam_lka_steering_cmd_counter = 0
     self.is_metric = False
+    self.manual_auto_hold = ManualAutoHold() if manual_hold_supported(CP) else None
+    self.manual_hold_controls_active = True  # Wait for an actual CarControl before arming.
+    self.brake_pedal_position = 0.
 
     self.buttons_counter = 0
     self.single_pedal_mode = False
@@ -105,6 +110,7 @@ class CarState(CarStateBase):
       ret.brake = pt_cp.vl["EBCMBrakePedalPosition"]["BrakePedalPosition"] / 0xd0
     else:
       ret.brake = pt_cp.vl["ECMAcceleratorPos"]["BrakePedalPos"]
+    self.brake_pedal_position = pt_cp.vl["ECMAcceleratorPos"]["BrakePedalPos"] if self.manual_auto_hold is not None else 0.
     if self.CP.networkLocation == NetworkLocation.fwdCamera:
       ret.brakePressed = pt_cp.vl["ECMEngineStatus"]["BrakePressed"] != 0
     else:
@@ -191,6 +197,13 @@ class CarState(CarStateBase):
       else:
         ret.vCluRatio = 0.96
 
+    if self.CP.carFingerprint == CAR.CHEVROLET_TRAVERSE:
+      # Wayon's measured display mapping, not a chassis-speed correction.
+      if ret.vEgo > 0.0:
+        ret.vEgoCluster = gm_cluster_cruise_speed_from_raw_ms(ret.vEgo)
+      if ret.cruiseState.speed > 0.0:
+        ret.cruiseState.speedCluster = gm_cluster_cruise_speed_from_raw_ms(ret.cruiseState.speed)
+
     # Don't add event if transitioning from INIT, unless it's to an actual button
     if self.cruise_buttons != CruiseButtons.UNPRESS or prev_cruise_buttons != CruiseButtons.INIT:
       ret.buttonEvents = [
@@ -225,4 +238,3 @@ class CarState(CarStateBase):
       Bus.cam: CANParser(DBC[CP.carFingerprint][Bus.pt], [], 2),
       Bus.loopback: CANParser(DBC[CP.carFingerprint][Bus.pt], loopback_messages, 128),
     }
-

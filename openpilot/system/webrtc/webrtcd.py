@@ -174,6 +174,7 @@ class StreamSession:
 
   def __init__(self, sdp: str, cameras: list[str], incoming_services: list[str], outgoing_services: list[str],
                debug_mode: bool = False, client_key: str = "", carrot_state: bool = False):
+    from aiortc import RTCConfiguration
     from aiortc.mediastreams import VideoStreamTrack
     from openpilot.system.webrtc.device.video import LiveStreamVideoStreamTrack
     from teleoprtc import WebRTCAnswerBuilder
@@ -181,7 +182,10 @@ class StreamSession:
 
     self.logger = logging.getLogger("webrtcd")
     config = parse_info_from_offer(sdp)
-    builder = WebRTCAnswerBuilder(sdp)
+    # Match Carrot Vision's host-only browser ICE policy (LAN or Tailscale).
+    # Default STUN gathering can exhaust the web proxy's five-second deadline.
+    configuration = RTCConfiguration(iceServers=[]) if _carrot_vision_mode else None
+    builder = WebRTCAnswerBuilder(sdp, configuration=configuration)
 
     self._video_tracks = []
     self.carrot_state = _carrot_vision_mode and bool(carrot_state)

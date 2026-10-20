@@ -9,6 +9,7 @@ from openpilot.selfdrive.carrot.bluetooth.model import BLUETOOTH_CANCEL, Command
 from openpilot.selfdrive.car.toyota_pcm_speed import ToyotaPcmSetSpeedSync
 
 from opendbc.car import structs
+from opendbc.car.gm.values import CAR as GM_CAR
 GearShifter = structs.CarState.GearShifter
 
 
@@ -409,6 +410,11 @@ class VCruiseCarrot:
       self.v_cruise_cluster_kph = self.v_cruise_kph #V_CRUISE_UNSET
       #if self.cruise_state_available_last: # 최초 한번이라도 cruiseState.available이 True였다면
       #  self._lat_enabled = False
+
+    # Stock Traverse ACC owns the displayed set speed, even in Carrot PCM modes
+    # that retain a separate local target. Do not rescale that control target.
+    if self.CP.carFingerprint == GM_CAR.CHEVROLET_TRAVERSE and self.CP.pcmCruise and CS.cruiseState.available:
+      self.v_cruise_cluster_kph = CS.cruiseState.speedCluster * CV.MS_TO_KPH
 
     self.cruise_state_available_last = CS.cruiseState.available
     self.enabled_last = CC.enabled

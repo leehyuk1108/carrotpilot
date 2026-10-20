@@ -14,6 +14,7 @@ import numpy as np
 from collections import deque
 
 from opendbc.car.car_helpers import interfaces
+from opendbc.car.gm.values import CAR as GM_CAR
 from opendbc.car.vehicle_model import VehicleModel
 from opendbc.car.volkswagen.values import MEB_CURVATURE_PID_KP, MEB_CURVATURE_PID_KI, MEB_CURVATURE_PID_KF, MEB_CURVATURE_MAX
 
@@ -351,7 +352,11 @@ class Controls:
       hudControl.naviEventSpeed = navi_event_speed
 
     lp = self.sm['longitudinalPlan']
-    if self.CP.pcmCruise:
+    if self.CP.carFingerprint == GM_CAR.CHEVROLET_TRAVERSE:
+      # The replacement stock ACC display shows SET, not a transient planner
+      # slowdown. The GM controller encodes this in the stock display domain.
+      hudControl.setSpeed = float(CS.vCruiseCluster * CV.KPH_TO_MS)
+    elif self.CP.pcmCruise:
       speed_from_pcm = self.params.get_int("SpeedFromPCM")
       if speed_from_pcm == 1: #toyota
         hudControl.setSpeed = float(CS.vCruiseCluster * CV.KPH_TO_MS)
