@@ -3,6 +3,7 @@ from dataclasses import dataclass
 import hashlib
 import math
 import re
+import uuid
 
 from openpilot.selfdrive.navigation.helpers import finite_number, valhalla_type
 from openpilot.selfdrive.navigation.provenance import NAVDY_ROUTE_MAX_POINTS
@@ -101,8 +102,10 @@ class ModelNavigationTracker:
     self.encoded = None
     self.assembly_started = -math.inf
     self.reason = 'model_feedback_missing'
+    self.cache_generation = 0
 
   def clear(self, reason='model_feedback_missing'):
+    self.cache_generation += 1
     self.current = self.value = self.manifest = self.encoded = None
     self.chunks = {}
     self.points = ()
@@ -110,6 +113,11 @@ class ModelNavigationTracker:
     self.position_stamp = -math.inf
     self.sequence = -1
     self.reason = reason
+
+  def clear_geometry(self):
+    self.manifest = self.encoded = None
+    self.chunks = {}
+    self.points = ()
 
   def accept(self, value, received, now):
     if not bounded(received, 0, now) or now - received >= MAX_AGE:
@@ -222,12 +230,17 @@ class ModelNavigationTracker:
     manifest = cache['sha256'], len(encoded), (len(encoded) + CHUNK_SIZE - 1) // CHUNK_SIZE, len(points)
     if self.manifest is not None and self.manifest != manifest:
       return
-    self.manifest, self.points = manifest, points
+    self.manifest, self.points, self.encoded = manifest, points, encoded
     self.reason = ''
 
+  def is_fresh(self, now):
+    return (self.value is not None and 0 <= now - self.received < MAX_AGE
+            and 0 <= now - self.observed < MAX_AGE and now < self.deadline)
+
   def _fresh(self, now):
-    if (self.value is None or not 0 <= now - self.received < MAX_AGE
-        or not 0 <= now - self.observed < MAX_AGE or now >= self.deadline):
+    if self.value is None:
+      return False
+    if not self.is_fresh(now):
       self.clear('model_navigation_stale')
       return False
     return True
@@ -261,6 +274,26 @@ class ModelNavigationTracker:
         if 0 <= now - stamp < MAX_AGE:
           fix = lat, lon, heading, speed, stamp
     return ModelNavigation(self.current, self.points, self.observed, kind, modifier, float(distance), fix)
+
+
+class ModelRouteCache:
+  """Bind each complete bridge assembly to the corresponding local feedback."""
+  def __init__(self, path, writer):
+    self.path, self.writer = path, writer
+    self.key = self.token = None
+    self.path.unlink(missing_ok=True)
+
+  def update(self, tracker):
+    cache = tracker.route_cache()
+    key = (tracker.current, cache['sha256'], tracker.cache_generation) if cache else None
+    if key != self.key or (key is not None and not self.path.exists()):
+      token = uuid.uuid4().hex if cache else None
+      if cache is None:
+        self.path.unlink(missing_ok=True)
+      else:
+        self.writer(self.path, dict(cache, bridgeCacheToken=token))
+      self.key, self.token = key, token
+    return self.token
 
 
 def age_model_feedback(value, elapsed_ms):

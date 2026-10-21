@@ -18,7 +18,7 @@ from openpilot.selfdrive.navdy.transport import AdbTransport, LineReader, encode
 from openpilot.selfdrive.navdy.bluetooth import BluetoothTransport, CONFIG_PATH, configured_connection
 from openpilot.selfdrive.navdy.connection import UsbProbe
 from openpilot.selfdrive.navdy.ambient import DoorMonitor, read_override, road_state
-from openpilot.selfdrive.navdy.model_navigation import ModelNavigationTracker, age_model_feedback
+from openpilot.selfdrive.navdy.model_navigation import ModelNavigationTracker, ModelRouteCache, age_model_feedback
 
 MAINTENANCE_STATE = Path('/data/hl-jetson')
 JETSON_PYTHON = '/opt/carrot-jetlink/venv/bin/python'
@@ -184,8 +184,7 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
     last_display_dropout = None
     model_navigation = ModelNavigationTracker()
     model_route_path = feedback.with_name(feedback.stem + '-model-route.json')
-    model_route_written = None
-    model_route_path.unlink(missing_ok=True)
+    model_route_cache = ModelRouteCache(model_route_path, atomic_json)
     doors = DoorMonitor()
     doors.start()
     try:
@@ -209,8 +208,7 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
             usb_probe = UsbProbe(AdbTransport)
             feedback.unlink(missing_ok=True)
             model_navigation.clear('model_link_changed')
-            model_route_path.unlink(missing_ok=True)
-            model_route_written = None
+            model_route_cache.update(model_navigation)
             next_attempt, failures, candidate_index = 0.0, 0, 0
         if not bluetooth_only and transport_name in ('bluetooth', 'jetson') and transport is not None:
           ready = usb_probe.poll(tick)
@@ -221,8 +219,7 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
             transport = ready
             feedback.unlink(missing_ok=True)
             model_navigation.clear('model_link_changed')
-            model_route_path.unlink(missing_ok=True)
-            model_route_written = None
+            model_route_cache.update(model_navigation)
             if ready is not None:
               transport_name, connected_at = 'usb', time.monotonic()
             next_attempt, failures = 0.0, 0
@@ -273,14 +270,7 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
           received = time.monotonic()
           age_model_feedback(response, (received - exchange_started) * 1000.)
           model_navigation.accept(response.get('modelNavigation'), received, received)
-          cached_route = model_navigation.route_cache()
-          route_key = (model_navigation.current, cached_route['sha256']) if cached_route else None
-          if route_key != model_route_written:
-            if cached_route is not None:
-              atomic_json(model_route_path, cached_route)
-            else:
-              model_route_path.unlink(missing_ok=True)
-            model_route_written = route_key
+          cache_token = model_route_cache.update(model_navigation)
           if transport_name == 'usb':
             # Every new cable loss starts with the configured wireless peer,
             # not the next failed relay left over from an earlier handover.
@@ -302,7 +292,7 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
           if previous_available and missing:
             last_display_dropout = {'at': received, 'sources': missing}
           previous_available = not missing
-          atomic_json(feedback, {'receivedAt': received, 'feedback': response})
+          atomic_json(feedback, {'receivedAt': received, 'feedback': response, 'modelRouteCacheToken': cache_token})
           atomic_json(status, {'updatedAt': received, 'connected': True, 'transport': transport_name,
                                'connectedAt': connected_at, 'extendedFeedback': 'navigationFeedback' in response,
                                'display': {'sequence': sequence, 'onroad': payload['onroad'], 'active': payload['active'],
@@ -325,8 +315,7 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
             transport = None
           feedback.unlink(missing_ok=True)
           model_navigation.clear('model_disconnected')
-          model_route_path.unlink(missing_ok=True)
-          model_route_written = None
+          model_route_cache.update(model_navigation)
           failures += 1
           retry_delay = min(10, 2 ** min(failures, 4))
           atomic_json(status, {'updatedAt': time.monotonic(), 'connected': False, 'transport': transport_name,

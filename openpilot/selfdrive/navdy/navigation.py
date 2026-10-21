@@ -178,20 +178,21 @@ class NavigationReader:
     self.model_tracker = ModelNavigationTracker()
     self.model_route_path = self.path.with_name(self.path.stem + '-model-route.json')
     self.model_route_stat = None
-    self.model_cache_blocked = None
+    self.model_route_token = None
     self.last_poll = -math.inf
     self.last_stat = None
     self.lock = threading.Lock()
 
   def read(self, now=None):
-    now = time.monotonic() if now is None else now
     with self.lock:
       return self._read(now)
 
   def _read(self, now):
-    if self.model_tracker.value is not None and not self.model_tracker._fresh(now):
-      self._invalidate_model('model_navigation_stale')
-    if now - self.last_poll >= 0.1:
+    realtime = now is None
+    now = time.monotonic() if realtime else now
+    # An expiring observation gets one last read even inside the polling interval.
+    model_expiring = self.model_tracker.value is not None and not self.model_tracker.is_fresh(now)
+    if now - self.last_poll >= 0.1 or model_expiring:
       self.last_poll = now
       try:
         info = self.path.stat()
@@ -202,7 +203,14 @@ class NavigationReader:
             data = stream.read(MAX_FRAME_BYTES + 1025)
           if len(data) <= MAX_FRAME_BYTES + 1024:
             value = json.loads(data)
+            now = time.monotonic() if realtime else now
             self.tracker.accept(value.get('feedback'), value.get('receivedAt'), now)
+            token = value.get('modelRouteCacheToken')
+            token = token if isinstance(token, str) and re.fullmatch(r'[0-9a-f]{32}', token) else None
+            if token != self.model_route_token:
+              self.model_tracker.clear_geometry()
+              self.model_route_stat = None
+            self.model_route_token = token
             packet = value.get('feedback')
             self.model_tracker.accept(packet.get('modelNavigation') if isinstance(packet, dict) else None,
                                       value.get('receivedAt'), now)
@@ -212,42 +220,49 @@ class NavigationReader:
             self._invalidate_model('model_feedback_oversized')
       except (OSError, ValueError, TypeError, AttributeError):
         self._invalidate_model('model_feedback_missing')
+    self.model_tracker._fresh(time.monotonic() if realtime else now)
     return self.tracker.snapshot(now)
 
   def _invalidate_model(self, reason):
     self.model_tracker.clear(reason)
-    # A newly replaced sidecar may already belong to the next fresh feedback.
-    # Invalidate only the cache this reader actually associated with old input.
-    if self.model_route_stat is not None:
-      self.model_cache_blocked = self.model_route_stat[:2]
+    self.model_route_stat = None
 
   def model_read(self, now=None):
-    now = time.monotonic() if now is None else now
+    realtime = now is None
     with self.lock:
       self._read(now)
+      now = time.monotonic() if realtime else now
       if not self.model_tracker._fresh(now):
+        return None
+      if self.model_route_token is None:
+        self.model_tracker.clear_geometry()
+        self.model_tracker.reason = 'model_route_unverified'
         return None
       try:
         info = self.model_route_path.stat()
-        stamp = info.st_ino, info.st_mtime_ns, self.model_tracker.current
-        if stamp[:2] != self.model_cache_blocked and stamp != self.model_route_stat:
-          self.model_route_stat = stamp
+        stamp = info.st_ino, info.st_mtime_ns, self.model_tracker.current, self.model_route_token
+        if stamp != self.model_route_stat or not self.model_tracker.points:
           with self.model_route_path.open('rb') as stream:
             data = stream.read(140001)
-          if len(data) <= 140000:
-            self.model_tracker.import_route(json.loads(data))
+          cache = json.loads(data) if len(data) <= 140000 else None
+          self.model_tracker.clear_geometry()
+          if not isinstance(cache, dict) or cache.get('bridgeCacheToken') != self.model_route_token:
+            self.model_tracker.reason = 'model_route_cache_mismatch'
+            return None
+          self.model_tracker.import_route(cache)
+          self.model_route_stat = stamp
       except FileNotFoundError:
         # No sidecar is expected while the bridge is still assembling chunks.
         if self.model_tracker.points:
           self._invalidate_model('model_route_cache_missing')
       except (OSError, ValueError, TypeError, AttributeError):
         self._invalidate_model('model_route_cache_missing')
-      return self.model_tracker.snapshot(now)
+      return self.model_tracker.snapshot(time.monotonic() if realtime else now)
 
   def status(self):
-    now = time.monotonic()
     with self.lock:
-      state = self._read(now)
+      state = self._read(None)
+      now = time.monotonic()
       connected = 0 <= now - self.tracker.received_at < LINK_TTL
       return {'connected': connected, 'extendedFeedback': self.tracker.extended,
               'modelRouteReady': bool(self.model_tracker.points),

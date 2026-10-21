@@ -240,6 +240,74 @@ def run_fake_bridge(monkeypatch, tmp_path, *, connect_delay=0, invalidate=False,
   return sent, statuses, connections
 
 
+def test_model_route_cache_precedes_feedback_and_rotates_after_clear(monkeypatch, tmp_path):
+  from openpilot import cereal
+  from openpilot.selfdrive.navdy.tests.test_model_navigation import packet
+
+  clock = NS(now=100.0)
+  monkeypatch.setattr(bridge.time, 'monotonic', lambda: clock.now)
+  monkeypatch.setattr(bridge.time, 'monotonic_ns', lambda: int(clock.now * 1e9))
+  monkeypatch.setattr(bridge.time, 'sleep', lambda seconds: setattr(clock, 'now', clock.now + seconds))
+  monkeypatch.setattr(bridge, 'read_override', lambda: None)
+  sm = Messages()
+  def update(_):
+    sm.recv_time = dict.fromkeys(bridge.SERVICES, clock.now)
+    sm.logMonoTime = dict.fromkeys(bridge.SERVICES, int(clock.now * 1e9))
+  sm.update = update
+  monkeypatch.setattr(cereal, 'messaging', NS(SubMaster=lambda _: sm), raising=False)
+
+  first = packet()
+  heartbeat = packet(sequence=2)
+  heartbeat.pop('routeChunk')
+  clear = dict(packet(sequence=3), active=False)
+  replacement = packet([(38., 128.), (38.001, 128.001)], sequence=4)
+  responses = [first, heartbeat, clear, replacement]
+  exchanges = []
+  class Transport:
+    def connect(self):
+      pass
+    def exchange(self, payload):
+      exchanges.append(payload)
+      assert len(exchanges) <= len(responses)
+      return {'modelNavigation': responses[len(exchanges) - 1]}
+    def close(self):
+      pass
+  monkeypatch.setattr(bridge, 'AdbTransport', Transport)
+
+  feedback = tmp_path / 'feedback.json'
+  sidecar = tmp_path / 'feedback-model-route.json'
+  events, caches = [], []
+  original = bridge.atomic_json
+  def capture(path, value):
+    if path == feedback:
+      token = value['modelRouteCacheToken']
+      # Check the committed sidecar before the matching feedback is published.
+      if token is None:
+        assert not sidecar.exists()
+      else:
+        cached = json.loads(sidecar.read_text())
+        assert cached['bridgeCacheToken'] == token
+        caches.append(cached)
+      events.append(('feedback', token))
+    original(path, value)
+    if path == sidecar:
+      events.append(('sidecar', value['bridgeCacheToken']))
+  monkeypatch.setattr(bridge, 'atomic_json', capture)
+  bridge.run(feedback=feedback, status=tmp_path / 'status.json',
+             bluetooth_config=tmp_path / 'unconfigured-bluetooth.json', duration=0.7)
+
+  assert len(exchanges) == 4
+  first_token, next_token = caches[0]['bridgeCacheToken'], caches[-1]['bridgeCacheToken']
+  assert first_token != next_token
+  assert events == [('sidecar', first_token), ('feedback', first_token), ('feedback', first_token),
+                    ('feedback', None), ('sidecar', next_token), ('feedback', next_token)]
+  assert caches[0] == caches[1]
+  assert caches[0]['sha256'] == first['routeChunk']['sha256']
+  assert caches[-1]['sha256'] == replacement['routeChunk']['sha256'] != caches[0]['sha256']
+  assert caches[-1]['polyline6'] == replacement['routeChunk']['data']
+  assert not sidecar.exists() and not feedback.exists()
+
+
 def test_messages_are_refreshed_after_slow_connect(monkeypatch, tmp_path):
   sent, statuses, _ = run_fake_bridge(monkeypatch, tmp_path, connect_delay=2)
   assert len(sent) == 1

@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from openpilot.selfdrive.navdy.model_navigation import ModelNavigationTracker, age_model_feedback, decode_route
+from openpilot.selfdrive.navdy.model_navigation import ModelNavigationTracker, ModelRouteCache, age_model_feedback, decode_route
 from openpilot.selfdrive.navdy.navigation import NavigationReader
 
 
@@ -24,6 +24,20 @@ def encode(points):
 
 
 POINTS = [(37., 127.), (37.0001, 127.0001), (37.0002, 127.0001)]
+TOKEN = 'a' * 32
+
+
+def write_feedback(path, value, received, token=TOKEN):
+  temporary = path.with_suffix('.tmp')
+  temporary.write_text(json.dumps({'receivedAt': received, 'feedback': {'modelNavigation': value},
+                                  'modelRouteCacheToken': token}))
+  temporary.replace(path)
+
+
+def write_cache(path, state=None, token=TOKEN):
+  temporary = path.with_suffix('.tmp')
+  temporary.write_text(json.dumps(dict((state or tracker()).route_cache(), bridgeCacheToken=token)))
+  temporary.replace(path)
 
 
 def packet(points=POINTS, *, sequence=1, route='route-a', session='session-a', index=0):
@@ -168,14 +182,14 @@ def test_sidecar_cache_requires_fresh_matching_feedback(tmp_path):
   path = tmp_path / 'feedback.json'
   reader = NavigationReader(path)
   complete = tracker()
-  reader.model_route_path.write_text(json.dumps(complete.route_cache()))
+  write_cache(reader.model_route_path, complete)
   value = packet()
   del value['routeChunk']
-  path.write_text(json.dumps({'receivedAt': 10., 'feedback': {'modelNavigation': value}}))
+  write_feedback(path, value, 10.)
   assert reader.model_read(10.).points == tuple(POINTS)
   assert reader.model_read(12.) is None
   value.update(sequence=2, routeId='route-b')
-  path.write_text(json.dumps({'receivedAt': 12.1, 'feedback': {'modelNavigation': value}}))
+  write_feedback(path, value, 12.1)
   assert reader.model_read(12.1) is None
 
 
@@ -259,36 +273,36 @@ def test_disconnect_and_reconnect_require_new_verified_geometry(tmp_path):
   path = tmp_path / 'feedback.json'
   reader = NavigationReader(path)
   complete = tracker()
-  reader.model_route_path.write_text(json.dumps(complete.route_cache()))
-  path.write_text(json.dumps({'receivedAt': 10., 'feedback': {'modelNavigation': packet()}}))
+  write_cache(reader.model_route_path, complete)
+  write_feedback(path, packet(), 10.)
   assert reader.model_read(10.) is not None
   path.unlink()
   reader.model_route_path.unlink()
   assert reader.model_read(10.2) is None
   value = packet(sequence=2)
   del value['routeChunk']
-  path.write_text(json.dumps({'receivedAt': 10.4, 'feedback': {'modelNavigation': value}}))
+  write_feedback(path, value, 10.4)
   assert reader.model_read(10.4) is None
 
 
-def test_stale_sidecar_cannot_restore_geometry_after_silence(tmp_path):
+def test_stale_sidecar_cannot_restore_geometry_from_another_bridge_assembly(tmp_path):
   path = tmp_path / 'feedback.json'
   reader = NavigationReader(path)
-  reader.model_route_path.write_text(json.dumps(tracker().route_cache()))
-  path.write_text(json.dumps({'receivedAt': 10., 'feedback': {'modelNavigation': packet()}}))
+  write_cache(reader.model_route_path)
+  write_feedback(path, packet(), 10.)
   assert reader.model_read(10.) is not None
   assert reader.model_read(12.1) is None
   value = packet(sequence=2)
   del value['routeChunk']
-  path.write_text(json.dumps({'receivedAt': 12.3, 'feedback': {'modelNavigation': value}}))
+  write_feedback(path, value, 12.3, token='b' * 32)
   assert reader.model_read(12.3) is None
 
 
 def test_new_complete_route_before_next_poll_is_not_blacklisted(tmp_path):
   path = tmp_path / 'feedback.json'
   reader = NavigationReader(path)
-  reader.model_route_path.write_text(json.dumps(tracker().route_cache()))
-  path.write_text(json.dumps({'receivedAt': 10., 'feedback': {'modelNavigation': packet()}}))
+  write_cache(reader.model_route_path)
+  write_feedback(path, packet(), 10.)
   assert reader.model_read(10.) is not None
   points = [(37. + i * .0001, 127.) for i in range(1000)]
   complete = ModelNavigationTracker()
@@ -297,8 +311,139 @@ def test_new_complete_route_before_next_poll_is_not_blacklisted(tmp_path):
     value = packet(points, sequence=2, route='route-b', index=index)
     complete.accept(value, 12.4, 12.4)
   replacement = tmp_path / 'replacement.json'
-  replacement.write_text(json.dumps(complete.route_cache()))
+  write_cache(replacement, complete, token='b' * 32)
   replacement.replace(reader.model_route_path)
-  path.write_text(json.dumps({'receivedAt': 12.4, 'feedback': {'modelNavigation': value}}))
+  write_feedback(path, value, 12.4, token='b' * 32)
   state = reader.model_read(12.4)
   assert state is not None and state.identity[-1] == 'route-b' and len(state.points) == 1000
+
+
+def test_waiting_fresh_frame_prevents_reader_only_expiry(tmp_path):
+  path = tmp_path / 'feedback.json'
+  reader = NavigationReader(path)
+  write_cache(reader.model_route_path)
+  write_feedback(path, packet(), 10.)
+  assert reader.model_read(10.) is not None
+  value = packet(sequence=2)
+  del value['routeChunk']
+  write_feedback(path, value, 11.85)
+  assert reader.model_read(11.95) is not None, vars(reader.model_tracker)
+
+
+def test_pending_frame_is_read_at_expiry_inside_poll_interval(tmp_path):
+  path = tmp_path / 'feedback.json'
+  reader = NavigationReader(path)
+  write_cache(reader.model_route_path)
+  write_feedback(path, packet(), 10.)
+  assert reader.model_read(10.).points == tuple(POINTS)
+  assert reader.model_read(11.85).points == tuple(POINTS)
+  write_feedback(path, packet(sequence=2), 11.87)
+  assert reader.model_read(11.92).points == tuple(POINTS)
+  assert reader.model_tracker.sequence == 2
+
+
+def test_expiry_poll_does_not_renew_unchanged_frame(tmp_path):
+  path = tmp_path / 'feedback.json'
+  reader = NavigationReader(path)
+  write_cache(reader.model_route_path)
+  write_feedback(path, packet(), 10.)
+  assert reader.model_read(10.).points == tuple(POINTS)
+  assert reader.model_read(11.85).points == tuple(POINTS)
+  assert reader.model_read(11.92) is None
+
+
+def test_reader_only_silence_recovers_same_bridge_cache_without_replay(tmp_path):
+  path = tmp_path / 'feedback.json'
+  reader = NavigationReader(path)
+  write_cache(reader.model_route_path)
+  write_feedback(path, packet(), 10.)
+  assert reader.model_read(10.) is not None
+  assert reader.model_read(12.1) is None
+  old = packet()
+  del old['routeChunk']
+  write_feedback(path, old, 12.2)
+  assert reader.model_read(12.2) is None
+  fresh = packet(sequence=2)
+  del fresh['routeChunk']
+  write_feedback(path, fresh, 12.4)
+  assert reader.model_read(12.4) is not None
+
+
+def test_sidecar_replacement_cannot_pair_old_feedback_with_new_geometry(tmp_path):
+  path = tmp_path / 'feedback.json'
+  reader = NavigationReader(path)
+  write_cache(reader.model_route_path)
+  write_feedback(path, packet(), 10.)
+  assert reader.model_read(10.).points == tuple(POINTS)
+  points = [(38., 128.), (38.001, 128.001)]
+  replacement = tracker(packet(points, sequence=2), now=10.2)
+  write_cache(reader.model_route_path, replacement, token='b' * 32)
+  assert reader.model_read(10.2) is None
+  value = packet(points, sequence=2)
+  del value['routeChunk']
+  write_feedback(path, value, 10.4, token='b' * 32)
+  assert reader.model_read(10.4).points == tuple(points)
+
+
+@pytest.mark.parametrize('token', [None, '', 'a', 'x' * 32, True])
+def test_model_reader_requires_bridge_assembly_attestation(tmp_path, token):
+  path = tmp_path / 'feedback.json'
+  reader = NavigationReader(path)
+  write_cache(reader.model_route_path)
+  write_feedback(path, packet(), 10., token=token)
+  assert reader.model_read(10.) is None
+  assert reader.model_tracker.reason == 'model_route_unverified'
+
+
+def test_bridge_cache_rotates_on_reassembly_not_heartbeat(tmp_path):
+  path = tmp_path / 'route.json'
+  writes = []
+  def writer(target, value):
+    writes.append(value)
+    target.write_text(json.dumps(value))
+  cache = ModelRouteCache(path, writer)
+  state = tracker()
+  first = cache.update(state)
+  assert json.loads(path.read_text())['bridgeCacheToken'] == first
+  assert cache.update(state) == first and len(writes) == 1
+  state.clear()
+  assert cache.update(state) is None and not path.exists()
+  state.accept(packet(sequence=2), 10.2, 10.2)
+  second = cache.update(state)
+  assert second != first and len(writes) == 2
+  # A same-route clear and complete reassembly can occur within one bridge tick.
+  state.clear()
+  state.accept(packet(sequence=3), 10.4, 10.4)
+  third = cache.update(state)
+  assert third not in (first, second) and len(writes) == 3
+
+
+def test_reader_samples_clock_after_lock_and_file_read(tmp_path, monkeypatch):
+  from openpilot.selfdrive.navdy import navigation
+  path = tmp_path / 'feedback.json'
+  reader = NavigationReader(path)
+  write_cache(reader.model_route_path)
+  write_feedback(path, packet(), 10.15)
+  clock = [10.]
+  monkeypatch.setattr(navigation.time, 'monotonic', lambda: clock[0])
+  class DelayedLock:
+    def __enter__(self):
+      clock[0] = max(clock[0], 10.1)
+    def __exit__(self, *args):
+      pass
+  reader.lock = DelayedLock()
+  loads = navigation.json.loads
+  def delayed_loads(data):
+    clock[0] = 10.2
+    return loads(data)
+  monkeypatch.setattr(navigation.json, 'loads', delayed_loads)
+  assert reader.model_read() is not None
+  assert reader.status()['modelNavigationReason'] == ''
+
+
+def test_freshness_checks_preserve_specific_rejection_reason():
+  state = tracker()
+  state.clear('model_route_invalid')
+  assert state.snapshot(10.1) is None
+  assert state.request(10.1) == {'routeId': '', 'index': 0}
+  assert state.reason == 'model_route_invalid'

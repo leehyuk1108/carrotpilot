@@ -23,7 +23,9 @@ A dedicated `WAYON_MODEL_NAVIGATION_V1` notification carries a JSON object:
   ORIGINAL `observedAtMs`. Missing direction is not synthesized as north.
 - Optional `route`: `polyline6`, `pointCount`, `sha256`. The SHA-256 covers the
   complete ASCII polyline6 (latitude then longitude). Sent on route change/reconnection,
-  not on every display update. Maximum 8192 points and 65536 encoded bytes.
+  plus bounded recovery re-offers on fresh native observations, not on every
+  display update. A successful socket write does not prove receiver acceptance.
+  Maximum 8192 points and 65536 encoded bytes.
 
 The HUD validates native observation identity, sizes, numbers and source before
 storing. At first receipt it bounds age using original phone wall time; accepted
@@ -59,6 +61,16 @@ Both USB and Bluetooth charge the full measured exchange duration to model
 feedback age and subtract it from remaining validity. Position keeps its own
 original age. Polls never renew an unchanged source sequence. Guidance is
 limited to 2 seconds from source observation and link silence to 2 seconds.
+
+## Comma Local Cache
+
+The bridge writes a complete sidecar with a random `bridgeCacheToken`, then
+publishes the matching `modelRouteCacheToken` in the outer local feedback file.
+Every bridge clear/reassembly rotates this token, even for unchanged route
+identity/hash. Readers require matching tokens and fresh native observations
+before importing geometry; reader-only expiry does not permanently blacklist
+an otherwise unchanged bridge assembly. These tokens never travel to the HUD
+and are consistency markers, not authentication credentials.
 
 ## Validation Boundary
 
