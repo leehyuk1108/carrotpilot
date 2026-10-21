@@ -191,6 +191,8 @@ def test_connect_does_not_pair_unknown_peer(monkeypatch):
 
 
 def test_connect_checks_security_and_hello(monkeypatch):
+  from openpilot.selfdrive.navdy import bluetooth_pipeline
+  monkeypatch.setattr(bluetooth_pipeline, 'SnapshotPipeline', lambda *args: NS(close=lambda: None))
   monkeypatch.setattr(socket, 'AF_BLUETOOTH', 31, raising=False)
   monkeypatch.setattr(socket, 'BTPROTO_RFCOMM', 3, raising=False)
   class FakeSocket:
@@ -204,19 +206,34 @@ def test_connect_checks_security_and_hello(monkeypatch):
     def getsockopt(self, *args):return bytes([self.security, 0])
     def recv(self, size):result, self.hello = self.hello[:size], self.hello[size:]; return result
     def close(self):self.closed = True
+    def setblocking(self, value):assert value is False
   def command(args, **kwargs):
     return NS(stdout='Paired: yes' if args[0]=='bluetoothctl' else f'Service Name: Navdy\n{bt.SERVICE_UUID}\nChannel: 3')
-  for security, hello in [(1, None), (2, bt.HELLO.pack(b'HLS0', 0, bt.TTL_US, bt.MAX_BYTES)), (2, None)]:
+  v2 = bt.HELLO.pack(b'NVH2', 0, bt.TTL_US, bt.MAX_BYTES)
+  for security, hello in [(1, None), (2, bt.HELLO.pack(b'HLS0', 0, bt.TTL_US, bt.MAX_BYTES)), (2, None), (2, v2)]:
     sock = FakeSocket(security, hello)
     client = bt.BluetoothTransport(PEER, command=command, socket_factory=lambda *a: sock)
-    if security == 2 and hello is None:
+    if security == 2 and hello in (None, v2):
       client.connect()
       assert client.conn is sock
+      assert (client.pipeline is not None) == (hello == v2)
     else:
       with pytest.raises((ConnectionError, ValueError)):
         client.connect()
       assert sock.closed
     client.close()
+
+
+def test_v1_batch_fallback_delivers_one_reply_once():
+  client, thread, errors = transaction()
+  try:
+    replies = client.exchange_batch(PAYLOAD, captured_ns=time.monotonic_ns())
+    assert len(replies) == 1 and replies[0][0]['navigationFeedback'] is None
+    assert replies[0][1] > 0 and replies[0][2] >= 0
+  finally:
+    client.close()
+    thread.join(2)
+  assert not errors
 
 
 def test_usb_probe_never_writes_and_hands_off_once():

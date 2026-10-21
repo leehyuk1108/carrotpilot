@@ -390,6 +390,8 @@ def test_usb_disconnect_falls_back_and_reattach_takes_priority(monkeypatch, tmp_
       current.writer = self
       sent.append(('bluetooth' if wireless else 'jetson', clock.now, payload['seq']))
       return {'navigationFeedback': None}
+    def exchange_batch(self, payload, *, captured_ns):
+      return [(self.exchange(payload, captured_ns=captured_ns), clock.now, 0.)]
     def close(self):
       current.bluetooth_closed = True
       if current.writer is self:current.writer = None
@@ -516,6 +518,8 @@ def test_healthy_bluetooth_retries_itself_before_unavailable_jetson(monkeypatch,
         state.failed = True
         raise TimeoutError('Temporary radio interruption after healthy session')
       return {'navigationFeedback': None}
+    def exchange_batch(self, payload, *, captured_ns):
+      return [(self.exchange(payload, captured_ns=captured_ns), clock.now, 0.)]
     def close(self):
       pass
 
@@ -584,6 +588,8 @@ def test_bluetooth_only_keeps_usb_for_diagnostics(monkeypatch, tmp_path, scenari
       assert payload['active']
       sent.append('bluetooth')
       return {}
+    def exchange_batch(self, payload, *, captured_ns):
+      return [(self.exchange(payload, captured_ns=captured_ns), clock.now, 0.)]
     def close(self):
       pass
 
@@ -622,3 +628,49 @@ def test_bluetooth_only_keeps_usb_for_diagnostics(monkeypatch, tmp_path, scenari
     assert not statuses[-2]['connected']
     assert statuses[-2]['transportPolicy'] == 'bluetooth_only'
   assert statuses[-1]['reason'] == 'bridge_stopped'
+
+
+def test_pipeline_empty_polls_do_not_republish_or_rejuvenate_navigation(monkeypatch, tmp_path):
+  from openpilot import cereal
+  clock = NS(now=100.)
+  sm = Messages()
+  sm.update = lambda _: None
+  writes, ages, accepts = [], [], []
+  monkeypatch.setattr(bridge.time, 'monotonic', lambda: clock.now)
+  monkeypatch.setattr(bridge.time, 'monotonic_ns', lambda: round(clock.now * 1e9))
+  monkeypatch.setattr(bridge.time, 'sleep', lambda seconds: setattr(clock, 'now', clock.now + seconds))
+  monkeypatch.setattr(cereal, 'messaging', NS(SubMaster=lambda _: sm), raising=False)
+  monkeypatch.setattr(bridge, 'configured_connection', lambda _: ('54:ED:A3:00:48:23', True))
+  monkeypatch.setattr(bridge, 'age_model_feedback', lambda value, elapsed: ages.append(elapsed))
+  tracker = bridge.ModelNavigationTracker()
+  original_accept = tracker.accept
+  def accept(value, received, now):
+    accepts.append((value, received, now))
+    original_accept(value, received, now)
+  tracker.accept = accept
+  monkeypatch.setattr(bridge, 'ModelNavigationTracker', lambda: tracker)
+
+  class Wireless:
+    def __init__(self, peer):
+      self.peer, self.calls = peer, 0
+    def connect(self):pass
+    def close(self):pass
+    def exchange_batch(self, payload, *, captured_ns):
+      self.calls += 1
+      if self.calls == 3:
+        return [({'navigationFeedback': {'sequence': 1}}, clock.now - .02, 420.),
+                ({'navigationFeedback': {'sequence': 2}}, clock.now - .01, 210.)]
+      return []
+
+  original_write = bridge.atomic_json
+  def write(path, value):
+    if path.name == 'feedback.json':
+      writes.append(value)
+    original_write(path, value)
+  monkeypatch.setattr(bridge, 'BluetoothTransport', Wireless)
+  monkeypatch.setattr(bridge, 'atomic_json', write)
+  bridge.run(feedback=tmp_path/'feedback.json', status=tmp_path/'status.json', duration=1.1)
+  assert ages == [420., 210.] and len(accepts) == 2
+  assert len(writes) == 1
+  assert writes[0]['feedback']['navigationFeedback']['sequence'] == 2
+  assert writes[0]['receivedAt'] == pytest.approx(100.39)

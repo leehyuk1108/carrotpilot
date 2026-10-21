@@ -126,6 +126,7 @@ class BluetoothTransport:
     self.lease = 0
     self.lease_received_ns = 0
     self.last_exchange = None
+    self.pipeline = None
 
   def connect(self):
     self.close()
@@ -144,15 +145,35 @@ class BluetoothTransport:
       if self.conn.getsockopt(274, 4, 2)[0] < 2:
         raise ConnectionError('Navdy requires an encrypted paired link')
       marker, lease, ttl, bound = HELLO.unpack(receive(self.conn, HELLO.size, time.monotonic() + 2))
-      if (marker, lease, ttl, bound) != (b'NVH1', 0, TTL_US, MAX_BYTES):
+      if marker not in (b'NVH1', b'NVH2') or (lease, ttl, bound) != (0, TTL_US, MAX_BYTES):
         raise ValueError('Unsupported Navdy wireless handshake')
       self.lease, self.sequence = lease, 0
       self.lease_received_ns = time.monotonic_ns()
+      if marker == b'NVH2':
+        from openpilot.selfdrive.navdy.bluetooth_pipeline import SnapshotPipeline
+        self.pipeline = SnapshotPipeline(self.conn, self.lease_received_ns)
+    except Exception:
+      self.close()
+      raise
+
+  def exchange_batch(self, payload, *, captured_ns):
+    """Drain real replies once; an empty poll must never refresh navigation."""
+    if self.pipeline is None:
+      begin = time.monotonic()
+      response = self.exchange(payload, captured_ns=captured_ns)
+      received = time.monotonic()
+      return [(response, received, (received - begin) * 1000)]
+    try:
+      replies = self.pipeline.update(payload, captured_ns=captured_ns)
+      self.last_exchange = self.pipeline.diagnostics()
+      return replies
     except Exception:
       self.close()
       raise
 
   def exchange(self, payload, *, captured_ns):
+    if self.pipeline is not None:
+      raise ValueError('Navdy wireless v2 requires exchange_batch')
     if self.conn is None:
       # Caller must connect first, then construct a fresh state snapshot.
       raise ConnectionError('Navdy wireless link is not connected')
@@ -198,6 +219,9 @@ class BluetoothTransport:
       raise
 
   def close(self):
+    if self.pipeline is not None:
+      self.pipeline.close()
     if self.conn is not None:
       self.conn.close()
       self.conn = None
+    self.pipeline = None

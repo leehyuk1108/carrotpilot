@@ -1,4 +1,4 @@
-# Navdy wireless link v1
+# Navdy Wireless Link
 
 Implementation contract, 2026-10-19. This is distinct from the synthetic bench.
 Secure bonded RFCOMM UUID: `9b07004c-c95d-4e82-bf6f-9af7679b4a21`.
@@ -38,6 +38,50 @@ invalidate queued Bluetooth work; a closed/replaced session cannot update or
 clear a newer owner's display. ACK must not claim success before actual dispatch.
 Preserve existing phone-navigation source session/sequence/age; no freshness reset
 of cached feedback. Clear uses existing inactive/offroad payload behavior.
+
+## Bounded Pipeline v2 (2026-10-21)
+
+The v164 HUD advertises `NVH2`; request/response markers become `NVQ2` and
+`NVA2`. Struct layouts, encryption, exact peer, CRC/decompression bounds and
+the 500,000 us display lifetime are unchanged. The Comma client still supports
+an old `NVH1` HUD through the original synchronous protocol. An old client must
+not interpret `NVH2` as v1; update the client before installing the new HUD APK.
+
+V2 allows at most **two** unacknowledged full snapshots at the existing 200 ms
+capture cadence. It does not wait for an ACK before capturing the next state.
+When both slots are occupied, discard that tick, not an unbounded FIFO of old
+states. Only one partial transmit buffer is retained; its original capture
+deadline remains 500 ms. No catch-up burst or cached active-state retransmission
+is allowed. The server still has only one pending main-thread dispatch.
+One nonblocking client IO reader timestamps the complete ACK as it arrives and
+retains at most two responses. It never applies app state. The 200 ms display
+tick must not be used as the ACK arrival time: that polling delay would inflate
+the next lease's conservative age and reintroduce expiry. The reader has bounded
+shutdown and is closed with its transport before any handover/reconnect.
+
+Each ACK issues lease `request.sequence + 1`. The server retains the last eight
+immutable lease issue times, allowing two requests to reference the same lease.
+Capture delta refers to the most recent lease the client knew **at capture**,
+not an ACK received later while polling. Strict sequence ordering, receipt-age
+and main-dispatch checks, USB ownership and expiry checks remain mandatory.
+An accepted display does not get a new lifetime when its ACK is written.
+
+The client waits at most 1.5 seconds from original capture for a complete ACK.
+This is a transport deadline, **not** an extension of display validity. Status
+1 (expired display) and 3 (USB ownership) still issue a lease and independently
+timed phone feedback, so they do not tear down a healthy socket. Invalid
+ordering, framing, CRC, age, oversized data, EOF or an absolute timeout close
+the session as before. Polling cannot renew the deadline of partial responses.
+
+Each real response is consumed once. Charge capture-to-complete-receipt delay
+against navigation and model-navigation freshness; an empty poll never writes
+a new feedback receipt timestamp. Existing phone sequence/session, route cache,
+model-navigation validity and route-completeness rules are unchanged.
+
+This addresses observed stop-and-wait expiry and local timeout-triggered
+reconnects, not every possible Bluetooth or power fault. Ambient's separate
+three-second missing-vehicle-data shutdown remains unchanged. Do not suppress
+that shutdown or preserve stale engagement indicators to disguise packet loss.
 
 Comma uses direct USB first, then the configured Bluetooth peer, with existing
 paired Jetson USB relays retained as further fallbacks. Reset fallback ordering

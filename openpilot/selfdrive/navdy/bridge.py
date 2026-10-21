@@ -181,6 +181,7 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
     last_handover = None
     last_connected_transport = None
     previous_available = False
+    extended_feedback = False
     last_display_dropout = None
     model_navigation = ModelNavigationTracker()
     model_route_path = feedback.with_name(feedback.stem + '-model-route.json')
@@ -207,6 +208,7 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
             usb_probe.close()
             usb_probe = UsbProbe(AdbTransport)
             feedback.unlink(missing_ok=True)
+            extended_feedback = False
             model_navigation.clear('model_link_changed')
             model_route_cache.update(model_navigation)
             next_attempt, failures, candidate_index = 0.0, 0, 0
@@ -218,6 +220,7 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
             usb_probe = UsbProbe(AdbTransport)
             transport = ready
             feedback.unlink(missing_ok=True)
+            extended_feedback = False
             model_navigation.clear('model_link_changed')
             model_route_cache.update(model_navigation)
             if ready is not None:
@@ -265,11 +268,16 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
           payload = live_payload(sm, sequence, sources=sources, door_open=doors.door_open, ambient_override=read_override())
           payload['modelRoute'] = model_navigation.request(time.monotonic())
           exchange_started = time.monotonic()
-          response = (transport.exchange(payload, captured_ns=captured_ns) if transport_name == 'bluetooth'
-                      else transport.exchange(payload))
+          if transport_name == 'bluetooth':
+            replies = transport.exchange_batch(payload, captured_ns=captured_ns)
+          else:
+            response = transport.exchange(payload)
+            received = time.monotonic()
+            replies = [(response, received, (received - exchange_started) * 1000.)]
           received = time.monotonic()
-          age_model_feedback(response, (received - exchange_started) * 1000.)
-          model_navigation.accept(response.get('modelNavigation'), received, received)
+          for response, reply_received, elapsed_ms in replies:
+            age_model_feedback(response, elapsed_ms)
+            model_navigation.accept(response.get('modelNavigation'), reply_received, received)
           cache_token = model_route_cache.update(model_navigation)
           if transport_name == 'usb':
             # Every new cable loss starts with the configured wireless peer,
@@ -292,9 +300,14 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
           if previous_available and missing:
             last_display_dropout = {'at': received, 'sources': missing}
           previous_available = not missing
-          atomic_json(feedback, {'receivedAt': received, 'feedback': response, 'modelRouteCacheToken': cache_token})
+          # No reply means no new phone observation. Leave its original receipt
+          # time intact so existing freshness rules expire it normally.
+          if replies:
+            response, reply_received, _ = replies[-1]
+            extended_feedback = 'navigationFeedback' in response
+            atomic_json(feedback, {'receivedAt': reply_received, 'feedback': response, 'modelRouteCacheToken': cache_token})
           atomic_json(status, {'updatedAt': received, 'connected': True, 'transport': transport_name,
-                               'connectedAt': connected_at, 'extendedFeedback': 'navigationFeedback' in response,
+                               'connectedAt': connected_at, 'extendedFeedback': extended_feedback,
                                'display': {'sequence': sequence, 'onroad': payload['onroad'], 'active': payload['active'],
                                            'ambientState': payload['ambientState'], 'sources': sources},
                                'power': payload['displayPower'],
@@ -314,6 +327,7 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
             transport.close()
             transport = None
           feedback.unlink(missing_ok=True)
+          extended_feedback = False
           model_navigation.clear('model_disconnected')
           model_route_cache.update(model_navigation)
           failures += 1
