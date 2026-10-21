@@ -352,6 +352,18 @@ def test_expiry_poll_does_not_renew_unchanged_frame(tmp_path):
   assert reader.model_read(11.92) is None
 
 
+def test_expiry_poll_survives_an_intervening_freshness_clear(tmp_path):
+  path = tmp_path / 'feedback.json'
+  reader = NavigationReader(path)
+  write_cache(reader.model_route_path)
+  write_feedback(path, packet(), 10.)
+  assert reader.model_read(10.) is not None
+  assert reader.model_read(11.85) is not None
+  write_feedback(path, packet(sequence=2), 11.87)
+  assert not reader.model_tracker._fresh(11.91)
+  assert reader.model_read(11.92).points == tuple(POINTS)
+
+
 def test_reader_only_silence_recovers_same_bridge_cache_without_replay(tmp_path):
   path = tmp_path / 'feedback.json'
   reader = NavigationReader(path)

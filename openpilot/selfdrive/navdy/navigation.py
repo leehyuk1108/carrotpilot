@@ -190,8 +190,8 @@ class NavigationReader:
   def _read(self, now):
     realtime = now is None
     now = time.monotonic() if realtime else now
-    # An expiring observation gets one last read even inside the polling interval.
-    model_expiring = self.model_tracker.value is not None and not self.model_tracker.is_fresh(now)
+    # A crossed deadline gets one last read even if another check already cleared it.
+    model_expiring = self.last_poll < self.model_tracker.deadline <= now
     if now - self.last_poll >= 0.1 or model_expiring:
       self.last_poll = now
       try:

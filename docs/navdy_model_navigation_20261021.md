@@ -94,6 +94,13 @@ model-navigation tests. The final native regression, including the actual
 1231 tests and 146 subtests in 70.05 seconds. These are isolated candidate tests,
 not an inference or driving validation.
 
+A third Claude review found that another freshness check could clear the value
+between clock samples, disabling the value-dependent polling bypass. The gate
+now uses the deadline crossing since the last poll, which survives that clear
+and permits at most one extra poll. Its exact reproducer failed before the fix;
+60 focused tests and the final native 1232-test / 146-subtest regression passed
+(76.12 seconds). An independent reviewer also checked 32 reader/cache scenarios.
+
 Same-signer installed APK hashes were verified on the actual phone (bridge and
 Naver base APKs plus both original splits). The actual Navdy ART helper suite
 passed 22 cases / 912 assertions using `app_process`; plain `dalvikvm` lacked
