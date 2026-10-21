@@ -92,3 +92,41 @@ Five native DBC/door tests cannot run in this macOS environment because
 No claim of vehicle, optical-display, ambient-light or long-duration Bluetooth
 validation follows from these local tests. Parked installation and observation
 remain required; no runtime service has been changed by this patch preparation.
+
+## Device Installation and Follow-Up
+
+On October 21, after fresh deviceState and pandaStates confirmed ignition OFF,
+offroad, controls disallowed and Panda noOutput, installed source commit
+`465b2adf73c184bb0ecc6fbb26b05b9c6b48c419` on WIP-FR. Backed up the original HUD
+APK, affected source and Bluetooth configuration before updating. Invalidated
+the old finalized-overlay marker without deleting its contents. Existing dirty
+generated DBC/build files were preserved. Only navdy_bridge was restarted; no
+driving model/control process or full system restart was requested.
+
+The new Comma client first reconnected to the old v1 HUD. Then installed v164
+with `adb install -r`, preserving app data, signer and pairing. Read the installed
+APK back and verified the exact signed hash recorded above. The existing
+Bluetooth-only configuration is unchanged; USB was used for installation and
+diagnostics, not vehicle-state transmission.
+
+Actual Navdy Android API22 ART execution passed all 1,247 parser assertions,
+eight pipeline cases/40,249 assertions and 70 fake-actuator power checks. The
+five previously excluded native DBC cases also passed on Comma by executing the
+unchanged test function bodies with their declared arguments, without pytest
+decorators. These cases use in-memory CAN frames only, not vehicle writes.
+
+Post-install live observation captured 433 offroad samples over 86.594 seconds:
+protocol2, one receiver session, zero disconnected samples, zero receiver clears,
+zero USB updates and zero nonzero display statuses. RTT median/p99/max was
+116.32/185.87/199.46 ms; maximum consecutive observed ACK receipt gap was 431.06
+ms, maximum receiver age 231.94 ms and at most two requests were in flight. The
+skip counter stayed at its initial value of one. HUD processes remained stable
+at the separately sampled checkpoints. The intended 120-second observation was
+interrupted by SSH reset; it is not a completed 120-second pass.
+
+On October 22, reconnected to the same Comma on its home network with a new boot
+ID. WIP-FR still held the exact installed source commit and navdy_bridge was
+running. Navdy was absent from USB and Bluetooth service discovery timed out,
+so post-reboot peer reconnection could not be verified. Neither the network
+reset nor later peer absence establishes a Bluetooth regression. Optical HUD,
+physical ambient-light, active-driving and long-duration validation remain open.
