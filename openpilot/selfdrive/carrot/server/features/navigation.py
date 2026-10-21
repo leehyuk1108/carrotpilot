@@ -1,5 +1,6 @@
 """Destination management; model-input availability is independent of this UI."""
 import asyncio
+import hashlib
 import json
 import math
 from dataclasses import dataclass, field
@@ -20,6 +21,7 @@ MAX_DESTINATION = 4096
 MAX_STATUS = 65536
 MODEL_STATUS_PATH = Path('/dev/shm/carrot-jetlink-model.json')
 MODEL_STATUS_MAX_AGE = 2.5
+SOURCE_INPUTS = {'network': frozenset(('mapbox', 'network-v1', 'network-v2')), 'navdy': frozenset(('navdy',))}
 MAP_REASONS = frozenset(('ready', 'idle', 'route', 'position', 'instruction', 'tiles',
                          'route_position', 'context_changed', 'slow', 'waiting', 'offroad'))
 INPUT_REASONS = frozenset(('ready', 'unsupported_model', 'navigation_not_yet_available',
@@ -143,27 +145,88 @@ def read_bounded(path, limit):
   return value
 
 
-def map_status(source):
-  # Navdy currently provides guidance, not a complete route. In particular, a
-  # recent PNG from the previous network source must not become its route.
-  if source != 'network':
-    return ('route' if source == 'navdy' else 'source_unavailable'), False
+def recent(stamp, now, limit):
   try:
-    paths = (nav_preview.PREVIEW_PATH, nav_preview.STATUS_PATH)
-    if not all(path.is_file() for path in paths):
-      return 'waiting', False
-    if not all(nav_preview.preview_fresh(path) for path in paths):
-      return 'stale', False
-    if nav_preview.STATUS_PATH.stat().st_size > MAX_STATUS:
-      return 'unavailable', False
-    reason = nav_preview.preview_reason()
-    return (reason if reason in MAP_REASONS else 'unavailable'), True
+    return type(stamp) in (int, float) and math.isfinite(stamp) and stamp > 0 and 0 <= now - stamp < limit
+  except OverflowError:
+    return False
+
+
+def provenance_key(value, source, *, max_age=nav_preview.PREVIEW_MAX_AGE, context=False):
+  # A new file timestamp cannot renew route/TBT observations. Legacy identity-
+  # free metadata remains unverified, including when the selected source is Navdy.
+  if not isinstance(value, dict):
+    return None
+  actual, route_id = value.get('source'), value.get('route_id')
+  now, updated = time.monotonic(), value.get('updated')
+  if (not isinstance(actual, str) or actual not in SOURCE_INPUTS.get(source, ())
+      or not isinstance(route_id, str) or not route_id.isascii() or not route_id.isdecimal()
+      or not 1 <= len(route_id) <= 20 or not 0 < int(route_id) < 2**64 or str(int(route_id)) != route_id
+      or not recent(updated, now, max_age)):
+    return None
+  route_expires = value.get('route_expires')
+  if type(route_expires) not in (int, float) or not now < route_expires <= updated + 3.:
+    return None
+  if context:
+    expires = value.get('context_expires')
+    if type(expires) not in (int, float) or not now < expires <= min(route_expires, updated + 2.):
+      return None
+  return actual, route_id
+
+
+def read_preview_status():
+  try:
+    value = json.loads(read_bounded(nav_preview.STATUS_PATH, MAX_STATUS))
+    if not isinstance(value, dict):
+      raise ValueError('invalid preview status')
+    if not nav_preview.preview_fresh(nav_preview.STATUS_PATH):
+      return {}, False, 'stale'
+    if not recent(value.get('updated'), time.monotonic(), nav_preview.PREVIEW_MAX_AGE):
+      return {}, False, 'provenance_unverified'
+    reason = value.get('reason')
+    return value, True, reason if isinstance(reason, str) and reason in MAP_REASONS else 'unavailable'
+  except FileNotFoundError:
+    return {}, False, 'waiting'
   except (OSError, ValueError, TypeError, AttributeError):
-    return 'unavailable', False
+    return {}, False, 'unavailable'
+
+
+def map_snapshot(source):
+  if source not in SOURCE_INPUTS:
+    return 'source_unavailable', False, {}, None
+  metadata, fresh, reason = read_preview_status()
+  try:
+    if not nav_preview.PREVIEW_PATH.is_file():
+      return 'waiting', False, metadata, None
+    if not nav_preview.preview_fresh(nav_preview.PREVIEW_PATH):
+      return 'stale', False, metadata, None
+    if reason == 'ready':
+      if not provenance_key(metadata.get('provenance'), source, context=True):
+        return 'provenance_unverified', fresh, metadata, None
+      if not recent(metadata.get('rendered_at'), time.monotonic(), nav_preview.PREVIEW_MAX_AGE):
+        return 'stale', False, metadata, None
+      image = read_bounded(nav_preview.PREVIEW_PATH, MAX_RESPONSE)
+      if not image.startswith(b'\x89PNG\r\n\x1a\n') or hashlib.sha256(image).hexdigest() != metadata.get('png_sha256'):
+        return 'unavailable', False, metadata, None
+      return reason, fresh, metadata, image
+    return reason, fresh, metadata, None
+  except (OSError, ValueError):
+    return 'unavailable', False, metadata, None
+
+
+def map_status(source):
+  reason, fresh, _, _ = map_snapshot(source)
+  return reason, fresh
+
+
+def valid_for_ms(*deadlines):
+  return max(0, int((min(deadlines) - time.monotonic()) * 1000))
 
 
 def navigation_status(source):
-  map_reason, map_fresh = map_status(source)
+  map_reason, map_fresh, metadata, _ = map_snapshot(source)
+  current_key = provenance_key(metadata.get('provenance'), source)
+  current_context = provenance_key(metadata.get('provenance'), source, context=True)
   model, fresh = {}, False
   reason = 'model_status_missing'
   try:
@@ -171,8 +234,7 @@ def navigation_status(source):
     if not isinstance(model, dict):
       raise ValueError('invalid model status')
     updated = model.get('updated')
-    fresh = (type(updated) in (int, float) and math.isfinite(updated) and updated > 0
-             and 0 <= time.monotonic() - updated < MODEL_STATUS_MAX_AGE)
+    fresh = recent(updated, time.monotonic(), MODEL_STATUS_MAX_AGE)
     reason = 'model_status_stale'
   except FileNotFoundError:
     pass
@@ -196,16 +258,41 @@ def navigation_status(source):
           reason = 'tbt_unavailable'
         elif not flags['nav_map_available']:
           reason = 'map_not_yet_available'
-  if source != 'network':
-    reason = 'route_unavailable' if source == 'navdy' else 'source_unavailable'
+  model_key = provenance_key(model.get('nav_provenance'), source, max_age=MODEL_STATUS_MAX_AGE)
+  model_context = provenance_key(model.get('nav_provenance'), source, max_age=MODEL_STATUS_MAX_AGE, context=True)
+  matched = current_key is not None and current_key == model_key
+  context_matched = current_context is not None and current_context == model_context
+  if fresh and flags['active'] and flags['nav_model'] and flags['nav_input_supported']:
+    if flags['nav_route_available'] and not matched:
+      reason = 'provenance_unverified'
+    elif (flags['nav_tbt_available'] or flags['nav_map_available']) and not context_matched:
+      reason = 'context_expired'
+    if source not in SOURCE_INPUTS:
+      reason = 'source_unavailable'
+  if not (flags['active'] and flags['nav_model'] and flags['nav_input_supported'] and matched):
     for key in ('nav_route_available', 'nav_tbt_available', 'nav_map_available'):
       flags[key] = False
+  elif not context_matched:
+    flags['nav_tbt_available'] = flags['nav_map_available'] = False
+  verified = fresh and flags['active'] and flags['nav_model'] and flags['nav_input_supported'] and context_matched
+  lifetime = valid_for_ms(model['updated'] + MODEL_STATUS_MAX_AGE,
+                          model['nav_provenance']['updated'] + MODEL_STATUS_MAX_AGE,
+                          model['nav_provenance']['context_expires'], metadata['updated'] + nav_preview.PREVIEW_MAX_AGE,
+                          metadata['provenance']['updated'] + nav_preview.PREVIEW_MAX_AGE,
+                          metadata['provenance']['context_expires']) if verified and reason == 'ready' else 0
+  if reason == 'ready' and not lifetime:
+    reason = 'context_expired'
   # Preview and inference travel independently. Neither a destination nor PNG
   # proves that a live N16 model has accepted route, guidance and map inputs.
   return {
     'map_ready': map_reason == 'ready', 'map_reason': map_reason, 'map_status_fresh': map_fresh,
     'model_input_ready': reason == 'ready', 'pipeline_status': reason, 'reason': reason,
     'model_status_fresh': fresh, 'model_active': flags.pop('active'), **flags,
+    'map_provenance_verified': current_context is not None,
+    'map_navigation_source': current_key[0] if current_key else '', 'map_route_id': current_key[1] if current_key else '',
+    'model_provenance_verified': verified,
+    'model_navigation_source': model_key[0] if verified else '', 'model_route_id': model_key[1] if verified else '',
+    'model_input_valid_for_ms': lifetime,
   }
 
 
@@ -261,18 +348,25 @@ async def preview(request):
   except OSError:
     pass
   source = navigation_source()
-  reason, _ = map_status(source)
+  reason, _, metadata, image = map_snapshot(source)
   headers = {'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff'}
   if reason == 'ready':
-    try:
-      image = read_bounded(nav_preview.PREVIEW_PATH, MAX_RESPONSE)
-      if not image.startswith(b'\x89PNG\r\n\x1a\n'):
-        raise ValueError('invalid preview')
-      reason, _ = map_status(navigation_source())
-      if reason == 'ready':
-        return web.Response(body=image, content_type='image/png', headers={**headers, 'X-Nav-Map-Status': reason})
-    except (OSError, ValueError):
-      reason = 'unavailable'
+    # Two files are replaced independently. Bind the bytes to the status, then
+    # recheck source/generation after reading; never relabel an earlier PNG.
+    current, _, current_reason = read_preview_status()
+    key = provenance_key(metadata.get('provenance'), source, context=True)
+    if (navigation_source() == source and current_reason == 'ready' and key is not None
+        and provenance_key(current.get('provenance'), source, context=True) == key
+        and current.get('png_sha256') == metadata.get('png_sha256')
+        and recent(metadata.get('rendered_at'), time.monotonic(), nav_preview.PREVIEW_MAX_AGE)):
+      lifetime = valid_for_ms(metadata['updated'] + nav_preview.PREVIEW_MAX_AGE,
+                              metadata['rendered_at'] + nav_preview.PREVIEW_MAX_AGE,
+                              metadata['provenance']['updated'] + nav_preview.PREVIEW_MAX_AGE,
+                              metadata['provenance']['context_expires'])
+      if lifetime:
+        return web.Response(body=image, content_type='image/png', headers={**headers, 'X-Nav-Map-Status': reason,
+                            'X-Nav-Map-Source': key[0], 'X-Nav-Map-Route': key[1], 'X-Nav-Map-Valid-For-Ms': str(lifetime)})
+    reason = 'context_changed'
   return web.Response(status=204, headers={**headers, 'X-Nav-Map-Status': reason})
 
 

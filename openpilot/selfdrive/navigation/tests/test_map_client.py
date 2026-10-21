@@ -73,7 +73,7 @@ def test_upstream_stream_context_timestamps_and_pixel_scale(setup):
   assert reader.status['nav_map_available'] and not reader.status['nav_input_not_yet_available']
 
 
-@pytest.mark.parametrize('source,count,ready', [('navdy', 5627, True), ('navdy', 8192, True),
+@pytest.mark.parametrize('source,count,ready', [('navdy', 5627, True), ('navdy', 5646, True), ('navdy', 8192, True),
                                                ('navdy', 8193, False), ('mapbox', 4097, False),
                                                ('network-v2', 4097, False)])
 def test_full_navdy_route_has_separate_bounded_capacity(setup, source, count, ready):
@@ -84,6 +84,31 @@ def test_full_navdy_route_has_separate_bounded_capacity(setup, source, count, re
   result = reader.update(model)
   assert bool(result['nav_map'].any()) == ready
   assert bool(result['navigation'].any()) == ready
+  assert bool(reader.status['nav_provenance']) == ready
+  if ready:
+    assert reader.status['nav_provenance']['source'] == source
+    assert reader.status['nav_provenance']['route_id'] == '123'
+
+
+def test_diagnostic_provenance_tracks_route_replacement_expiry_and_model_exit(setup):
+  clock, context, client, model, reader = setup
+  reader.update(model)
+  assert reader.status['nav_provenance'] == {'source': 'mapbox', 'route_id': '123', 'updated': 10.,
+                                          'route_expires': 12.6, 'context_expires': 11.7}
+  context['navRoute'].navigationSource = context['navInstructionCarrot'].navigationSource = 'navdy'
+  context['navRoute'].carrotRouteId = context['navInstructionCarrot'].carrotRouteId = 2**64 - 1
+  result = reader.update(model)
+  assert not result['nav_map'].any() and result['navigation'].any()
+  assert reader.status['nav_provenance']['source'] == 'navdy'
+  assert reader.status['nav_provenance']['route_id'] == str(2**64 - 1)
+  assert reader.status['nav_input_reason'] == 'map_not_yet_available'
+  clock[0] = 11.71
+  assert_zero(reader.update(model))
+  assert reader.status['nav_provenance']['context_expires'] == 0.
+  model.active = False
+  assert reader.update(model) == {}
+  assert reader.status['nav_provenance'] == {}
+  assert client.receives == [0, 0]
 
 
 @pytest.mark.parametrize('services', [('navRoute',), ('navInstructionCarrot',), ('navRoute', 'navInstructionCarrot')])

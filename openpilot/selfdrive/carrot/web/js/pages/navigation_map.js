@@ -79,6 +79,7 @@
     ["navigation_not_yet_available", tr("내비 입력 대기 중", "Waiting for navigation input")],
     ["navigation_unavailable", tr("내비 입력 없음", "Navigation input unavailable")],
     ["source_unavailable", tr("내비 입력 소스 미확인", "Navigation source unverified")],
+    ["provenance_unverified", tr("현재 소스·경로 연결 미확인", "Current source and route unverified")],
   ]);
   const mapReasons = new Map([
     ["position", tr("현재 GPS 위치 없음", "Current GPS position unavailable")],
@@ -89,6 +90,7 @@
     ["slow", tr("지도 생성 지연", "Map rendering delayed")],
     ["stale", tr("지도 미리보기 만료", "Map preview expired")],
     ["source_unavailable", tr("내비 입력 소스 미확인", "Navigation source unverified")],
+    ["provenance_unverified", tr("현재 소스·경로 연결 미확인", "Current source and route unverified")],
     ["idle", tr("지도 생성 대기 중", "Waiting for map rendering")],
     ["waiting", tr("지도 생성 대기 중", "Waiting for map rendering")],
     ["offroad", tr("현재 지도 미리보기 없음", "Map preview currently unavailable")],
@@ -96,9 +98,12 @@
   ]);
   let snapshot = null, alive = true, busy = false;
   let searchGeneration = 0, statusGeneration = 0, mapGeneration = 0, writeGeneration = 0;
-  let searchController, statusController, mapController, imageUrl, refreshTimer;
+  let searchController, statusController, mapController, imageUrl, refreshTimer, modelExpiryTimer, mapExpiryTimer;
   let resultButtons = [];
   const requests = new Set();
+  const sourceMatches = (configured, actual) => configured === "navdy" ? actual === "navdy"
+    : configured === "network" && ["mapbox", "network-v1", "network-v2"].includes(actual);
+  const routeId = (value) => typeof value === "string" && /^[1-9][0-9]{0,19}$/.test(value);
 
   function controls() {
     const editable = snapshot?.destination_editable === true;
@@ -120,6 +125,7 @@
 
   async function request(path, options = {}, kind = "json", controller = new AbortController()) {
     requests.add(controller);
+    const started = performance.now();
     const timeout = setTimeout(() => controller.abort(), 12000);
     try {
       const response = await fetch(`/api/navigation/${path}`, {
@@ -131,7 +137,9 @@
         const type = response.headers.get("Content-Type") || "";
         const blob = response.status === 200 && reason === "ready" && type.split(";")[0] === "image/png"
           ? await response.blob() : null;
-        return { reason, blob };
+        const lifetime = Number(response.headers.get("X-Nav-Map-Valid-For-Ms"));
+        return { reason, blob, source: response.headers.get("X-Nav-Map-Source"), route: response.headers.get("X-Nav-Map-Route"),
+          lifetime: Number.isFinite(lifetime) && lifetime > 0 && lifetime <= 2000 ? lifetime - (performance.now() - started) : 0 };
       }
       return await response.json();
     } finally {
@@ -148,33 +156,48 @@
     return { place_name: value.place_name.trim(), latitude: value.latitude, longitude: value.longitude };
   }
 
-  function renderSnapshot(value) {
+  function renderSnapshot(value, elapsed) {
+    clearTimeout(modelExpiryTimer);
     snapshot = {
       destination: place(value.destination), key_configured: value.key_configured === true,
       destination_editable: value.destination_editable === true && value.navigation_source === "network"
         && value.destination?.place_name !== "External Navi",
       navigation_source: value.navigation_source, pipeline_status: value.pipeline_status,
+      map_navigation_source: value.map_navigation_source, map_route_id: value.map_route_id,
     };
     $("current").textContent = snapshot.destination?.place_name || tr("저장된 목적지 없음", "No saved destination");
     const source = { network: tr("네트워크", "Network"), navdy: "Navdy" }[snapshot.navigation_source] || tr("알 수 없음", "Unknown");
-    $("sourceStatus").textContent = `${source} · ${tr("실행 상태 미확인", "runtime unverified")}`;
+    const mapVerified = value.map_provenance_verified === true && routeId(value.map_route_id)
+      && sourceMatches(snapshot.navigation_source, value.map_navigation_source);
+    const modelVerified = value.model_provenance_verified === true && routeId(value.model_route_id)
+      && sourceMatches(snapshot.navigation_source, value.model_navigation_source)
+      && value.model_navigation_source === value.map_navigation_source && value.model_route_id === value.map_route_id;
+    $("sourceStatus").textContent = `${source} · ${mapVerified || modelVerified
+      ? tr("현재 경로 확인됨", "current route verified") : tr("실행 상태 미확인", "runtime unverified")}`;
     $("keyStatus").textContent = snapshot.key_configured ? tr("등록됨", "Configured") : tr("없음", "Missing");
     $("editStatus").textContent = snapshot.destination_editable
       ? tr("목적지 저장은 내비 입력 선택을 바꾸지 않습니다.", "Saving a destination does not change the selected source.")
       : tr("선택된 입력 또는 외부 내비가 목적지를 관리합니다. 검색만 가능합니다.", "Destination managed by the selected source or external navigation. Search remains available.");
     // A ready PNG or model selection alone must never promote inference status.
-    const ready = value.model_input_ready === true && value.model_status_fresh === true
+    const lifetime = typeof value.model_input_valid_for_ms === "number" && Number.isFinite(value.model_input_valid_for_ms)
+      && value.model_input_valid_for_ms <= 2500 ? value.model_input_valid_for_ms - elapsed : 0;
+    const ready = lifetime > 0 && value.model_input_ready === true && value.model_status_fresh === true
       && value.model_active === true && value.nav_model === true && value.nav_input_supported === true
       && value.nav_route_available === true && value.nav_tbt_available === true && value.nav_map_available === true
-      && value.pipeline_status === "ready" && value.navigation_source === "network";
+      && value.pipeline_status === "ready" && modelVerified;
     const reason = value.pipeline_status === "ready" && !ready ? "model_status_unavailable" : value.pipeline_status;
     $("pipelineStatus").textContent = inputReasons.get(reason) || unavailable;
     $("pipelineStatus").setAttribute("data-ready", String(ready));
+    if (ready) modelExpiryTimer = setTimeout(() => {
+      $("pipelineStatus").textContent = inputReasons.get("model_status_stale");
+      $("pipelineStatus").setAttribute("data-ready", "false");
+    }, lifetime);
     $("pipelineReason").textContent = optionalInput;
     controls();
   }
 
   function waiting(message) {
+    clearTimeout(mapExpiryTimer);
     $("map").hidden = true;
     $("map").removeAttribute("src");
     if (imageUrl) URL.revokeObjectURL(imageUrl);
@@ -195,16 +218,19 @@
     const generation = mapGeneration;
     mapController = new AbortController();
     try {
-      const { reason, blob } = await request("map.png", {}, "map", mapController);
+      const { reason, blob, source, route, lifetime } = await request("map.png", {}, "map", mapController);
       if (!alive || generation !== mapGeneration) return;
-      if (blob?.size) {
+      const matched = sourceMatches(snapshot?.navigation_source, source) && routeId(route)
+        && source === snapshot?.map_navigation_source && route === snapshot?.map_route_id;
+      if (blob?.size && matched && lifetime > 0) {
         imageUrl = URL.createObjectURL(blob);
         $("map").src = imageUrl;
         $("map").hidden = false;
         $("mapStatus").hidden = true;
         $("attribution").hidden = false;
+        mapExpiryTimer = setTimeout(() => waiting(mapReasons.get("stale")), lifetime);
       } else {
-        waiting(mapReasons.get(reason) || tr("지도 미리보기 없음", "Map preview unavailable"));
+        waiting(mapReasons.get(blob?.size ? (matched ? "stale" : "context_changed") : reason) || tr("지도 미리보기 없음", "Map preview unavailable"));
       }
     } catch (_) {
       if (alive && generation === mapGeneration) waiting(failure(0));
@@ -218,14 +244,16 @@
     statusController?.abort();
     statusController = new AbortController();
     snapshot = null;
+    clearTimeout(modelExpiryTimer);
     controls();
     invalidateMap();
     $("pipelineStatus").textContent = checking;
     $("pipelineStatus").setAttribute("data-ready", "false");
     try {
+      const started = performance.now();
       const value = await request("destination", {}, "json", statusController);
       if (!alive || generation !== statusGeneration) return;
-      renderSnapshot(value);
+      renderSnapshot(value, performance.now() - started);
       await preview();
     } catch (_) {
       if (!alive || generation !== statusGeneration) return;
@@ -302,6 +330,7 @@
     statusController?.abort();
     invalidateSearch();
     invalidateMap();
+    clearTimeout(modelExpiryTimer);
     $("pipelineStatus").textContent = checking;
     $("pipelineStatus").setAttribute("data-ready", "false");
     controls();
@@ -332,6 +361,7 @@
   window.addEventListener("pagehide", () => {
     alive = false;
     clearTimeout(refreshTimer);
+    clearTimeout(modelExpiryTimer);
     writeGeneration += 1;
     searchGeneration += 1; statusGeneration += 1; mapGeneration += 1;
     requests.forEach((controller) => controller.abort());
@@ -345,6 +375,7 @@
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) {
       clearTimeout(refreshTimer);
+      clearTimeout(modelExpiryTimer);
       statusGeneration += 1;
       statusController?.abort();
       invalidateMap();

@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import hashlib
 from contextlib import asynccontextmanager
 import importlib.util
 import json
@@ -12,6 +13,8 @@ from types import SimpleNamespace as NS
 import pytest
 from aiohttp import ClientError, web
 from aiohttp.test_utils import TestClient, TestServer
+
+from openpilot.selfdrive.navigation.tests.test_map_client import setup as setup
 
 
 @pytest.fixture
@@ -143,14 +146,23 @@ def test_malformed_saved_destination_and_missing_key(feature):
 PNG = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aMZkAAAAASUVORK5CYII=')
 
 
-def write_preview(feature, reason='ready'):
+def provenance(source='mapbox', route_id='123', *, now=None):
+  now = time.monotonic() if now is None else now
+  return {'source': source, 'route_id': route_id, 'updated': now, 'route_expires': now + 3., 'context_expires': now + 2.}
+
+
+def write_preview(feature, reason='ready', **changes):
   feature.nav_preview.PREVIEW_PATH.write_bytes(PNG)
-  feature.nav_preview.STATUS_PATH.write_text(json.dumps({'reason': reason}))
+  metadata = {'reason': reason, 'provenance': provenance(), 'updated': time.monotonic(),
+              'rendered_at': time.monotonic(), 'png_sha256': hashlib.sha256(PNG).hexdigest()}
+  metadata.update(changes)
+  feature.nav_preview.STATUS_PATH.write_text(json.dumps(metadata))
 
 
 def write_model(feature, **changes):
-  value = dict(updated=time.monotonic(), active=True, nav_model=True, nav_input_supported=True,
-               nav_route_available=True, nav_tbt_available=True, nav_map_available=True, nav_input_reason='ready')
+  value = {'updated': time.monotonic(), 'active': True, 'nav_model': True, 'nav_input_supported': True,
+           'nav_route_available': True, 'nav_tbt_available': True, 'nav_map_available': True, 'nav_input_reason': 'ready',
+           'nav_provenance': provenance()}
   value.update(changes)
   feature.MODEL_STATUS_PATH.write_text(json.dumps(value))
 
@@ -211,8 +223,10 @@ def test_model_status_requires_recent_monotonic_timestamp(feature, updated):
 
 
 def test_model_freshness_boundary_and_independence_from_preview(feature, monkeypatch):
-  write_model(feature, updated=100)
   monkeypatch.setattr(feature.time, 'monotonic', lambda: 102.499)
+  write_preview(feature)
+  feature.nav_preview.PREVIEW_PATH.unlink()
+  write_model(feature, updated=100)
   assert feature.navigation_status('network')['model_input_ready']
   assert not feature.navigation_status('network')['map_ready']
   monkeypatch.setattr(feature.time, 'monotonic', lambda: 102.5)
@@ -253,7 +267,7 @@ def test_preview_needs_both_fresh_image_and_fresh_reason(feature, filename, cond
   if condition == 'missing':
     path.unlink()
   else:
-    stamp = time.time() + (60 if condition == 'future' else -3)
+    stamp = time.time() + (60 if condition == 'future' else -3)  # noqa: TID251 - filesystem mtime
     os.utime(path, (stamp, stamp))
   async def run():
     async with client_for(feature) as client:
@@ -277,7 +291,7 @@ def test_corrupt_or_oversized_image_is_not_served(feature, payload):
   asyncio.run(run())
 
 
-@pytest.mark.parametrize('source,reason', [(1, 'route'), ('invalid', 'source_unavailable')])
+@pytest.mark.parametrize('source,reason', [(1, 'provenance_unverified'), ('invalid', 'source_unavailable')])
 def test_readonly_preview_allowed_but_previous_network_route_cannot_authorize_navdy(feature, source, reason):
   write_preview(feature)
   write_model(feature)
@@ -307,6 +321,183 @@ def test_external_destination_allows_preview_without_taking_ownership(feature, m
       assert not status['model_input_ready']
       assert (await client.get('/api/navigation/map.png')).status == 200
       assert feature.values == original
+  asyncio.run(run())
+
+
+@pytest.mark.parametrize('source,configured', [('navdy', 1), ('mapbox', 0), ('network-v1', 0), ('network-v2', 0)])
+def test_matching_selected_route_can_show_map_and_model_without_destination_ownership(feature, source, configured):
+  route = provenance(source, '18446744073709551615')
+  write_preview(feature, provenance=route)
+  write_model(feature, nav_provenance=route)
+  feature.values['CarrotNaviSource'] = configured
+  async def run():
+    async with client_for(feature) as client:
+      status = await (await client.get('/api/navigation/destination')).json()
+      assert status['model_input_ready'] and status['map_ready']
+      assert status['model_provenance_verified'] and status['map_provenance_verified']
+      assert status['model_navigation_source'] == status['map_navigation_source'] == source
+      assert status['model_route_id'] == status['map_route_id'] == route['route_id']
+      assert status['destination_editable'] == (configured == 0)
+      response = await client.get('/api/navigation/map.png')
+      assert response.status == 200 and await response.read() == PNG
+      assert response.headers['X-Nav-Map-Source'] == source
+      assert response.headers['X-Nav-Map-Route'] == route['route_id']
+  asyncio.run(run())
+
+
+@pytest.mark.parametrize('model_state,reason', [('missing', 'model_status_missing'), ('inactive', 'model_inactive'),
+                                              ('stale', 'model_status_stale'), ('unsupported', 'unsupported_model')])
+def test_navdy_preview_does_not_promote_a_missing_or_off_jetson(feature, model_state, reason):
+  feature.values['CarrotNaviSource'] = 1
+  write_preview(feature, provenance=provenance('navdy'))
+  if model_state != 'missing':
+    changes = {'inactive': {'active': False}, 'stale': {'updated': time.monotonic() - 3.},
+               'unsupported': {'nav_model': False}}[model_state]
+    write_model(feature, nav_provenance=provenance('network-v2'), **changes)
+  status = feature.navigation_status('navdy')
+  assert status['map_ready']
+  assert status['pipeline_status'] == reason and not status['model_input_ready']
+  assert not status['nav_route_available'] and not status['nav_tbt_available'] and not status['nav_map_available']
+
+
+@pytest.mark.parametrize('preview_state', ['missing', 'stale', 'legacy', 'no_gps'])
+@pytest.mark.parametrize('model_state', ['missing', 'live'])
+def test_offroad_missing_model_and_unproven_preview_do_not_claim_live_navdy_input(feature, preview_state, model_state):
+  feature.values['CarrotNaviSource'] = 1
+  if preview_state != 'missing':
+    write_preview(feature, reason='position' if preview_state == 'no_gps' else 'ready',
+                  provenance={} if preview_state == 'no_gps' else provenance('navdy'))
+    if preview_state == 'stale':
+      stamp = time.time() - 3.  # noqa: TID251 - filesystem mtime
+      os.utime(feature.nav_preview.STATUS_PATH, (stamp, stamp))
+    elif preview_state == 'legacy':
+      feature.nav_preview.STATUS_PATH.write_text('{"reason":"ready"}')
+  if model_state == 'live':
+    write_model(feature, nav_provenance=provenance('navdy'))
+  before = feature.MODEL_STATUS_PATH.read_bytes() if feature.MODEL_STATUS_PATH.exists() else None
+  status = feature.navigation_status('navdy')
+  assert not status['model_input_ready'] and not status['map_ready']
+  assert not status['nav_map_available'] and not status['model_input_valid_for_ms']
+  assert status['pipeline_status'] == ('model_status_missing' if model_state == 'missing' else 'provenance_unverified')
+  assert status['model_status_fresh'] == (model_state == 'live')
+  assert (feature.MODEL_STATUS_PATH.read_bytes() if feature.MODEL_STATUS_PATH.exists() else None) == before
+
+
+def test_model_with_no_png_still_requires_matching_current_context(feature):
+  write_preview(feature, provenance=provenance('navdy'))
+  write_model(feature, nav_provenance=provenance('navdy'))
+  feature.nav_preview.PREVIEW_PATH.unlink()
+  status = feature.navigation_status('navdy')
+  assert status['model_input_ready'] and not status['map_ready']
+  assert 0 < status['model_input_valid_for_ms'] <= 2000
+  feature.nav_preview.STATUS_PATH.unlink()
+  assert not feature.navigation_status('navdy')['model_input_ready']
+
+
+def test_real_map_input_and_preview_writer_metadata_roundtrip_for_full_navdy_route(feature, setup):
+  _, context, _, model, reader = setup
+  context['navRoute'].navigationSource = context['navInstructionCarrot'].navigationSource = 'navdy'
+  context['navRoute'].coordinates *= 2823
+  feature.values['CarrotNaviSource'] = 1
+  inputs = reader.update(model)
+  feature.nav_preview.write_preview(inputs['nav_map'][0, 0].astype('uint8'), feature.nav_preview.PREVIEW_PATH,
+                                    provenance=feature.nav_preview.diagnostic_provenance(context, 10.), rendered_at=9.8)
+  write_model(feature, **reader.status)
+  status = feature.navigation_status('navdy')
+  assert status['map_ready'] and status['model_input_ready']
+  assert status['model_route_id'] == '123' and status['model_navigation_source'] == 'navdy'
+  assert status['model_input_valid_for_ms'] == 1699 or status['model_input_valid_for_ms'] == 1700
+  model.active = False
+  reader.update(model)
+  write_model(feature, **reader.status, active=False)
+  status = feature.navigation_status('navdy')
+  assert status['map_ready'] and not status['model_input_ready'] and status['pipeline_status'] == 'model_inactive'
+
+
+@pytest.mark.parametrize('field,value', [
+  ('source', 'network-v2'), ('source', ''), ('source', ['navdy']), ('source', 'access_token=secret'),
+  ('route_id', '124'), ('route_id', 123), ('route_id', True), ('route_id', '0'), ('route_id', '0123'),
+  ('route_id', '18446744073709551616'), ('route_id', '1' * 100), ('route_id', '\u0661'),
+  ('updated', 'stale'), ('updated', 'future'), ('updated', float('nan')), ('updated', 10**400),
+  ('route_expires', 0), ('route_expires', float('inf')), ('context_expires', 0), ('context_expires', float('inf')),
+])
+def test_navdy_model_must_match_current_renderer_context_without_renewing_deadlines(feature, field, value):
+  write_preview(feature, provenance=provenance('navdy'))
+  model_context = provenance('navdy')
+  if value == 'stale':
+    value = time.monotonic() - 3.
+  elif value == 'future':
+    value = time.monotonic() + 1.
+  model_context[field] = value
+  write_model(feature, nav_provenance=model_context)
+  status = feature.navigation_status('navdy')
+  assert status['map_ready'] and not status['model_input_ready']
+  assert not status['model_provenance_verified'] and not status['nav_map_available']
+  assert 'secret' not in json.dumps(status)
+
+
+@pytest.mark.parametrize('source', ['network', 'navdy'])
+@pytest.mark.parametrize('legacy', ['preview', 'model', 'both'])
+def test_unproven_legacy_metadata_never_authorizes_current_inputs(feature, source, legacy):
+  actual = 'navdy' if source == 'navdy' else 'mapbox'
+  write_preview(feature, provenance=provenance(actual))
+  write_model(feature, nav_provenance=provenance(actual))
+  if legacy in ('preview', 'both'):
+    feature.nav_preview.STATUS_PATH.write_text(json.dumps({'reason': 'ready'}))
+  if legacy in ('model', 'both'):
+    write_model(feature, nav_provenance=None)
+  status = feature.navigation_status(source)
+  assert not status['model_input_ready'] and not status['nav_route_available']
+  assert status['map_ready'] == (legacy == 'model')
+
+
+@pytest.mark.parametrize('condition', ['source', 'generation', 'expired', 'future', 'render_old', 'hash'])
+def test_current_navdy_preview_provenance_is_bounded_and_bound_to_png(feature, condition):
+  feature.values['CarrotNaviSource'] = 1
+  current = provenance('navdy')
+  changes = {'provenance': current}
+  if condition == 'source':
+    current['source'] = 'mapbox'
+  elif condition == 'generation':
+    current['route_id'] = ''
+  elif condition == 'expired':
+    current['context_expires'] = time.monotonic()
+  elif condition == 'future':
+    current['updated'] += 10.
+  elif condition == 'render_old':
+    changes['rendered_at'] = time.monotonic() - 2.
+  else:
+    changes['png_sha256'] = '0' * 64
+  write_preview(feature, **changes)
+  async def run():
+    async with client_for(feature) as client:
+      assert not (await (await client.get('/api/navigation/destination')).json())['map_ready']
+      assert (await client.get('/api/navigation/map.png')).status == 204
+  asyncio.run(run())
+
+
+@pytest.mark.parametrize('change', ['source', 'generation', 'png', 'legacy', 'cancel'])
+def test_preview_rechecks_source_route_and_bytes_after_read(feature, monkeypatch, change):
+  feature.values['CarrotNaviSource'] = 1
+  write_preview(feature, provenance=provenance('navdy'))
+  read = feature.read_bounded
+  def replace_after_read(path, limit):
+    result = read(path, limit)
+    if path == feature.nav_preview.PREVIEW_PATH:
+      if change == 'source':
+        feature.values['CarrotNaviSource'] = 0
+      elif change == 'legacy':
+        feature.nav_preview.STATUS_PATH.write_text('{"reason":"ready"}')
+      else:
+        write_preview(feature, reason='route' if change == 'cancel' else 'ready',
+                      provenance=provenance('navdy', '124' if change == 'generation' else '123'),
+                      png_sha256='0' * 64 if change == 'png' else hashlib.sha256(PNG).hexdigest())
+    return result
+  monkeypatch.setattr(feature, 'read_bounded', replace_after_read)
+  async def run():
+    async with client_for(feature) as client:
+      response = await client.get('/api/navigation/map.png')
+      assert response.status == 204 and response.headers['X-Nav-Map-Status'] == 'context_changed'
   asyncio.run(run())
 
 

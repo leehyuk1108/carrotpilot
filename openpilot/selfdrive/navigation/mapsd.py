@@ -8,7 +8,7 @@ import numpy as np
 from openpilot.selfdrive.navigation.helpers import ParkedPosition
 from openpilot.selfdrive.navigation.jetlink_demand import jetlink_map_demand
 from openpilot.selfdrive.navigation.pmtiles import PMTiles
-from openpilot.selfdrive.navigation.preview import write_preview, preview_fresh, WEB_DEMAND_PATH
+from openpilot.selfdrive.navigation.preview import diagnostic_provenance, write_preview, preview_fresh, WEB_DEMAND_PATH
 from openpilot.selfdrive.navigation.renderer import SIZE, MapRenderer, Position
 from openpilot.selfdrive.navigation.route import RouteTracker, route_coordinates
 from openpilot.selfdrive.navigation.provenance import context_ready, route_point_limit
@@ -84,6 +84,7 @@ def main():
       ready = demand and tracker is not None and gps is not None and fresh_tbt
       if now >= next_render or (was_ready and not ready):
         started, cpu_started = time.monotonic(), time.process_time()
+        rendered_context = diagnostic_provenance(sm, started)
         image.fill(0)
         valid = False
         reason = 'idle' if not demand else 'route' if tracker is None else 'position' if gps is None else 'instruction' if not fresh_tbt else 'tiles'
@@ -129,7 +130,10 @@ def main():
         except OSError:
           cloudlog.warning('mapsd: model snapshot unavailable')
         if finished >= next_preview:
-          write_preview(image, reason=reason)
+          current_context = diagnostic_provenance(sm, time.monotonic())
+          same_context = all(rendered_context.get(key) == current_context.get(key) for key in ('source', 'route_id'))
+          write_preview(image, reason=reason if same_context else 'context_changed',
+                        provenance=current_context, rendered_at=started)
           next_preview = finished + .5
         diagnostics.record(render_ms=(finished - started) * 1000, cpu_ms=cpu * 1000,
                            context={'map_valid': valid, 'route_points': len(route), 'interval': render_interval(cpu),

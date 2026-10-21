@@ -5,6 +5,7 @@ import numpy as np
 
 from openpilot.selfdrive.navigation.helpers import finite_number, navigation_input
 from openpilot.selfdrive.navigation.provenance import context_ready, fresh, route_point_limit
+from openpilot.selfdrive.navigation.preview import diagnostic_provenance
 
 MAP_SHAPE = (1, 1, 256, 256)
 NAVIGATION_SHAPE = (1, 47)
@@ -57,6 +58,7 @@ class MapInput:
       'nav_tbt_available': tbt,
       'nav_map_available': image,
       'nav_input_reason': reason,
+      'nav_provenance': diagnostic_provenance(self.sm, time.monotonic()) if route and self.sm is not None else {},
     }
 
   def _read_map(self, now):

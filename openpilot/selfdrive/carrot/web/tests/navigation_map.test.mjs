@@ -17,8 +17,12 @@ const initial = {
   destination: null, key_configured: true, map_ready: false, model_input_ready: false,
   pipeline_status: "model_status_missing", navigation_source: "network", source_scope: "configured",
   destination_editable: true, reason: "model_status_missing",
+  map_navigation_source: "mapbox", map_route_id: "123",
 };
 function response(value, status = 200, headers = {}, blob = { size: 12 }) {
+  if (headers["X-Nav-Map-Status"] === "ready") {
+    headers = { "X-Nav-Map-Source": "mapbox", "X-Nav-Map-Route": "123", "X-Nav-Map-Valid-For-Ms": "1500", ...headers };
+  }
   return {
     ok: status >= 200 && status < 300, status,
     json: async () => value, blob: async () => blob,
@@ -51,7 +55,7 @@ async function page({ state = {}, fetcher, language = "en", storageThrows = fals
   document.createElement = () => new Element();
   let blobId = 0, timerId = 0;
   const context = {
-    document, window, navigator: { language }, AbortController, URLSearchParams,
+    document, window, navigator: { language }, AbortController, URLSearchParams, performance,
     localStorage: { getItem() { if (storageThrows) throw new Error("blocked storage"); return language; } },
     URL: { createObjectURL: () => `blob:${++blobId}`, revokeObjectURL: (url) => revoked.push(url) },
     setTimeout: (fn, delay) => { timers.set(++timerId, { fn, delay }); return timerId; },
@@ -87,6 +91,8 @@ const polls = (p) => [...p.timers.values()].filter(({ delay }) => delay === 1000
 const ready = {
   pipeline_status: "ready", model_input_ready: true, model_status_fresh: true, model_active: true,
   nav_model: true, nav_input_supported: true, nav_route_available: true, nav_tbt_available: true, nav_map_available: true,
+  model_provenance_verified: true, model_navigation_source: "mapbox", model_route_id: "123",
+  model_input_valid_for_ms: 1500,
 };
 
 test("Navdy configured, missing key and missing optional navigation input remain distinct", async () => {
@@ -403,7 +409,7 @@ test("only a fresh active supported N16 with every input can report ready", asyn
   assert.equal(p.element("pipelineStatus").attributes["data-ready"], "true");
   assert.equal(p.element("map").hidden, true, "model input does not require a web PNG");
   for (const key of ["model_input_ready", "model_status_fresh", "model_active", "nav_model", "nav_input_supported",
-    "nav_route_available", "nav_tbt_available", "nav_map_available"]) {
+    "nav_route_available", "nav_tbt_available", "nav_map_available", "model_provenance_verified"]) {
     for (const value of [false, undefined, "true", 1]) {
       p.setSaved({ ...ready, [key]: value });
       await p.refresh();
@@ -416,12 +422,84 @@ test("only a fresh active supported N16 with every input can report ready", asyn
   assert.equal(p.element("pipelineStatus").attributes["data-ready"], "false");
 });
 
+test("fresh matched Navdy provenance enables only read-only map and actual model status", async () => {
+  const state = { ...ready, navigation_source: "navdy", destination_editable: true, destination,
+    map_provenance_verified: true, map_navigation_source: "navdy", map_route_id: "18446744073709551615",
+    model_navigation_source: "navdy", model_route_id: "18446744073709551615" };
+  const p = await page({ state, fetcher: (url) => url.endsWith("map.png") ? response(null, 200,
+    { "X-Nav-Map-Status": "ready", "Content-Type": "image/png", "X-Nav-Map-Source": "navdy",
+      "X-Nav-Map-Route": state.map_route_id }) : undefined });
+  assert.equal(p.element("pipelineStatus").attributes["data-ready"], "true");
+  assert.match(p.element("sourceStatus").textContent, /Navdy.*current route verified/);
+  assert.equal(p.element("map").hidden, false);
+  await p.search();
+  assert.equal(p.buttons()[0].disabled, true);
+  await p.buttons()[0].fire("click");
+  await p.element("clear").fire("click");
+  assert.equal(writes(p).length, 0);
+  p.setSaved({ pipeline_status: "model_inactive", model_active: false, model_input_ready: false });
+  await p.refresh();
+  assert.equal(p.element("pipelineStatus").attributes["data-ready"], "false");
+  assert.match(p.element("pipelineStatus").textContent, /model inactive/);
+  assert.equal(p.element("map").hidden, false);
+});
+
+test("preview source and exact route must match the status snapshot including source changes in flight", async () => {
+  for (const headers of [
+    { "X-Nav-Map-Source": "mapbox", "X-Nav-Map-Route": "123" },
+    { "X-Nav-Map-Source": "navdy", "X-Nav-Map-Route": "124" },
+    { "X-Nav-Map-Source": "navdy", "X-Nav-Map-Route": null },
+    { "X-Nav-Map-Source": null, "X-Nav-Map-Route": "123" },
+  ]) {
+    const p = await page({ state: { navigation_source: "navdy", map_navigation_source: "navdy" },
+      fetcher: (url) => url.endsWith("map.png") ? response(null, 200,
+        { "X-Nav-Map-Status": "ready", "Content-Type": "image/png", ...headers }) : undefined });
+    assert.equal(p.element("map").hidden, true);
+    assert.match(p.element("mapStatus").textContent, /Route or navigation source changed/);
+  }
+});
+
+test("model route identity must match current renderer metadata, not merely a ready flag", async () => {
+  for (const changes of [{ model_route_id: "124" }, { model_route_id: 123 }, { model_route_id: undefined },
+    { model_navigation_source: "network-v2" }, { map_navigation_source: undefined }, { map_route_id: undefined }]) {
+    const p = await page({ state: { ...ready, ...changes } });
+    assert.equal(p.element("pipelineStatus").attributes["data-ready"], "false");
+  }
+});
+
+test("displayed model readiness and PNG expire even when further requests stop", async () => {
+  const p = await page({ state: ready, fetcher: (url) => url.endsWith("map.png") ? response(null, 200,
+    { "X-Nav-Map-Status": "ready", "Content-Type": "image/png" }) : undefined });
+  assert.equal(p.element("pipelineStatus").attributes["data-ready"], "true");
+  assert.equal(p.element("map").hidden, false);
+  const expiries = [...p.timers.values()].filter(({ delay }) => delay > 1000 && delay <= 1500);
+  assert.equal(expiries.length, 2);
+  expiries.forEach(({ fn }) => fn());
+  assert.equal(p.element("pipelineStatus").attributes["data-ready"], "false");
+  assert.match(p.element("pipelineStatus").textContent, /expired/);
+  assert.equal(p.element("map").hidden, true);
+  assert.match(p.element("mapStatus").textContent, /expired/);
+});
+
+test("missing or invalid display deadlines cannot keep stale readiness or images visible", async () => {
+  for (const lifetime of [undefined, null, 0, -1, "1500", Infinity, NaN, 2501]) {
+    const p = await page({ state: { ...ready, model_input_valid_for_ms: lifetime } });
+    assert.equal(p.element("pipelineStatus").attributes["data-ready"], "false");
+  }
+  for (const lifetime of [null, "0", "-1", "2001", "Infinity", "secret"]) {
+    const p = await page({ fetcher: (url) => url.endsWith("map.png") ? response(null, 200,
+      { "X-Nav-Map-Status": "ready", "Content-Type": "image/png", "X-Nav-Map-Valid-For-Ms": lifetime }) : undefined });
+    assert.equal(p.element("map").hidden, true);
+  }
+});
+
 test("missing, stale, inactive, non-N16 and missing navigation inputs remain distinct", async () => {
   for (const [pipeline_status, expected] of [
     ["model_status_missing", /Model status unavailable/], ["model_status_stale", /Model status expired/],
     ["model_inactive", /model inactive/], ["unsupported_model", /does not support N16/],
     ["route_unavailable", /Complete route unavailable/], ["tbt_unavailable", /turn guidance unavailable/],
     ["map_not_yet_available", /Waiting for model map input/], ["context_expired", /guidance expired/],
+    ["provenance_unverified", /Current source and route unverified/],
   ]) {
     const p = await page({ state: { pipeline_status } });
     assert.match(p.element("pipelineStatus").textContent, expected);
