@@ -136,7 +136,8 @@ class FeedbackTracker:
       present = type(kind) is int and 1 <= kind <= 2000 and distance is not None
       title = guidance.get('roadName', '') if prefix == 'primary' else ''
       return NaviGuidanceControl(present, revision, int(distance or 0), kind if present else -1,
-                                 title[:256] if isinstance(title, str) else '')
+                                 title[:256] if isinstance(title, str) else '',
+                                 received_mono_time_ns=max(0, int((now - age) * 1e9)) if present else 0)
 
     signal = guidance.get('trafficSignal')
     traffic = NaviTrafficControl(False, revision)

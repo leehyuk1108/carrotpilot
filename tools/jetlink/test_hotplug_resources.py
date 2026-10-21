@@ -48,6 +48,7 @@ def joining_model(monkeypatch):
   m.small_runs = 3
   m.ready = m.join_allowed = True
   m.next_join = m.next_status = 0
+  m.nav_input_status = {}
   m.active = False
   m.fault_until = 0.
   m.error = ''

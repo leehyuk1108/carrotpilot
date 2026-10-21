@@ -16,7 +16,7 @@ PUBLISH_COALESCE_SECONDS = 0.05
 MEDIA_REQUEST_POLL_SECONDS = 0.25
 MAX_AHEAD_LANES = 8
 MAX_LANE_VALUES = 16
-MAX_ROUTE_POINTS = 256
+MAX_ROUTE_POINTS = 4096
 MAX_ROAD_LIMIT_KPH = 200
 ROAD_LIMIT_STEP_KPH = 10
 WEB_BOOTSTRAP_KIND = "web_render"
@@ -175,14 +175,14 @@ def build_carrot_navi_payload(snapshot: dict[str, Any], publish_mono_ns: int | N
   route_record = _record(snapshot, "route")
   route = _dict(route_record.get("value")) if route_record.get("present") else {}
   polyline = []
-  for point_value in _list(route.get("polyline"))[:MAX_ROUTE_POINTS]:
+  points = _list(route.get("polyline"))
+  for point_value in points if len(points) <= MAX_ROUTE_POINTS else ():
     point = _dict(point_value)
-    if point.get("lat") is None or point.get("lon") is None:
-      continue
-    polyline.append({
-      "latitude": _finite(point.get("lat"), minimum=-90.0, maximum=90.0),
-      "longitude": _finite(point.get("lon"), minimum=-180.0, maximum=180.0),
-    })
+    lat, lon = _finite(point.get('lat'), math.nan), _finite(point.get('lon'), math.nan)
+    if not (-85.05112878 <= lat <= 85.05112878 and -180 <= lon <= 180):
+      polyline = []
+      break
+    polyline.append({'latitude': lat, 'longitude': lon})
 
   status_record = _record(snapshot, "navigation_status")
   status = _dict(status_record.get("value")) if status_record.get("present") else {}

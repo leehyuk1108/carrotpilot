@@ -1,9 +1,12 @@
 import asyncio
+import base64
 from contextlib import asynccontextmanager
 import importlib.util
 import json
+import os
 from pathlib import Path
 import sys
+import time
 from types import SimpleNamespace as NS
 
 import pytest
@@ -12,7 +15,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 
 @pytest.fixture
-def feature(monkeypatch):
+def feature(monkeypatch, tmp_path):
   name = 'openpilot.selfdrive.carrot.server.features.navigation_test'
   spec = importlib.util.spec_from_file_location(name, Path(__file__).parents[1] / 'features/navigation.py')
   module = importlib.util.module_from_spec(spec)
@@ -22,6 +25,9 @@ def feature(monkeypatch):
   monkeypatch.setattr(module, 'get_param_value', lambda key, default: values.get(key, default))
   monkeypatch.setattr(module, 'set_param_value', lambda key, value: values.__setitem__(key, value))
   module.values = values
+  for key, filename in [('PREVIEW_PATH', 'map.png'), ('STATUS_PATH', 'status.json'), ('WEB_DEMAND_PATH', 'web-demand')]:
+    monkeypatch.setattr(module.nav_preview, key, tmp_path / filename)
+  monkeypatch.setattr(module, 'MODEL_STATUS_PATH', tmp_path / 'model.json')
   return module
 
 
@@ -48,7 +54,7 @@ def test_destination_roundtrip_clears_waypoints_without_changing_source(feature)
       assert body['destination'] == place
       assert body['navigation_source'] == 'network' and body['destination_editable']
       assert not body['map_ready'] and not body['model_input_ready']
-      assert body['pipeline_status'] == 'not_connected'
+      assert body['pipeline_status'] == 'model_status_missing'
       assert response.headers['Cache-Control'] == 'no-store'
       assert (await client.delete('/api/navigation/destination')).status == 200
       assert feature.values['NavDestination'] == ''
@@ -71,6 +77,7 @@ def test_rejects_invalid_destination_without_writing(feature, payload):
       assert (await client.post('/api/navigation/destination', data=json.dumps(payload),
                                 headers={'Content-Type': 'application/json'})).status == 400
       assert feature.values == {}
+      assert not feature.nav_preview.WEB_DEMAND_PATH.exists()
   asyncio.run(run())
 
 
@@ -128,7 +135,194 @@ def test_malformed_saved_destination_and_missing_key(feature):
         assert (await client.get('/api/navigation/search', params={'q': query})).status == 400
       response = await client.get('/api/navigation/map.png')
       assert response.status == 204
-      assert response.headers['X-Nav-Map-Status'] == 'not_connected'
+      assert response.headers['X-Nav-Map-Status'] == 'waiting'
+      assert feature.nav_preview.WEB_DEMAND_PATH.exists()
+  asyncio.run(run())
+
+
+PNG = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aMZkAAAAASUVORK5CYII=')
+
+
+def write_preview(feature, reason='ready'):
+  feature.nav_preview.PREVIEW_PATH.write_bytes(PNG)
+  feature.nav_preview.STATUS_PATH.write_text(json.dumps({'reason': reason}))
+
+
+def write_model(feature, **changes):
+  value = dict(updated=time.monotonic(), active=True, nav_model=True, nav_input_supported=True,
+               nav_route_available=True, nav_tbt_available=True, nav_map_available=True, nav_input_reason='ready')
+  value.update(changes)
+  feature.MODEL_STATUS_PATH.write_text(json.dumps(value))
+
+
+def test_live_n16_status_and_real_png_without_parameter_writes(feature):
+  write_preview(feature)
+  write_model(feature)
+  async def run():
+    async with client_for(feature) as client:
+      status = await (await client.get('/api/navigation/destination')).json()
+      assert status['map_ready'] and status['map_status_fresh']
+      assert status['model_input_ready'] and status['model_status_fresh'] and status['model_active']
+      assert status['pipeline_status'] == status['reason'] == 'ready'
+      assert status['destination'] is None
+      response = await client.get('/api/navigation/map.png')
+      assert response.status == 200 and await response.read() == PNG
+      assert response.headers['Content-Type'] == 'image/png'
+      assert response.headers['X-Nav-Map-Status'] == 'ready'
+      assert response.headers['Cache-Control'] == 'no-store'
+      assert response.headers['X-Content-Type-Options'] == 'nosniff'
+      assert feature.nav_preview.WEB_DEMAND_PATH.exists()
+      assert feature.values == {}
+  asyncio.run(run())
+
+
+@pytest.mark.parametrize('changes,reason', [
+  ({'active': False}, 'model_inactive'), ({'active': 'true'}, 'model_inactive'),
+  ({'nav_model': False}, 'unsupported_model'), ({'nav_model': 1}, 'unsupported_model'),
+  ({'nav_input_supported': False}, 'unsupported_model'), ({'nav_input_supported': None}, 'unsupported_model'),
+  ({'nav_route_available': False}, 'route_unavailable'), ({'nav_route_available': 1}, 'route_unavailable'),
+  ({'nav_tbt_available': False}, 'tbt_unavailable'), ({'nav_tbt_available': 'true'}, 'tbt_unavailable'),
+  ({'nav_map_available': False}, 'map_not_yet_available'), ({'nav_map_available': None}, 'map_not_yet_available'),
+  ({'nav_input_reason': 'context_expired'}, 'context_expired'),
+  ({'nav_input_reason': 'ready?access_token=sk.secret'}, 'navigation_unavailable'),
+  ({'nav_input_reason': []}, 'navigation_unavailable'),
+])
+def test_model_requires_all_live_input_flags_not_a_preview_or_selection(feature, changes, reason):
+  write_preview(feature)
+  write_model(feature, **changes)
+  feature.values.update(NavDestination=json.dumps({'latitude': 37, 'longitude': 127}), JetlinkModel='N16')
+  status = feature.navigation_status('network')
+  assert status['map_ready']
+  assert not status['model_input_ready']
+  assert status['pipeline_status'] == reason
+  assert 'sk.secret' not in json.dumps(status)
+
+
+@pytest.mark.parametrize('updated', [None, True, '100', 0, -1, float('nan'), float('inf'), 10**400, 'stale', 'future'])
+def test_model_status_requires_recent_monotonic_timestamp(feature, updated):
+  if updated == 'stale':
+    updated = time.monotonic() - 2.5
+  elif updated == 'future':
+    updated = time.monotonic() + 10
+  write_model(feature, updated=updated)
+  status = feature.navigation_status('network')
+  assert not status['model_status_fresh'] and not status['model_input_ready']
+  assert not status['model_active'] and not status['nav_route_available']
+
+
+def test_model_freshness_boundary_and_independence_from_preview(feature, monkeypatch):
+  write_model(feature, updated=100)
+  monkeypatch.setattr(feature.time, 'monotonic', lambda: 102.499)
+  assert feature.navigation_status('network')['model_input_ready']
+  assert not feature.navigation_status('network')['map_ready']
+  monkeypatch.setattr(feature.time, 'monotonic', lambda: 102.5)
+  status = feature.navigation_status('network')
+  assert not status['model_input_ready'] and status['reason'] == 'model_status_stale'
+
+
+@pytest.mark.parametrize('payload', ['{', '[]', 'null', 'true', '"secret"', 'x' * 65537])
+def test_malformed_or_oversized_model_status_is_redacted(feature, payload):
+  feature.MODEL_STATUS_PATH.write_text(payload)
+  status = feature.navigation_status('network')
+  assert status['reason'] == 'model_status_unavailable'
+  assert not status['model_input_ready']
+  assert 'secret' not in json.dumps(status)
+
+
+@pytest.mark.parametrize('reason', ['idle', 'route', 'position', 'instruction', 'tiles', 'route_position',
+                                   'context_changed', 'slow', 'secret\r\naccess_token=sk.secret', {'secret': 'value'}])
+def test_nonready_preview_returns_reason_without_placeholder_png(feature, reason):
+  write_preview(feature, reason)
+  async def run():
+    async with client_for(feature) as client:
+      status = await (await client.get('/api/navigation/destination')).json()
+      assert not status['map_ready'] and not status['model_input_ready']
+      response = await client.get('/api/navigation/map.png')
+      assert response.status == 204 and not await response.read()
+      expected = reason if isinstance(reason, str) and reason in feature.MAP_REASONS else 'unavailable'
+      assert status['map_reason'] == response.headers['X-Nav-Map-Status'] == expected
+      assert 'secret' not in str(response.headers) + json.dumps(status)
+  asyncio.run(run())
+
+
+@pytest.mark.parametrize('filename', ['PREVIEW_PATH', 'STATUS_PATH'])
+@pytest.mark.parametrize('condition', ['missing', 'stale', 'future'])
+def test_preview_needs_both_fresh_image_and_fresh_reason(feature, filename, condition):
+  write_preview(feature)
+  path = getattr(feature.nav_preview, filename)
+  if condition == 'missing':
+    path.unlink()
+  else:
+    stamp = time.time() + (60 if condition == 'future' else -3)
+    os.utime(path, (stamp, stamp))
+  async def run():
+    async with client_for(feature) as client:
+      status = await (await client.get('/api/navigation/destination')).json()
+      assert not status['map_ready'] and not status['map_status_fresh']
+      response = await client.get('/api/navigation/map.png')
+      assert response.status == 204
+      assert response.headers['X-Nav-Map-Status'] == ('waiting' if condition == 'missing' else 'stale')
+  asyncio.run(run())
+
+
+@pytest.mark.parametrize('payload', [b'', b'<html>secret</html>', b'\x89PNG\r\n\x1a\n' + b'x' * 1048576])
+def test_corrupt_or_oversized_image_is_not_served(feature, payload):
+  write_preview(feature)
+  feature.nav_preview.PREVIEW_PATH.write_bytes(payload)
+  async def run():
+    async with client_for(feature) as client:
+      response = await client.get('/api/navigation/map.png')
+      assert response.status == 204 and not await response.read()
+      assert response.headers['X-Nav-Map-Status'] == 'unavailable'
+  asyncio.run(run())
+
+
+@pytest.mark.parametrize('source,reason', [(1, 'route'), ('invalid', 'source_unavailable')])
+def test_readonly_preview_allowed_but_previous_network_route_cannot_authorize_navdy(feature, source, reason):
+  write_preview(feature)
+  write_model(feature)
+  feature.values['CarrotNaviSource'] = source
+  async def run():
+    async with client_for(feature) as client:
+      status = await (await client.get('/api/navigation/destination')).json()
+      assert not status['destination_editable'] and not status['model_input_ready'] and not status['map_ready']
+      response = await client.get('/api/navigation/map.png')
+      assert response.status == 204 and response.headers['X-Nav-Map-Status'] == reason
+      assert feature.nav_preview.WEB_DEMAND_PATH.exists()
+      assert (await client.post('/api/navigation/destination', json={'latitude': 0, 'longitude': 0})).status == 409
+      assert (await client.delete('/api/navigation/destination')).status == 409
+      assert feature.values == {'CarrotNaviSource': source}
+  asyncio.run(run())
+
+
+def test_external_destination_allows_preview_without_taking_ownership(feature, monkeypatch):
+  write_preview(feature)
+  feature.values['NavDestination'] = json.dumps({'latitude': 37, 'longitude': 127, 'place_name': 'External Navi'})
+  original = feature.values.copy()
+  monkeypatch.setattr(feature.nav_preview, 'WEB_DEMAND_PATH', feature.nav_preview.PREVIEW_PATH / 'not-a-directory')
+  async def run():
+    async with client_for(feature) as client:
+      status = await (await client.get('/api/navigation/destination')).json()
+      assert status['map_ready'] and not status['destination_editable']
+      assert not status['model_input_ready']
+      assert (await client.get('/api/navigation/map.png')).status == 200
+      assert feature.values == original
+  asyncio.run(run())
+
+
+def test_status_does_not_read_secret_token_or_forward_private_model_fields(feature, monkeypatch):
+  feature.values['MapboxPublicKey'] = 'pk.test-private'
+  write_model(feature, error='sk.secret', access_token='sk.secret', model='sk.secret')
+  def read(key, default):
+    assert key in {'CarrotNaviSource', 'NavDestination', 'MapboxPublicKey'}
+    return feature.values.get(key, default)
+  monkeypatch.setattr(feature, 'get_param_value', read)
+  async def run():
+    async with client_for(feature) as client:
+      response = await client.get('/api/navigation/destination')
+      body = await response.text()
+      assert 'pk.test-private' not in body and 'sk.secret' not in body
+      assert json.loads(body)['key_configured']
   asyncio.run(run())
 
 

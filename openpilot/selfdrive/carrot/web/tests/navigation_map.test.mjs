@@ -15,8 +15,8 @@ const deferred = () => {
 const destination = { place_name: "Seoul Station", latitude: 37.55, longitude: 126.97 };
 const initial = {
   destination: null, key_configured: true, map_ready: false, model_input_ready: false,
-  pipeline_status: "not_connected", navigation_source: "network", source_scope: "configured",
-  destination_editable: true, reason: "The N16 route/map input pipeline is not connected in this build.",
+  pipeline_status: "model_status_missing", navigation_source: "network", source_scope: "configured",
+  destination_editable: true, reason: "model_status_missing",
 };
 function response(value, status = 200, headers = {}, blob = { size: 12 }) {
   return {
@@ -66,7 +66,7 @@ async function page({ state = {}, fetcher, language = "en", storageThrows = fals
         return response(options.method ? { destination: saved.destination } : saved);
       }
       if (url.startsWith("/api/navigation/search?")) return response({ results: [destination] });
-      if (url === "/api/navigation/map.png") return response(null, 204, { "X-Nav-Map-Status": "not_connected" });
+      if (url === "/api/navigation/map.png") return response(null, 204, { "X-Nav-Map-Status": "waiting" });
       throw new Error(`Unexpected request ${url}`);
     },
   };
@@ -83,19 +83,27 @@ async function page({ state = {}, fetcher, language = "en", storageThrows = fals
   };
 }
 const writes = (p) => p.requests.filter(({ options }) => ["POST", "DELETE"].includes(options.method));
+const polls = (p) => [...p.timers.values()].filter(({ delay }) => delay === 1000);
+const ready = {
+  pipeline_status: "ready", model_input_ready: true, model_status_fresh: true, model_active: true,
+  nav_model: true, nav_input_supported: true, nav_route_available: true, nav_tbt_available: true, nav_map_available: true,
+};
 
 test("Navdy configured, missing key and missing optional navigation input remain distinct", async () => {
-  const p = await page({ state: { navigation_source: "navdy", key_configured: false, destination_editable: false } });
+  const p = await page({ state: { navigation_source: "navdy", key_configured: false, destination_editable: false,
+    pipeline_status: "route_unavailable" }, fetcher: (url) => url.endsWith("map.png")
+    ? response(null, 204, { "X-Nav-Map-Status": "route" }) : undefined });
   assert.match(p.element("sourceLabel").textContent, /Configured/);
   assert.match(p.element("sourceStatus").textContent, /Navdy.*runtime unverified/);
   assert.equal(p.element("keyStatus").textContent, "Missing");
-  assert.equal(p.element("pipelineStatus").textContent, "N16 route/map input not connected");
+  assert.equal(p.element("pipelineStatus").textContent, "Complete route unavailable");
   assert.match(p.element("pipelineReason").textContent, /Camera inference is independent/);
-  assert.match(p.element("mapStatus").textContent, /not connected/);
+  assert.match(p.element("mapStatus").textContent, /Complete route unavailable/);
   assert.equal(p.element("map").hidden, true);
   assert.equal(p.element("clear").disabled, true);
-  assert.equal(p.requests.length, 1, "no map request when the pipeline is disconnected");
-  assert.equal(p.timers.size, 0, "no perpetual polling or abandoned deadlines");
+  assert.equal(p.requests.length, 2, "read-only map demand does not require destination ownership");
+  assert.equal(p.timers.size, 1, "only one visible-page refresh, no abandoned deadlines");
+  assert.equal(polls(p).length, 1);
 });
 
 test("search is allowed for Navdy, but selection and clearing cannot send writes", async () => {
@@ -132,8 +140,8 @@ test("select saves only coordinates/name, then authoritative GET; never selects 
   await p.buttons()[0].fire("click");
   assert.deepEqual(JSON.parse(writes(p)[0].options.body), destination);
   assert.equal(p.element("current").textContent, destination.place_name);
-  assert.match(p.element("status").textContent, /saved only.*not connected/);
-  assert.match(p.element("pipelineStatus").textContent, /N16 route\/map input not connected/);
+  assert.equal(p.element("status").textContent, "Destination saved.");
+  assert.match(p.element("pipelineStatus").textContent, /Model status unavailable/);
   assert.equal(p.element("clear").disabled, false);
   assert.ok(p.requests.every(({ url }) => url.startsWith("/api/navigation/")));
   assert.ok(p.requests.every(({ options }) => options.cache === "no-store" && options.redirect === "error"));
@@ -269,14 +277,15 @@ test("network and malformed JSON failures unlock search without leaking exceptio
     await p.search();
     assert.match(p.element("status").textContent, /Service unavailable/);
     assert.doesNotMatch(p.element("status").textContent, /secret/);
-    assert.equal(p.timers.size, 0);
+    assert.equal(p.timers.size, 1);
+    assert.equal(polls(p).length, 1);
   }
 });
 
 test("query validation sends no request for short, long or blank searches", async () => {
   const p = await page();
   for (const query of [" ", "a", "x".repeat(201)]) await p.search(query);
-  assert.equal(p.requests.length, 1);
+  assert.equal(p.requests.length, 2);
   assert.match(p.element("status").textContent, /Check the query/);
 });
 
@@ -313,36 +322,44 @@ test("status failure locks writes, clears stale map and keeps search usable", as
   assert.match(p.element("current").textContent, /unverified/);
   assert.equal(p.element("search").disabled, false);
   assert.equal(p.element("map").hidden, true);
-  assert.match(p.element("pipelineStatus").textContent, /N16 route\/map input not connected/);
+  assert.match(p.element("pipelineStatus").textContent, /unverified/);
 });
 
-test("204 not_connected is explicit, with no image decoding or retry loop", async () => {
+test("204 waiting is explicit, with no image decoding and one bounded refresh", async () => {
   const p = await page({ state: { pipeline_status: "unknown" } });
   assert.equal(p.requests.length, 2);
-  assert.match(p.element("mapStatus").textContent, /not connected/);
+  assert.match(p.element("mapStatus").textContent, /Waiting for map rendering/);
   assert.equal(p.element("map").src, undefined);
-  assert.equal(p.timers.size, 0);
+  assert.equal(p.timers.size, 1);
+  assert.equal(polls(p).length, 1);
 });
 
 test("a ready PNG is a preview only and loses its URL when unavailable or unloaded", async () => {
+  let available = true;
   const p = await page({ state: { pipeline_status: "unknown", map_ready: true, model_input_ready: true },
-    fetcher: (url) => url.endsWith("map.png") ? response(null, 200, { "X-Nav-Map-Status": "ready", "Content-Type": "image/png" }) : undefined });
+    fetcher: (url) => url.endsWith("map.png") ? available
+      ? response(null, 200, { "X-Nav-Map-Status": "ready", "Content-Type": "image/png" })
+      : response(null, 204, { "X-Nav-Map-Status": "stale" }) : undefined });
   assert.equal(p.element("map").src, "blob:1");
   assert.equal(p.element("map").hidden, false);
-  assert.match(p.element("previewNote").textContent, /Preview only/);
-  assert.match(p.element("pipelineStatus").textContent, /N16 route\/map input not connected/);
-  p.setSaved({ pipeline_status: "not_connected" });
+  assert.match(p.element("previewNote").textContent, /Model input status checked separately/);
+  assert.match(p.element("pipelineStatus").textContent, /unverified/);
+  available = false;
+  p.setSaved({ pipeline_status: "model_status_stale" });
   await p.refresh();
   assert.deepEqual(p.revoked, ["blob:1"]);
   assert.equal(p.element("map").src, undefined);
   assert.equal(p.element("map").hidden, true);
-  assert.equal(p.requests.filter(({ url }) => url.endsWith("map.png")).length, 1);
+  assert.equal(p.requests.filter(({ url }) => url.endsWith("map.png")).length, 2);
+  assert.match(p.element("mapStatus").textContent, /expired/);
 });
 
-test("late preview cannot replace a newer disconnected state", async () => {
+test("late preview cannot replace a newer unavailable state", async () => {
   const map = deferred();
-  const p = await page({ state: { pipeline_status: "unknown" }, fetcher: (url) => url.endsWith("map.png") ? map.promise : undefined });
-  p.setSaved({ pipeline_status: "not_connected" });
+  let first = true;
+  const p = await page({ fetcher: (url) => url.endsWith("map.png") && first ? map.promise : undefined });
+  first = false;
+  p.setSaved({ pipeline_status: "model_status_stale" });
   await p.refresh();
   map.resolve(response(null, 200, { "X-Nav-Map-Status": "ready", "Content-Type": "image/png" }));
   await settle();
@@ -368,13 +385,84 @@ test("hidden tabs do not poll; pagehide cancels requests and pageshow refreshes"
   const p = await page();
   p.document.hidden = true;
   p.document.fire("visibilitychange");
-  assert.equal(p.requests.length, 1);
+  assert.equal(p.requests.length, 2);
+  assert.equal(p.timers.size, 0);
   p.window.fire("pagehide");
   await p.search();
-  assert.equal(p.requests.length, 1);
+  assert.equal(p.requests.length, 2);
+  p.document.hidden = false;
   p.window.fire("pageshow", { persisted: true });
   await settle();
-  assert.equal(p.requests.length, 2);
+  assert.equal(p.requests.length, 4);
+  assert.equal(polls(p).length, 1);
+});
+
+test("only a fresh active supported N16 with every input can report ready", async () => {
+  const p = await page({ state: ready });
+  assert.equal(p.element("pipelineStatus").textContent, "N16 navigation input ready");
+  assert.equal(p.element("pipelineStatus").attributes["data-ready"], "true");
+  assert.equal(p.element("map").hidden, true, "model input does not require a web PNG");
+  for (const key of ["model_input_ready", "model_status_fresh", "model_active", "nav_model", "nav_input_supported",
+    "nav_route_available", "nav_tbt_available", "nav_map_available"]) {
+    for (const value of [false, undefined, "true", 1]) {
+      p.setSaved({ ...ready, [key]: value });
+      await p.refresh();
+      assert.match(p.element("pipelineStatus").textContent, /unverified/);
+      assert.equal(p.element("pipelineStatus").attributes["data-ready"], "false");
+    }
+  }
+  p.setSaved({ ...ready, navigation_source: "navdy" });
+  await p.refresh();
+  assert.equal(p.element("pipelineStatus").attributes["data-ready"], "false");
+});
+
+test("missing, stale, inactive, non-N16 and missing navigation inputs remain distinct", async () => {
+  for (const [pipeline_status, expected] of [
+    ["model_status_missing", /Model status unavailable/], ["model_status_stale", /Model status expired/],
+    ["model_inactive", /model inactive/], ["unsupported_model", /does not support N16/],
+    ["route_unavailable", /Complete route unavailable/], ["tbt_unavailable", /turn guidance unavailable/],
+    ["map_not_yet_available", /Waiting for model map input/], ["context_expired", /guidance expired/],
+  ]) {
+    const p = await page({ state: { pipeline_status } });
+    assert.match(p.element("pipelineStatus").textContent, expected);
+    assert.equal(p.element("pipelineStatus").attributes["data-ready"], "false");
+  }
+});
+
+test("untrusted status and header reasons cannot expose tokens or prototype properties", async () => {
+  for (const reason of ["sk.secret", "__proto__", "toString", "constructor"]) {
+    const p = await page({ state: { pipeline_status: reason, reason: "access_token=sk.secret" },
+      fetcher: (url) => url.endsWith("map.png") ? response(null, 204, { "X-Nav-Map-Status": reason }) : undefined });
+    assert.equal(p.element("pipelineStatus").textContent, "Navigation model input unverified");
+    assert.equal(p.element("mapStatus").textContent, "Map preview unavailable");
+  }
+});
+
+test("visible polling refreshes status and demand without overlap, hides stale readiness on suspension", async () => {
+  let pending;
+  const p = await page({ state: ready, fetcher: (url) => url.endsWith("destination") ? pending?.promise : undefined });
+  pending = deferred();
+  const poll = [...p.timers].find(([, { delay }]) => delay === 1000);
+  p.timers.delete(poll[0]);
+  const refresh = poll[1].fn();
+  assert.match(p.element("pipelineStatus").textContent, /Checking/);
+  assert.equal(p.element("pipelineStatus").attributes["data-ready"], "false");
+  assert.equal(polls(p).length, 0, "do not schedule while a request is pending");
+  p.document.hidden = true;
+  p.document.fire("visibilitychange");
+  pending.resolve(response({ ...initial, ...ready }));
+  await refresh;
+  assert.equal(p.timers.size, 0);
+  assert.equal(p.element("pipelineStatus").attributes["data-ready"], "false");
+  pending = undefined;
+  p.document.hidden = false;
+  p.document.fire("visibilitychange");
+  await settle();
+  assert.equal(polls(p).length, 1);
+  assert.equal(p.element("pipelineStatus").attributes["data-ready"], "true");
+  p.window.fire("pagehide");
+  assert.equal(p.timers.size, 0);
+  assert.equal(p.element("pipelineStatus").attributes["data-ready"], "false");
 });
 
 test("pagehide invalidates an in-flight write even after a back-forward restoration", async () => {
@@ -399,20 +487,21 @@ test("request deadline aborts a hanging search and keeps the page retryable", as
     options.signal.addEventListener("abort", () => reject(new Error("timeout with private URL")));
   }) : undefined });
   const pending = p.search();
-  assert.equal(p.timers.size, 1);
-  const timer = [...p.timers.values()][0];
+  assert.equal(p.timers.size, 2);
+  const timer = [...p.timers.values()].find(({ delay }) => delay === 12000);
   assert.equal(timer.delay, 12000);
   timer.fn();
   await pending;
   assert.match(p.element("status").textContent, /Service unavailable/);
   assert.equal(p.element("search").disabled, false);
   assert.equal(p.element("results").attributes["aria-busy"], "false");
-  assert.equal(p.timers.size, 0);
+  assert.equal(p.timers.size, 1);
+  assert.equal(polls(p).length, 1);
 });
 
 test("unavailable storage does not prevent localization or loading", async () => {
   const p = await page({ language: "ko", storageThrows: true });
-  assert.match(p.element("pipelineStatus").textContent, /N16 경로·지도 입력 미연결/);
+  assert.match(p.element("pipelineStatus").textContent, /모델 상태 없음/);
   assert.match(p.element("sourceLabel").textContent, /설정된/);
   assert.equal(p.document.documentElement.lang, "ko");
 });

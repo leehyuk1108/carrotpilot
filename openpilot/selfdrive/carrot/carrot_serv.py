@@ -19,8 +19,10 @@ from openpilot.system.hardware import PC, TICI
 from openpilot.selfdrive.navd.helpers import Coordinate
 from openpilot.common.constants import CV
 from openpilot.common.gps import get_gps_location_service
+from openpilot.selfdrive.carrot.gps_sources import GPSSources
 from openpilot.selfdrive.carrot.carrot_navi_control import CarrotNaviControl, parse_carrot_navi_control
 from openpilot.selfdrive.navdy.navigation import NavigationReader
+from openpilot.selfdrive.navigation.provenance import RoutePublication
 
 NAVI_SOURCE_NETWORK = 0
 NAVI_SOURCE_NAVDY = 1
@@ -95,6 +97,8 @@ class CarrotServ:
     # otherwise mix route, camera and traffic-light data from different inputs.
     self.navi_source = self.params.get_int("CarrotNaviSource")
     self.navdy_navigation = NavigationReader()
+    self.model_routes = RoutePublication()
+    self.model_guidance_current = self.model_guidance_next = None
 
     self.nRoadLimitSpeed = 30
     self.nRoadLimitSpeed_last = 30
@@ -152,6 +156,7 @@ class CarrotServ:
 
     self.diff_angle_count = 0
     self.last_calculate_gps_time = 0
+    self.position_mono_time = 0
     self.last_update_gps_time = 0
     self.last_update_gps_time_phone = 0
     self.last_update_gps_time_navi = 0
@@ -902,6 +907,7 @@ class CarrotServ:
 
   def _reset_carrot_navi_sequences(self, session_id):
     self.rear_camera_events = []
+    self.model_guidance_current = self.model_guidance_next = None
     self.carrot_navi_session_id = session_id
     self.carrot_navi_speed_sequence = -1
     self.carrot_navi_current_sequence = -1
@@ -948,6 +954,7 @@ class CarrotServ:
 
     self.nGoPosDist = self.nGoPosTime = 0
     self.last_update_gps_time_navi = 0
+    self._gps_sources().remove('external_navi')
     self.szPosRoadName = ""
     self._clear_carrot_navi_traffic()
 
@@ -1017,19 +1024,30 @@ class CarrotServ:
 
   def _apply_carrot_navi_vehicle(self, navi: CarrotNaviControl):
     vehicle = navi.vehicle
-    self.carrot_navi_vehicle_sequence = vehicle.sequence
     if not vehicle.present:
       self.last_update_gps_time_navi = 0
+      self._gps_sources().remove('external_navi')
       self.szPosRoadName = ""
       return
 
+    if vehicle.sequence == self.carrot_navi_vehicle_sequence:
+      return
     now = time.monotonic()
+    # A cereal heartbeat is not a GPS fix. Retain the original local receipt
+    # time so dead reckoning and map freshness cannot restart on repeated data.
+    # Older senders without receipt metadata use their first observation only.
+    received = vehicle.received_mono_time_ns / 1e9 if vehicle.received_mono_time_ns else now
+    if received > now:
+      return
+    self.carrot_navi_vehicle_sequence = vehicle.sequence
     self.vpPosPointLatNavi = vehicle.latitude
     self.vpPosPointLonNavi = vehicle.longitude
     self.nPosAngle = vehicle.heading_deg
     self.nPosSpeed = vehicle.speed_kph
     self.szPosRoadName = vehicle.road_name
-    self.last_update_gps_time_navi = self.last_calculate_gps_time = now
+    self.last_update_gps_time_navi = self.last_calculate_gps_time = received
+    self._gps_sources().put('external_navi', vehicle.latitude, vehicle.longitude, vehicle.heading_deg,
+                            vehicle.speed_kph / 3.6, received)
 
   def _apply_carrot_navi_route(self, navi: CarrotNaviControl):
     route = navi.route
@@ -1069,8 +1087,11 @@ class CarrotServ:
 
     old_current_dist = self.xDistToTurn
     old_next_dist = self.xDistToTurnNext
+    source = 'navdy' if self.accepts_navigation(NAVI_SOURCE_NAVDY) else 'network-v2'
     if current_changed:
       self.carrot_navi_current_sequence = current.sequence
+      self.model_guidance_current = (source, navi.session_id, current.received_mono_time_ns,
+                                     current.turn_type, current.distance_m) if current.present else None
       self.nTBTDist = current.distance_m if current.present else 0
       self.nTBTTurnType = current.turn_type if current.present else -1
       self.szTBTMainText = current.main_text if current.present else ""
@@ -1079,6 +1100,8 @@ class CarrotServ:
 
     if next_changed:
       self.carrot_navi_next_sequence = next_guidance.sequence
+      self.model_guidance_next = (source, navi.session_id, next_guidance.received_mono_time_ns,
+                                  next_guidance.turn_type, next_guidance.distance_m) if next_guidance.present else None
       self.nTBTDistNext = next_guidance.distance_m if next_guidance.present else 0
       self.nTBTTurnTypeNext = next_guidance.turn_type if next_guidance.present else -1
       self.szTBTMainTextNext = next_guidance.main_text if next_guidance.present else ""
@@ -1123,8 +1146,7 @@ class CarrotServ:
       self.carrot_navi_speed_sequence = navi.speed.sequence
       self._apply_carrot_navi_speed(navi, preserve_navdy_distance=navdy_selected and not new_session and not off_route_changed)
 
-    # The cereal service repeats at 2 Hz even when item sequences do not change.
-    # Refresh GPS and Params freshness from that heartbeat.
+    # Traffic Params use the service heartbeat; GPS only accepts new fixes.
     self._apply_carrot_navi_vehicle(navi)
     self._apply_carrot_navi_traffic(navi)
     if new_session or navi.route.sequence != self.carrot_navi_route_sequence:
@@ -1138,69 +1160,48 @@ class CarrotServ:
       self.active_sdi_count = self.active_sdi_count_max
     return self.carrot_navi_has_control
 
+  def _gps_sources(self):
+    if not hasattr(self, 'gps_sources'):
+      self.gps_sources = GPSSources()
+    return self.gps_sources
+
   def _update_gps(self, v_ego, sm, gps_service):
-    gps = sm[gps_service]
-    #print(f"location = {sm.valid[llk]}, {sm.updated[llk]}, {sm.recv_frame[llk]}, {sm.recv_time[llk]}")
-    if not sm.updated['carState'] or not sm.updated['carControl']: # or not sm.updated[llk]:
-      return self.nPosAngle
-    CS = sm['carState']
-    CC = sm['carControl']
-    self.gps_valid = sm.updated[gps_service] and gps.hasFix
-
     now = time.monotonic()
-    gps_updated_phone = (now - self.last_update_gps_time_phone) < 3
-    gps_updated_navi = (now - self.last_update_gps_time_navi) < 3
-
-    bearing = self.nPosAngle
-    if gps_updated_navi:
-      bearing = self.nPosAngle
-    elif gps_updated_phone:
-      bearing = self.nPosAnglePhone
-    elif self.gps_valid:
-      bearing = self.nPosAngle = gps.bearingDeg
-
-    self.bearing_offset = 0.0
-    # TODO:  여기서 bearing 보정로직 추가 필요함. CC.orientationNED[2]를 이용하여.
-
-    #print(f"bearing = {bearing:.1f}, posA=={self.nPosAngle:.1f}, posP=={self.nPosAnglePhone:.1f}, offset={self.bearing_offset:.1f}, {gps_updated_phone}, {gps_updated_navi}")
-    gpsDelayTimeAdjust = 0.0
-    if gps_updated_navi:
-      gpsDelayTimeAdjust = 0 #1.0
-
-    external_gps_update_timedout = not (gps_updated_phone or gps_updated_navi)
-    #print(f"gps_valid = {self.gps_valid}, bearing = {bearing:.1f}, pos = {location.positionGeodetic.value[0]:.6f}, {location.positionGeodetic.value[1]:.6f}")
-    if self.gps_valid and external_gps_update_timedout:    # 내부GPS가 작동하고 carrotman으로부터 gps신호가 없는경우
-      self.vpPosPointLatNavi = gps.latitude
-      self.vpPosPointLonNavi = gps.longitude
-      self.last_calculate_gps_time = now #sm.recv_time[llk]
-    elif gps_updated_navi:  # carrot navi로부터 gps신호가 수신되는 경우..
-      if abs(self.bearing_measured - bearing) < 0.1:
-          self.diff_angle_count += 1
+    sources = self._gps_sources()
+    gps = sm[gps_service]
+    if sm.updated[gps_service]:
+      if sm.valid[gps_service] and gps.hasFix:
+        sources.put('device', gps.latitude, gps.longitude, gps.bearingDeg, gps.speed, sm.recv_time[gps_service])
       else:
-          self.diff_angle_count = 0
-      self.bearing_measured = bearing
-
-      if self.diff_angle_count > 5: # 조향각도변화가 거의 없을때만 업데이트
-        diff_angle = (self.nPosAngle - bearing) % 360
-        if diff_angle > 180:
-          diff_angle -= 360
-        self.bearing_offset = self.bearing_offset * 0.9 + diff_angle * 0.1
-
-    bearing_calculated = (bearing + self.bearing_offset) % 360
-
-    dt = now - self.last_calculate_gps_time
-    #print(f"dt = {dt:.1f}, {self.vpPosPointLatNavi}, {self.vpPosPointLonNavi}")
-    if dt > 5.0:
-      self.vpPosPointLat, self.vpPosPointLon = 0.0, 0.0
-    elif dt == 0:
-      self.vpPosPointLat, self.vpPosPointLon = self.vpPosPointLatNavi, self.vpPosPointLonNavi
+        sources.remove('device')
+    if not sm.alive[gps_service] or not sm.valid[gps_service]:
+      sources.remove('device')
+    vehicle = sm['carState'].vehicleGps
+    ego_speed = v_ego if math.isfinite(v_ego) and 0 <= v_ego <= 90 else 0.
+    if sm.alive['carState'] and sm.valid['carState'] and vehicle.valid:
+      sources.put('vehicle', vehicle.latitude, vehicle.longitude,
+                  vehicle.headingDeg if vehicle.headingValid else None, ego_speed, vehicle.sampleMonoTime / 1e9)
     else:
-      self.vpPosPointLat, self.vpPosPointLon = self.estimate_position(float(self.vpPosPointLatNavi), float(self.vpPosPointLonNavi), v_ego, bearing_calculated, dt + gpsDelayTimeAdjust)
-
-    #self.debugText = " {} {:.1f},{:.1f}={:.1f}+{:.1f}".format(self.active_sdi_count, self.nPosAngle, bearing_calculated, bearing, self.bearing_offset)
-    #print("nPosAngle = {:.1f},{:.1f} = {:.1f}+{:.1f}".format(self.nPosAngle, bearing_calculated, bearing, self.bearing_offset))
-
-    return float(bearing_calculated)
+      sources.remove('vehicle')
+    source, fix = sources.select(now)
+    if source != getattr(self, 'position_source', 'none'):
+      print(f'[GPS] source={source}', flush=True)
+    self.position_source = source
+    self.position_mono_time = now
+    self.position_heading_valid = fix is not None and fix.heading is not None
+    if fix is None:
+      self.vpPosPointLat = self.vpPosPointLon = 0.
+      self.last_calculate_gps_time = 0.
+      return float(self.nPosAngle)
+    self.last_calculate_gps_time = fix.stamp
+    if fix.heading is not None:
+      self.nPosAngle = fix.heading
+    self.nPosSpeed = fix.speed * 3.6
+    # Unknown direction permits a raw position, never guessed motion.
+    elapsed = now - fix.stamp if fix.heading is not None else 0.
+    self.vpPosPointLat, self.vpPosPointLon = self.estimate_position(
+      fix.latitude, fix.longitude, ego_speed, self.nPosAngle, elapsed)
+    return float(self.nPosAngle)
 
 
   def estimate_position(self, lat, lon, speed, angle, dt):
@@ -1293,7 +1294,7 @@ class CarrotServ:
     return self.navi_source == source
 
   def update_nav_instruction(self, sm):
-    if not self.accepts_navigation(NAVI_SOURCE_NETWORK):
+    if not self.accepts_navigation(NAVI_SOURCE_NETWORK) or self._external_navigation_connected():
       return
     if sm.alive['navInstruction'] and sm.valid['navInstruction']:
       msg_nav = sm['navInstruction']
@@ -1359,6 +1360,7 @@ class CarrotServ:
     self.debugText = ""
     self.update_params()
     carrot_navi_active = self._update_carrot_navi(sm)
+    model_route = self._publish_model_route(sm, pm)
     if sm.alive['carState'] and sm.alive['selfdriveState']:
       CS = sm['carState']
       v_ego = CS.vEgo
@@ -1584,6 +1586,10 @@ class CarrotServ:
     msg.carrotMan.xPosSpeed = float(v_ego_kph) #float(self.nPosSpeed)
     msg.carrotMan.xPosAngle = float(self.bearing)
     msg.carrotMan.xPosLat = float(self.vpPosPointLat)
+    msg.carrotMan.positionFixMonoTime = max(0, int(self.last_calculate_gps_time * 1e9))
+    msg.carrotMan.positionMonoTime = max(0, int(self.position_mono_time * 1e9))
+    msg.carrotMan.positionSource = getattr(self, 'position_source', 'none')
+    msg.carrotMan.positionHeadingValid = getattr(self, 'position_heading_valid', False)
     msg.carrotMan.xPosLon = float(self.vpPosPointLon)
 
     msg.carrotMan.nGoPosDist = self.nGoPosDist
@@ -1600,7 +1606,7 @@ class CarrotServ:
     msg.carrotMan.leftSec = int(self.carrot_left_sec)
     pm.send('carrotMan', msg)
 
-    inst = messaging.new_message('navInstructionCarrot')
+    inst = messaging.new_message('navInstructionCarrot', valid=False)
     if self.active_carrot > 1 and self.active_kisa_count <= 0:
       inst.valid = True
 
@@ -1640,10 +1646,72 @@ class CarrotServ:
           maneuvers.append(maneuver)
 
       instruction.allManeuvers = maneuvers
-    elif sm.alive['navInstruction'] and sm.valid['navInstruction']:
+    elif (self.accepts_navigation(NAVI_SOURCE_NETWORK) and not self._external_navigation_connected()
+          and sm.alive['navInstruction'] and sm.valid['navInstruction']):
+      inst.valid = True
       inst.navInstructionCarrot = sm['navInstruction']
 
+    self._stamp_model_instruction(inst, model_route, v_ego)
     pm.send('navInstructionCarrot', inst)
+
+  def _stamp_model_instruction(self, inst, model_route, speed=0.):
+    from openpilot.selfdrive.navigation.helpers import finite_number, valhalla_type
+    from openpilot.selfdrive.navigation.provenance import TBT_MAX_AGE
+
+    if not self._external_navigation_connected():
+      return
+    instruction = inst.navInstructionCarrot
+    instruction.carrotRouteId = instruction.instructionMonoTime = instruction.distanceMonoTime = 0
+    instruction.navigationSource = ''
+    if not inst.valid or not model_route.generation or not finite_number(speed) or speed < 0:
+      return
+    now_ns = time.monotonic_ns()
+    # Shared display/control fields can be updated by either network protocol.
+    # Model inputs use immutable, independently timed observations instead.
+    current = getattr(self, 'model_guidance_current', None)
+    upcoming = getattr(self, 'model_guidance_next', None)
+    for item in (current, upcoming):
+      if item is None:
+        return
+      source, session, observed, turn_type, distance = item
+      if (source != model_route.source or session != model_route.session
+          or observed <= 0 or observed < model_route.observed
+          or not 0 <= now_ns - observed < int(TBT_MAX_AGE * 1e9)
+          or not finite_number(distance) or distance < 0):
+        return
+      maneuver_type, modifier, _ = nav_type_mapping.get(turn_type, ('invalid', '', -1))
+      command = valhalla_type(maneuver_type, modifier)
+      if command is None:
+        return
+      if command <= 6 or distance - speed * ((now_ns - observed) / 1e9) < 0:
+        continue
+      # The wire format has one clock for all maneuvers. Emit only the selected
+      # model maneuver, with its own original distance; MapInput projects it.
+      instruction.allManeuvers = [{'distance': float(distance), 'type': maneuver_type, 'modifier': modifier}]
+      instruction.carrotRouteId = model_route.generation
+      instruction.navigationSource = source
+      instruction.instructionMonoTime = instruction.distanceMonoTime = observed
+      return
+
+  def _publish_model_route(self, sm, pm):
+    if not hasattr(self, 'model_routes'):
+      self.model_routes = RoutePublication()
+    if sm.updated['navRouteNavd'] and self.accepts_navigation(NAVI_SOURCE_NETWORK):
+      route = sm['navRouteNavd']
+      self.model_routes.offer('mapbox', route.coordinates if sm.valid['navRouteNavd'] else (),
+                              generation=route.carrotRouteId)
+    navi = self.carrot_navi_control if self.carrot_navi_active else None
+    if navi is not None:
+      source = 'navdy' if self.accepts_navigation(NAVI_SOURCE_NAVDY) else 'network-v2'
+      points = navi.route.polyline if navi.route.present and not navi.off_route else ()
+      self.model_routes.offer(source, [{'latitude': lat, 'longitude': lon} for lat, lon in points],
+                              session=navi.session_id, observed=navi.route.received_mono_time_ns)
+    elif self.accepts_navigation(NAVI_SOURCE_NAVDY):
+      source = 'navdy'
+      self.model_routes.offer(source, ())
+    else:
+      source = 'network-v1' if self._external_navigation_connected() else 'mapbox'
+    return self.model_routes.publish(source, pm)
 
   def _update_system_time(self, epoch_time_remote, timezone_remote):
     epoch_time = int(time.time())
@@ -1742,7 +1810,7 @@ class CarrotServ:
       self.carrotArg = json.get("carrotArg")
       print(f"carrotCmd = {self.carrotCmd}, {self.carrotArg}")
 
-    if selected:
+    if selected and any(key in json for key in ('nRoadLimitSpeed', 'nTBTTurnType', 'goalPosX')):
       self.active_count = 80
     now = time.monotonic()
 
@@ -1755,6 +1823,7 @@ class CarrotServ:
         self.szGoalName = json.get("szGoalName", self.szGoalName)
 
     if "nRoadLimitSpeed" in json:
+      self.model_guidance_current = self.model_guidance_next = None
       #print(json)
       self.active_sdi_count = self.active_sdi_count_max
       ### roadLimitSpeed
@@ -1814,10 +1883,20 @@ class CarrotServ:
       if self.vpPosPointLatNavi != 0.0:
         self.last_update_gps_time_navi = self.last_calculate_gps_time = now
         self.nPosAngle = float(json.get("nPosAngle", self.nPosAngle))
+        self._gps_sources().put('external_navi', self.vpPosPointLatNavi, self.vpPosPointLonNavi,
+                                _f(json.get('nPosAngle'), math.nan), _f(json.get('nPosSpeed'), 0) / 3.6, now)
+      else:
+        self._gps_sources().remove('external_navi')
 
       self.nPosSpeed = float(json.get("nPosSpeed", self.nPosSpeed))
       self._update_tbt()
       self._update_sdi()
+      source_name = 'network-v1' if source == NAVI_SOURCE_NETWORK else 'navdy'
+      observed = int(now * 1e9)
+      self.model_guidance_current = (source_name, '', observed, int(json.get('nTBTTurnType', -1)),
+                                     int(json.get('nTBTDist', 0)))
+      self.model_guidance_next = (source_name, '', observed, int(json.get('nTBTTurnTypeNext', -1)),
+                                  int(json.get('nTBTDistNext', 0)))
       print(
         f"sdi = {self.nSdiType}, {self.nSdiSpeedLimit}, {self.nSdiPlusType}, " +
         f"tbt = {self.nTBTTurnType}, {self.nTBTDist}, " +
@@ -1830,21 +1909,16 @@ class CarrotServ:
 
     # 3초간 navi 데이터가 없으면, phone gps로 업데이트
     if "latitude" in json:
-      self.nPosAnglePhone = _f(json.get("heading"), self.nPosAngle)
-      self.phone_latitude = _f(json.get("latitude"), self.vpPosPointLatNavi)
-      self.phone_longitude = _f(json.get("longitude"), self.vpPosPointLonNavi)
-      self.phone_gps_accuracy = _f(json.get("accuracy"), 0)
-      if self.phone_gps_accuracy < 15.0:
-        self.phone_gps_frame += 1
-      if (now - self.last_update_gps_time_navi) > 3.0:
-        self.vpPosPointLatNavi = self.phone_latitude
-        self.vpPosPointLonNavi = self.phone_longitude
-
-        self.nPosAngle = self.nPosAnglePhone
-        # self.nPosSpeed = self.ve # TODO speed from v_ego
-        self.last_update_gps_time_phone = self.last_calculate_gps_time = now        
-        self.nPosSpeed = float(json.get("gps_speed", 0))
-        print(f"phone gps: {self.vpPosPointLatNavi}, {self.vpPosPointLonNavi}, {self.phone_gps_accuracy}, {self.nPosSpeed}")
+      self.phone_latitude = _f(json.get("latitude"), math.nan)
+      self.phone_longitude = _f(json.get("longitude"), math.nan)
+      self.nPosAnglePhone = _f(json.get("heading"), math.nan)
+      self.phone_gps_accuracy = _f(json.get("accuracy"), math.nan)
+      if math.isfinite(self.phone_gps_accuracy) and 0 <= self.phone_gps_accuracy <= 30:
+        self.last_update_gps_time_phone = now
+        self._gps_sources().put('phone', self.phone_latitude, self.phone_longitude, self.nPosAnglePhone,
+                                _f(json.get('gps_speed'), 0) / 3.6, now)
+      else:
+        self._gps_sources().remove('phone')
 
 
 import traceback

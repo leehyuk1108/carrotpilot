@@ -6,6 +6,22 @@ import time
 CAPABILITY = 'carrot_boot_update_v1'
 MESSAGE = 0x4003
 RELEASE = Path(__file__).with_name('host_release.json')
+CONNECTION_GRACE = 120.
+
+
+class RuntimeHandoff(ConnectionError):
+  """The boot gate deliberately handed its transport to the selected runtime."""
+
+
+def initial_connection_wait(error, *, elapsed, ready_once, preparing):
+  # Only an unanswered first handshake is ordinary startup. Engine/model
+  # errors, unsafe cleanup and failures after a working session remain errors.
+  from jetlink.transport.base import LinkError, LinkTimeout
+  no_reader = (isinstance(error, LinkError)
+               and str(error).startswith(('gadget write had no reader for ',
+                                          'gadget write had no reader before deadline;')))
+  return (not ready_once and not preparing and 0 <= elapsed < CONNECTION_GRACE
+          and (isinstance(error, (TimeoutError, LinkTimeout)) or no_reader))
 
 
 def wait_for_boot_update(client, peer, wifi, connected, publish, sleep=time.sleep):
@@ -18,12 +34,16 @@ def wait_for_boot_update(client, peer, wifi, connected, publish, sleep=time.slee
     client.t.send_json(MESSAGE, client._next_seq(), manifest)
     if wifi is not None:
       wifi.send(client)
-    value = client.state().get('carrot_update', {})
+    value = client.state().get('carrot_update')
     if not isinstance(value, dict):
-      value = {}
+      # The runtime may already own USB before the gate's final STATE reply.
+      # Reconnect for a fresh HELLO instead of sending boot selections forever.
+      break
     publish('updating', peer=peer, host_update=value)
     if value.get('state') == 'ready':
       break
     sleep(.5)
   # The gate has no model. A fresh connection must greet the real server.
-  raise ConnectionError('Jetson boot gate ended; reconnecting to runtime')
+  if not connected():
+    raise ConnectionError('Jetson disconnected during boot release check')
+  raise RuntimeHandoff('Jetson boot gate ended; reconnecting to runtime')

@@ -533,7 +533,7 @@ class CarrotMan:
     # Keep the existing route consumer alive without asking navd to calculate a
     # different route from the app's destination.
     self.navd_active = self.navi_points_active
-    self.send_routes(coords)
+    self.send_routes(coords, route_source='network-v2')
 
   def carrot_navi_route(self):
 
@@ -1320,7 +1320,7 @@ class CarrotMan:
     return struct.unpack('!f', float_data)[0]
 
 
-  def send_routes(self, coords, from_navd=False):
+  def send_routes(self, coords, from_navd=False, *, route_source='network-v1'):
     if from_navd and not self.carrot_serv.accepts_navigation(NAVI_SOURCE_NETWORK):
       return
     original_count = len(coords)
@@ -1351,9 +1351,10 @@ class CarrotMan:
         self.navi_points_active = False
         self.navd_active = False
 
-    msg = messaging.new_message('navRoute', valid=True)
-    msg.navRoute.coordinates = coords
-    self.pm.send('navRoute', msg)
+    # The main publisher chooses one source and emits paired route heartbeats.
+    # navd's provenance is consumed directly from its cereal message there.
+    if not from_navd and route_source == 'network-v1':
+      self.carrot_serv.model_routes.offer('network-v1', coords)
 
   def carrot_route(self):
     if not self.carrot_serv.accepts_navigation(NAVI_SOURCE_NETWORK):

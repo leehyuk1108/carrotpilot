@@ -23,9 +23,9 @@ def ignored_processes(device='mici', nvme=False):
 
 
 @pytest.mark.parametrize('device,nvme,expected', [
-  ('mici', False, {'jetson_maintenance', 'comma_remote', 'carrot_cluster', 'navdy_bridge'}),
-  ('tici', False, {'jetson_maintenance', 'comma_remote', 'carrot_cluster', 'navdy_bridge'}),
-  ('tici', True, {'jetson_maintenance', 'comma_remote', 'carrot_cluster', 'navdy_bridge', 'loggerd'}),
+  ('mici', False, {'jetson_maintenance', 'comma_remote', 'carrot_cluster', 'navdy_bridge', 'mapsd'}),
+  ('tici', False, {'jetson_maintenance', 'comma_remote', 'carrot_cluster', 'navdy_bridge', 'mapsd'}),
+  ('tici', True, {'jetson_maintenance', 'comma_remote', 'carrot_cluster', 'navdy_bridge', 'mapsd', 'loggerd'}),
 ])
 def test_only_non_driving_helpers_are_added_to_existing_exception_policy(device, nvme, expected):
   assert ignored_processes(device, nvme) == expected

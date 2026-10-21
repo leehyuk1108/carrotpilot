@@ -167,7 +167,7 @@ class SelfdriveD:
 
     # Remote access, maintenance and the optional display do not supply driving data.
     # Manager still logs their failures and restarts them.
-    self.ignored_processes = {'jetson_maintenance', 'comma_remote', 'carrot_cluster', 'navdy_bridge'}
+    self.ignored_processes = {'jetson_maintenance', 'comma_remote', 'carrot_cluster', 'navdy_bridge', 'mapsd'}
     # Some comma three with NVMe experience dropouts mid-drive that crash loggerd.
     if HARDWARE.get_device_type() == 'tici' and os.path.exists('/dev/nvme0'):
       self.ignored_processes.add('loggerd')

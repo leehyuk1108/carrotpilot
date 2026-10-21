@@ -5,7 +5,7 @@ import math
 from typing import Any
 
 
-MAX_ROUTE_POINTS = 256
+MAX_ROUTE_POINTS = 4096
 MAX_ROAD_LIMIT_KPH = 200
 ROAD_LIMIT_STEP_KPH = 10
 
@@ -19,6 +19,7 @@ class NaviGuidanceControl:
   main_text: str = ""
   near_direction: str = ""
   far_direction: str = ""
+  received_mono_time_ns: int = 0
 
 
 @dataclass(frozen=True)
@@ -30,6 +31,7 @@ class NaviVehicleControl:
   heading_deg: float = 0.0
   speed_kph: float = 0.0
   road_name: str = ""
+  received_mono_time_ns: int = 0
 
 
 @dataclass(frozen=True)
@@ -65,6 +67,7 @@ class NaviRouteControl:
   remaining_distance_m: int = 0
   remaining_time_sec: int = 0
   polyline: tuple[tuple[float, float], ...] = ()
+  received_mono_time_ns: int = 0
 
 
 @dataclass(frozen=True)
@@ -149,6 +152,7 @@ def _guidance(item: Any, enabled: bool) -> NaviGuidanceControl:
     main_text=_text(item, "mainText") if present else "",
     near_direction=_text(item, "nearDirection") if present else "",
     far_direction=_text(item, "farDirection") if present else "",
+    received_mono_time_ns=max(0, _int(_get(item, "meta"), "receivedMonoTimeNanos")),
   )
 
 
@@ -166,6 +170,7 @@ def _vehicle(data: Any) -> NaviVehicleControl:
     heading_deg=_float(item, "headingDeg") % 360.0 if present else 0.0,
     speed_kph=max(0.0, _float(item, "speedKph")) if present else 0.0,
     road_name=_text(item, "roadName") if present else "",
+    received_mono_time_ns=max(0, _int(_get(item, "meta"), "receivedMonoTimeNanos")),
   )
 
 
@@ -175,20 +180,26 @@ def _route(data: Any) -> NaviRouteControl:
   points: list[tuple[float, float]] = []
   if present:
     try:
-      values = tuple(_get(item, "polyline", ()) or ())[:MAX_ROUTE_POINTS]
+      values = _get(item, "polyline", ()) or ()
+      if len(values) > MAX_ROUTE_POINTS:
+        values = ()
     except Exception:
       values = ()
     for point in values:
       latitude = _float(point, "latitude", math.nan)
       longitude = _float(point, "longitude", math.nan)
-      if -90.0 <= latitude <= 90.0 and -180.0 <= longitude <= 180.0:
+      if -85.05112878 <= latitude <= 85.05112878 and -180.0 <= longitude <= 180.0:
         points.append((latitude, longitude))
+      else:
+        points = []
+        break
   return NaviRouteControl(
     present=present,
     sequence=sequence,
     remaining_distance_m=max(0, _int(item, "remainingDistanceM")) if present else 0,
     remaining_time_sec=max(0, _int(item, "remainingTimeSec")) if present else 0,
     polyline=tuple(points),
+    received_mono_time_ns=max(0, _int(_get(item, "meta"), "receivedMonoTimeNanos")),
   )
 
 

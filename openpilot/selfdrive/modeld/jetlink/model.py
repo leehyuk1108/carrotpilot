@@ -124,6 +124,7 @@ class JoiningModel:
     self.join_allowed = False
     self.next_join = 0.
     self.next_status = 0.
+    self.nav_input_status = {}
     self.ready = False
     self.reset = True
     self.error = ''
@@ -144,7 +145,7 @@ class JoiningModel:
       self.ready = state().get('state') == 'ready'
       record = {'active': self.active, 'ready': self.ready, 'model': model_name(self.spec), 'sha256': self.spec.sha256,
                 'nav_model': 'nav_map' in self.spec.input_shapes,
-                'error': self.error, 'updated': now}
+                'error': self.error, 'updated': now, **self.nav_input_status}
       tmp = MODEL_STATUS.with_suffix('.tmp')
       try:
         tmp.write_text(json.dumps(record))

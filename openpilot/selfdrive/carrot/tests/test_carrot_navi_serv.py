@@ -404,6 +404,7 @@ def test_curve_selection_ignores_retired_model_speed(monkeypatch, mode, expected
 
   class SubMaster(dict):
     alive = {'carState': False, 'selfdriveState': False, 'navInstruction': False}
+    updated = {'navRouteNavd': False}
 
   sm = SubMaster(modelV2=SimpleNamespace(meta=SimpleNamespace(modelTurnSpeed=16.)))
   sent = {}

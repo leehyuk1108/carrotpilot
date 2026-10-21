@@ -55,19 +55,48 @@
     searchTitle: tr("목적지 검색", "Find a destination"), search: tr("검색", "Search"),
     currentTitle: tr("저장된 목적지", "Saved destination"), clear: tr("목적지 삭제", "Clear destination"),
     previewTitle: tr("지도 미리보기", "Map preview"), refresh: tr("상태 새로고침", "Refresh status"),
-    previewNote: tr("미리보기 전용. N16 경로·지도 입력 미연결.", "Preview only. N16 route/map input not connected."),
+    previewNote: tr("지도 미리보기 · 모델 입력 상태는 별도 확인", "Map preview · Model input status checked separately"),
   };
   Object.entries(labels).forEach(([id, label]) => { $(id).textContent = label; });
   $("query").setAttribute("aria-label", tr("목적지", "Destination"));
   $("results").setAttribute("aria-label", tr("검색 결과", "Search results"));
   $("map").alt = tr("경로 지도 미리보기", "Route map preview");
 
-  const unavailable = tr("N16 경로·지도 입력 미연결", "N16 route/map input not connected");
-  const disconnected = tr("이 빌드에는 N16 경로·지도 입력 연결이 없습니다.", "The N16 route/map input pipeline is not connected in this build.");
+  const unavailable = tr("내비 모델 입력 상태 미확인", "Navigation model input unverified");
+  const checking = tr("내비 입력 상태 확인 중", "Checking navigation input");
   const optionalInput = tr("카메라 추론과 별개의 선택적 내비 입력입니다.", "Camera inference is independent of this optional navigation input.");
+  const inputReasons = new Map([
+    ["ready", tr("N16 내비 입력 준비됨", "N16 navigation input ready")],
+    ["model_status_missing", tr("모델 상태 없음", "Model status unavailable")],
+    ["model_status_stale", tr("모델 상태 만료", "Model status expired")],
+    ["model_status_unavailable", unavailable],
+    ["model_inactive", tr("내비 모델 비활성", "Navigation model inactive")],
+    ["unsupported_model", tr("현재 모델은 N16 내비 입력 미지원", "Current model does not support N16 navigation input")],
+    ["route_unavailable", tr("전체 경로 없음", "Complete route unavailable")],
+    ["tbt_unavailable", tr("현재 경로 안내 없음", "Current turn guidance unavailable")],
+    ["context_expired", tr("경로 안내 만료", "Route guidance expired")],
+    ["map_not_yet_available", tr("모델 지도 입력 대기 중", "Waiting for model map input")],
+    ["navigation_not_yet_available", tr("내비 입력 대기 중", "Waiting for navigation input")],
+    ["navigation_unavailable", tr("내비 입력 없음", "Navigation input unavailable")],
+    ["source_unavailable", tr("내비 입력 소스 미확인", "Navigation source unverified")],
+  ]);
+  const mapReasons = new Map([
+    ["position", tr("현재 GPS 위치 없음", "Current GPS position unavailable")],
+    ["route", tr("전체 경로 없음", "Complete route unavailable")],
+    ["instruction", tr("현재 경로 안내 없음", "Current turn guidance unavailable")],
+    ["route_position", tr("현재 위치와 경로 불일치", "Current position does not match the route")],
+    ["context_changed", tr("경로 또는 입력 소스 변경됨", "Route or navigation source changed")],
+    ["slow", tr("지도 생성 지연", "Map rendering delayed")],
+    ["stale", tr("지도 미리보기 만료", "Map preview expired")],
+    ["source_unavailable", tr("내비 입력 소스 미확인", "Navigation source unverified")],
+    ["idle", tr("지도 생성 대기 중", "Waiting for map rendering")],
+    ["waiting", tr("지도 생성 대기 중", "Waiting for map rendering")],
+    ["offroad", tr("현재 지도 미리보기 없음", "Map preview currently unavailable")],
+    ["tiles", tr("지도 데이터 없음", "Map data unavailable")],
+  ]);
   let snapshot = null, alive = true, busy = false;
   let searchGeneration = 0, statusGeneration = 0, mapGeneration = 0, writeGeneration = 0;
-  let searchController, statusController, mapController, imageUrl;
+  let searchController, statusController, mapController, imageUrl, refreshTimer;
   let resultButtons = [];
   const requests = new Set();
 
@@ -133,8 +162,14 @@
     $("editStatus").textContent = snapshot.destination_editable
       ? tr("목적지 저장은 내비 입력 선택을 바꾸지 않습니다.", "Saving a destination does not change the selected source.")
       : tr("선택된 입력 또는 외부 내비가 목적지를 관리합니다. 검색만 가능합니다.", "Destination managed by the selected source or external navigation. Search remains available.");
-    // Never promote model-input readiness from a stored destination or PNG.
-    $("pipelineStatus").textContent = unavailable;
+    // A ready PNG or model selection alone must never promote inference status.
+    const ready = value.model_input_ready === true && value.model_status_fresh === true
+      && value.model_active === true && value.nav_model === true && value.nav_input_supported === true
+      && value.nav_route_available === true && value.nav_tbt_available === true && value.nav_map_available === true
+      && value.pipeline_status === "ready" && value.navigation_source === "network";
+    const reason = value.pipeline_status === "ready" && !ready ? "model_status_unavailable" : value.pipeline_status;
+    $("pipelineStatus").textContent = inputReasons.get(reason) || unavailable;
+    $("pipelineStatus").setAttribute("data-ready", String(ready));
     $("pipelineReason").textContent = optionalInput;
     controls();
   }
@@ -158,10 +193,6 @@
   async function preview() {
     invalidateMap();
     const generation = mapGeneration;
-    if (snapshot?.pipeline_status === "not_connected") {
-      waiting(disconnected);
-      return;
-    }
     mapController = new AbortController();
     try {
       const { reason, blob } = await request("map.png", {}, "map", mapController);
@@ -173,14 +204,7 @@
         $("mapStatus").hidden = true;
         $("attribution").hidden = false;
       } else {
-        const reasons = {
-          not_connected: disconnected,
-          position: tr("현재 GPS 위치 없음", "Current GPS position unavailable"),
-          route: tr("경로 지도 없음", "No route map available"),
-          offroad: tr("현재 지도 미리보기 없음", "Map preview currently unavailable"),
-          tiles: tr("지도 데이터 없음", "Map data unavailable"),
-        };
-        waiting(reasons[reason] || tr("지도 미리보기 없음", "Map preview unavailable"));
+        waiting(mapReasons.get(reason) || tr("지도 미리보기 없음", "Map preview unavailable"));
       }
     } catch (_) {
       if (alive && generation === mapGeneration) waiting(failure(0));
@@ -188,14 +212,16 @@
   }
 
   async function refresh() {
-    if (!alive || busy) return;
+    clearTimeout(refreshTimer);
+    if (!alive || busy || document.hidden) return;
     const generation = ++statusGeneration;
     statusController?.abort();
     statusController = new AbortController();
     snapshot = null;
     controls();
     invalidateMap();
-    $("pipelineStatus").textContent = unavailable;
+    $("pipelineStatus").textContent = checking;
+    $("pipelineStatus").setAttribute("data-ready", "false");
     try {
       const value = await request("destination", {}, "json", statusController);
       if (!alive || generation !== statusGeneration) return;
@@ -207,8 +233,15 @@
       $("keyStatus").textContent = tr("알 수 없음", "Unknown");
       $("current").textContent = tr("저장 상태 미확인", "Saved destination unverified");
       $("editStatus").textContent = tr("상태 확인 전에는 목적지를 변경할 수 없습니다.", "Destination changes are locked until status is verified.");
+      $("pipelineStatus").textContent = unavailable;
       $("pipelineReason").textContent = failure(0);
       waiting(failure(0));
+    } finally {
+      // Keep the two-second render demand alive only while the page is visible.
+      // Schedule after completion so slow requests never accumulate.
+      if (alive && !busy && !document.hidden && generation === statusGeneration) {
+        refreshTimer = setTimeout(refresh, 1000);
+      }
     }
   }
 
@@ -263,11 +296,14 @@
         || (method === "POST" && generation !== searchGeneration)) return;
     // Serialize writes: aborting fetch does not undo a server-side mutation.
     busy = true;
+    clearTimeout(refreshTimer);
     const write = ++writeGeneration;
     statusGeneration += 1;
     statusController?.abort();
     invalidateSearch();
     invalidateMap();
+    $("pipelineStatus").textContent = checking;
+    $("pipelineStatus").setAttribute("data-ready", "false");
     controls();
     $("status").textContent = tr("저장 중", "Saving");
     try {
@@ -276,7 +312,7 @@
       } : { method });
       if (!alive || write !== writeGeneration) return;
       $("status").textContent = method === "POST"
-        ? tr("목적지만 저장했습니다. N16 경로·지도 입력 미연결.", "Destination saved only. N16 route/map input not connected.")
+        ? tr("목적지를 저장했습니다.", "Destination saved.")
         : tr("목적지를 삭제했습니다.", "Destination cleared.");
     } catch (error) {
       if (!alive || write !== writeGeneration) return;
@@ -295,16 +331,28 @@
   $("map").addEventListener("error", () => waiting(tr("지도 이미지를 읽을 수 없습니다.", "Map image could not be decoded.")));
   window.addEventListener("pagehide", () => {
     alive = false;
+    clearTimeout(refreshTimer);
     writeGeneration += 1;
     searchGeneration += 1; statusGeneration += 1; mapGeneration += 1;
     requests.forEach((controller) => controller.abort());
-    waiting(disconnected);
+    $("pipelineStatus").textContent = unavailable;
+    $("pipelineStatus").setAttribute("data-ready", "false");
+    waiting(tr("지도 미리보기 없음", "Map preview unavailable"));
   });
   window.addEventListener("pageshow", (event) => {
     if (event.persisted) { alive = true; busy = false; invalidateSearch(); refresh(); }
   });
   document.addEventListener("visibilitychange", () => {
-    if (!document.hidden && alive && !busy) refresh();
+    if (document.hidden) {
+      clearTimeout(refreshTimer);
+      statusGeneration += 1;
+      statusController?.abort();
+      invalidateMap();
+      snapshot = null;
+      controls();
+      $("pipelineStatus").textContent = unavailable;
+      $("pipelineStatus").setAttribute("data-ready", "false");
+    } else if (alive && !busy) refresh();
   });
   refresh();
 })();

@@ -2526,6 +2526,10 @@ struct NavInstruction {
   speedLimitSign @11 :SpeedLimitSign;
 
   allManeuvers @12 :List(Maneuver);
+  carrotRouteId @13 :UInt64;
+  navigationSource @14 :Text;
+  instructionMonoTime @15 :UInt64; # original guidance observation, not relay heartbeat
+  distanceMonoTime @16 :UInt64; # last ego-distance projection time
 
   struct Lane {
     directions @0 :List(Direction);
@@ -2556,6 +2560,8 @@ struct NavInstruction {
 
 struct NavRoute {
   coordinates @0 :List(Coordinate);
+  carrotRouteId @1 :UInt64;
+  navigationSource @2 :Text;
 
   struct Coordinate {
     latitude @0 :Float32;

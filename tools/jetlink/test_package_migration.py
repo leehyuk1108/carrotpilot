@@ -53,7 +53,7 @@ def test_display_and_web_take_one_snapshot_each(tmp_path, monkeypatch):
   read = Mock(wraps=status._read)
   monkeypatch.setattr(status, '_read', read)
   badge, detail = status.display_status()
-  assert badge == ('jetSON WAIT', 'loading') and detail == 'download 50%: Test model'
+  assert badge == ('jetSON 모델 준비 중', 'loading') and detail == 'download 50%: Test model'
   assert [call.args[0] for call in read.call_args_list] == [link, model]
   read.reset_mock()
   value = status.web_status()

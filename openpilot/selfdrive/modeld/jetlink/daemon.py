@@ -21,7 +21,8 @@ from openpilot.selfdrive.modeld.jetlink.mobile import transport_mode, setup_gadg
 from openpilot.selfdrive.modeld.jetlink.mobile import initialize_management, activate_management, deactivate_management
 from openpilot.selfdrive.modeld.jetlink.contracts import model_name
 from openpilot.selfdrive.modeld.jetlink.selection import ModelChanged, check_loaded
-from openpilot.selfdrive.modeld.jetlink.startup import CAPABILITY as BOOT_UPDATE_CAPABILITY, wait_for_boot_update
+from openpilot.selfdrive.modeld.jetlink.startup import (CAPABILITY as BOOT_UPDATE_CAPABILITY, CONNECTION_GRACE,
+                                                       RuntimeHandoff, initial_connection_wait, wait_for_boot_update)
 from jetlink.client import JetlinkClient
 from jetlink.transport.base import LinkError, LinkTimeout
 from jetlink.transport.ffs import FfsTransport
@@ -392,6 +393,9 @@ def main():
   usb_mode = None
   tcp_seen = False
   mobile_unavailable = False
+  initial_connect_started = None
+  runtime_handoff_started = None
+  ready_once = False
   try:
     while True:
       update_affinity()
@@ -423,6 +427,10 @@ def main():
       client = None
       wifi = None
       transport = None
+      handshaking = False
+      # Retries and USB re-enumeration must not renew the initial grace period.
+      if initial_connect_started is None:
+        initial_connect_started = time.monotonic()
       try:
         publish('connecting', peer=peer, protocol=protocol.version)
         gc.collect()
@@ -480,6 +488,7 @@ def main():
           wire_protocol = ProtocolChoice('3')
         transport.protocol_version = wire_protocol.version
         client = JetlinkClient(transport, name='carrot-jetlink')
+        handshaking = True
         if TRANSPORT_MODE == 'auto' and transport is owner and usb_mode is None and not mobile_unavailable:
           usb_probes += 1
           publish('connecting', peer=None, preparation={'stage': 'usb-probe',
@@ -487,6 +496,7 @@ def main():
           peer = probe_usb(client, wire_protocol)
         else:
           peer = greet(client, wire_protocol)
+        handshaking = False
         if TRANSPORT_MODE == 'auto':
           selected = classify_auto_peer(peer, 'tcp' if transport is not owner else 'usb')
           if selected is None and transport is owner and legacy_usb_peer(peer):
@@ -526,7 +536,22 @@ def main():
         for frame in range(10):
           client.infer(np.zeros(spec.warped_shape, np.uint8), np.zeros(spec.packed_nelem, np.float32), frame, reset=True)
         log.info('Jetlink ready: %s', peer)
+        ready_once = True
+        runtime_handoff_started = None
         serve_local(listener, client, peer, wifi)
+      except RuntimeHandoff as exc:
+        now = time.monotonic()
+        if runtime_handoff_started is None:
+          runtime_handoff_started = now
+        # Updating can take longer than the first HELLO grace. Start a separate
+        # runtime deadline once, and never renew it for repeated gate sessions.
+        if 0 <= now - runtime_handoff_started < CONNECTION_GRACE:
+          log.info('%s', exc)
+          publish('connecting', peer=peer, preparation={'stage': 'runtime-handoff', 'message': str(exc)})
+        else:
+          error = f'Jetson runtime handoff exceeded {CONNECTION_GRACE:g}s: {exc}'
+          log.error('%s', error)
+          publish('retrying', peer=peer, error=error[:300])
       except PreparationDeferred as exc:
         log.info('%s', exc)
         publish('loading', peer=peer, preparation={'stage': 'waiting', 'message': str(exc)})
@@ -542,8 +567,15 @@ def main():
         else:
           publish('retrying', peer=None, error=str(exc)[:300])
       except Exception as exc:
-        log.exception('Jetlink connection failed')
-        publish('retrying', peer=peer, error=str(exc)[:300])
+        started = initial_connect_started if runtime_handoff_started is None else runtime_handoff_started
+        if initial_connection_wait(exc, elapsed=time.monotonic() - started,
+                                   ready_once=ready_once, preparing=not handshaking):
+          log.info('Waiting for initial Jetlink handshake: %s', exc)
+          publish('connecting', peer=peer, error=str(exc)[:300],
+                  preparation={'stage': 'waiting-host', 'message': str(exc)[:300]})
+        else:
+          log.exception('Jetlink connection failed')
+          publish('retrying', peer=peer, error=str(exc)[:300])
       finally:
         ACTIVE_UDC = None
         if client is not None and client.last_state is not None and 'carrot_hud_connected' in client.last_state:

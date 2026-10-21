@@ -26,6 +26,7 @@
     dd { display: flex; align-items: baseline; flex-wrap: wrap; gap: 12px; }
     .pipeline { border-left: 3px solid var(--md-warning); padding: 4px 12px; margin-bottom: 24px; }
     #pipelineStatus { color: var(--md-warning); font-weight: 700; }
+    #pipelineStatus[data-ready="true"] { color: var(--md-success); }
     .layout { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: 32px; align-items: start; }
     section { min-width: 0; }
     form { display: flex; gap: 8px; margin-top: 16px; }
@@ -59,7 +60,7 @@
       <div><dt id="sourceLabel">Configured source</dt><dd><span id="sourceStatus">Checking</span><a id="sourceSettings" href="/?navigation_settings=source">Source settings</a></dd></div>
       <div><dt>Mapbox Public key</dt><dd><span id="keyStatus">Checking</span><a id="keySettings" href="/?navigation_settings=mapbox">Key settings</a></dd></div>
     </dl>
-    <div class="pipeline" role="status" aria-live="polite"><div id="pipelineStatus">N16 route/map input not connected</div><p id="pipelineReason" class="muted">Camera inference is independent of this optional navigation input.</p></div>
+    <div class="pipeline" role="status" aria-live="polite"><div id="pipelineStatus">Checking navigation input</div><p id="pipelineReason" class="muted">Camera inference is independent of this optional navigation input.</p></div>
     <div class="layout">
       <section aria-labelledby="searchTitle">
         <h2 id="searchTitle">Find a destination</h2>
@@ -70,7 +71,7 @@
       </section>
       <section aria-labelledby="previewTitle">
         <div class="section-heading"><h2 id="previewTitle">Map preview</h2><button id="refresh" type="button">Refresh status</button></div>
-        <figure><div class="map-frame"><img id="map" alt="Route map preview" hidden><p id="mapStatus" role="status">Checking map availability.</p></div><figcaption id="previewNote">Preview only. N16 route/map input not connected.</figcaption></figure>
+        <figure><div class="map-frame"><img id="map" alt="Route map preview" hidden><p id="mapStatus" role="status">Checking map availability.</p></div><figcaption id="previewNote">Map preview · Model input status checked separately</figcaption></figure>
         <p class="attribution" id="attribution" hidden>&copy; <a href="https://www.mapbox.com/about/maps/" rel="noreferrer">Mapbox</a> &middot; &copy; <a href="https://www.openstreetmap.org/copyright" rel="noreferrer">OpenStreetMap</a> &middot; <a href="https://protomaps.com/" rel="noreferrer">Protomaps</a></p>
       </section>
     </div>

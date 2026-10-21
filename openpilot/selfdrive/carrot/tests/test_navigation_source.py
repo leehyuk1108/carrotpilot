@@ -4,6 +4,7 @@ import asyncio
 import collections
 import __future__
 import json
+import math
 import sys
 import threading
 import time
@@ -16,6 +17,8 @@ from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 from openpilot.common.constants import CV
 from openpilot.selfdrive.carrot.carrot_navi_control import parse_carrot_navi_control
+from openpilot.selfdrive.carrot.gps_sources import GPSSources
+from openpilot.selfdrive.navigation.provenance import RoutePublication
 from openpilot.selfdrive.navdy.navigation import FeedbackTracker, NavigationReader
 from openpilot.selfdrive.navdy.tests.test_navigation import packet as feedback_packet
 
@@ -55,7 +58,8 @@ def load_class(filename, name, scope):
 def services():
   values = {}
   scope = {"Params": lambda *args: FakeParams(values), "collections": collections, "time": time, "PC": False,
-           "NavigationReader": NavigationReader, "CV": CV, "json": json,
+           "NavigationReader": NavigationReader, "CV": CV, "json": json, "math": math,
+           "GPSSources": GPSSources, "RoutePublication": RoutePublication,
            "parse_carrot_navi_control": parse_carrot_navi_control}
   cls = load_class("carrot_serv.py", "CarrotServ", scope)
   return cls, values

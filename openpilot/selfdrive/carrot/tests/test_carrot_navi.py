@@ -866,7 +866,7 @@ def test_payload_bounds_route_and_publisher_sends_dedicated_service():
   assert len(messaging.pub_master.sent) == 1
   service, message = messaging.pub_master.sent[0]
   assert service == "carrotNavi"
-  assert len(message.carrotNavi["route"]["polyline"]) == 256
+  assert len(message.carrotNavi["route"]["polyline"]) == 300
   assert receiver.health()["cereal_publish_count"] == 1
 
   media_record = SimpleNamespace(

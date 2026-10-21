@@ -46,7 +46,7 @@ def _man():
   man.navi_points_active = False
   man.navd_active = False
   man.sent_routes = []
-  man.send_routes = lambda coords: man.sent_routes.append(coords)
+  man.send_routes = lambda coords, **kwargs: man.sent_routes.append(coords)
   return man
 
 

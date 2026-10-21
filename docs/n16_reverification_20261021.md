@@ -1,5 +1,9 @@
 # Desk Re-verification, 2026-10-21
 
+This is the earlier desk audit. See the later
+[WIP-FR navigation integration](wip_fr_navigation_integration_20261021.md)
+for producer/consumer corrections and their separate validation boundaries.
+
 ## Conclusion
 
 The current installation is not feature-complete for the requested N16/custom

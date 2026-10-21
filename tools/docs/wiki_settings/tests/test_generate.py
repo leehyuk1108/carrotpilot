@@ -85,7 +85,8 @@ class WikiSettingsGeneratorTest(unittest.TestCase):
       catalog_commit=COMMIT,
       generated_at=STAMP,
     )
-    self.assertEqual(len(result.generated_settings), 195)
+    self.assertEqual(len(result.generated_settings), 199)
+    self.assertIn("OnnxBsdEnabled", result.index["settings"])
     self.assertIn("NNFF", result.index["settings"])
     self.assertNotIn("SteerHandoverMode", result.index["settings"])
     self.assertIn("SignalAssistMode", result.index["settings"])
@@ -98,15 +99,15 @@ class WikiSettingsGeneratorTest(unittest.TestCase):
     for retired in ("ClusterHudPriority", "ClusterHudCoreMode", "ClusterHudLiveFps", "CanfdStopRetry", "DisableDM",
                     "CarrotYouTubeLive", "CarrotYouTubeQuality", "CarrotYouTubeTimestamp"):
       self.assertNotIn(retired, result.index["settings"])
-    self.assertEqual(result.index["review"], {"current": 0, "needs_review": 195})
+    self.assertEqual(result.index["review"], {"current": 0, "needs_review": 199})
     self.assertEqual(result.index["locales"], ["ko", "en", "zh"])
-    self.assertEqual(len(result.pages), (195 * 3) + 2)
+    self.assertEqual(len(result.pages), (199 * 3) + 2)
     setting_pages = {
       name: text
       for name, text in result.pages.items()
       if GENERATOR.GENERATED_PAGE_RE.fullmatch(name)
     }
-    self.assertEqual(len(setting_pages), 195 * 3)
+    self.assertEqual(len(setting_pages), 199 * 3)
     self.assertTrue(all(text.count("<!-- CARROT:SETTING:BEGIN ") == 1 for text in setting_pages.values()))
     for name, text in result.pages.items():
       if name.endswith(".md"):
@@ -135,6 +136,21 @@ class WikiSettingsGeneratorTest(unittest.TestCase):
       catalog_page,
     )
     self.assertIn("### 주행 제어\n\n#### 시작·오토\n\n##### 시작 동작", catalog_page)
+
+  def test_onnx_catalog_generates_independent_default_off_bsd(self):
+    source = json.loads(GENERATOR.DEFAULT_CATALOG.read_text(encoding="utf-8"))
+    params = [item for item in source["params"]
+              if item["name"] == "ShareData" or item.get("detail_parent") == "ShareData"]
+    bsd = next(item for item in params if item["name"] == "OnnxBsdEnabled")
+    self.assertEqual((bsd["control"], bsd["min"], bsd["max"], bsd["default"]), ("toggle", 0, 1, 0))
+    with tempfile.TemporaryDirectory() as temp:
+      source_path = write_catalog(Path(temp), catalog(params, [leaf("STEER_ONNX", [item["name"] for item in params])]))
+      result = GENERATOR.generate(source_path, catalog_commit=COMMIT, generated_at=STAMP)
+    self.assertEqual(len(result.generated_settings), 7)
+    self.assertIn("OnnxBsdEnabled", result.index["settings"])
+    for name, text in result.pages.items():
+      if name.endswith(".md"):
+        self.assertEqual(VALIDATOR.validate_wiki_markdown(text), [], name)
 
   def test_manual_region_is_byte_preserved_and_semantic_change_requires_review(self):
     with tempfile.TemporaryDirectory() as temp:

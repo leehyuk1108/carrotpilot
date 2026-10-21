@@ -7,7 +7,7 @@ from unittest.mock import Mock  # noqa: TID251
 
 import pytest
 import pyray as rl
-from cereal import log
+from openpilot.cereal import log
 
 from openpilot.common import jetlink_status
 
@@ -33,7 +33,7 @@ class FakeSubMaster(dict):
     super().__init__()
     for service in services:
       event = log.Event.new_message()
-      if service in ('onroadEvents', 'pandaStates'):
+      if log.Event.schema.fields[service].proto.slot.type.which() in ('list', 'data', 'text'):
         self[service] = event.init(service, 0)
       else:
         self[service] = event.init(service)
@@ -49,14 +49,14 @@ class FakeSubMaster(dict):
 
 def load_ui_modules(monkeypatch):
   # Replace device I/O only. Load the real UI state, HUDs and drawing helper.
-  messaging = ModuleType('cereal.messaging')
+  messaging = ModuleType('openpilot.cereal.messaging')
   messaging.SubMaster = FakeSubMaster
   params = ModuleType('openpilot.common.params')
   params.Params = FakeParams
   prime = ModuleType('openpilot.selfdrive.ui.lib.prime_state')
   prime.PrimeState = lambda: SimpleNamespace(start=Mock())
   monkeypatch.setitem(sys.modules, messaging.__name__, messaging)
-  monkeypatch.setattr(sys.modules['cereal'], 'messaging', messaging, raising=False)
+  monkeypatch.setattr(sys.modules['openpilot.cereal'], 'messaging', messaging, raising=False)
   monkeypatch.setitem(sys.modules, params.__name__, params)
   monkeypatch.setitem(sys.modules, prime.__name__, prime)
 
@@ -99,8 +99,8 @@ def status_files(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize(('values', 'expected'), [
-  ({'state': 'connecting'}, ('jetSON WAIT', 'loading')),
-  ({'state': 'loading'}, ('jetSON WAIT', 'loading')),
+  ({'state': 'connecting'}, ('jetSON 연결 대기', 'loading')),
+  ({'state': 'loading'}, ('jetSON 모델 준비 중', 'loading')),
   ({}, ('jetSON READY', 'ready')),
   ({'active': True}, ('jetSON', 'active')),
   ({'state': 'waiting'}, None),
@@ -131,7 +131,7 @@ def test_real_files_flow_through_ui_update(ui, status_files, monkeypatch):
   for method in ('_update_state', '_update_status'):
     monkeypatch.setattr(state, method, Mock())
   monkeypatch.setattr(ui.state.device, 'update', Mock())
-  for values, expected in [({'state': 'loading'}, ('jetSON WAIT', 'loading')),
+  for values, expected in [({'state': 'loading'}, ('jetSON 모델 준비 중', 'loading')),
                            ({}, ('jetSON READY', 'ready')),
                            ({'active': True}, ('jetSON', 'active')),
                            ({'error': 'inference failed'}, ('jetSON ERROR', 'error')),
@@ -170,8 +170,14 @@ def test_both_huds_draw_current_badge(ui, monkeypatch, kind, detail):
   renderer.is_cruise_available = False
   renderer._font_display = None
   renderer._exp_button = SimpleNamespace(render=Mock())
-  renderer._plot_renderer = SimpleNamespace(draw=Mock())
-  for name in ('_draw_set_speed', '_draw_steering_wheel', '_draw_date_time', '_draw_tpms_top_right'):
+  renderer._plot_renderer = SimpleNamespace(update=Mock(), paint=Mock())
+  renderer._overlay_state = None
+  renderer._overlay = SimpleNamespace(draw=lambda rect, paint, key, **kwargs: paint(rect))
+  renderer._blink_timer = renderer._disp_timer = renderer._show_plot_mode = 0
+  renderer._traffic_light_info = None
+  renderer._show_wheel_critical = False
+  for name in ('_draw_set_speed', '_draw_steering_wheel', '_draw_date_time', '_draw_tpms',
+               '_refresh_hud_params', '_draw_cruise_speed_animation'):
     setattr(renderer, name, Mock())
   monkeypatch.setattr(rl, 'draw_rectangle_gradient_v', Mock())
   draw = Mock()
