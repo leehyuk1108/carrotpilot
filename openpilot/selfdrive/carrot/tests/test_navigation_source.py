@@ -55,10 +55,11 @@ def load_class(filename, name, scope):
 
 
 @pytest.fixture
-def services():
+def services(tmp_path):
   values = {}
   scope = {"Params": lambda *args: FakeParams(values), "collections": collections, "time": time, "PC": False,
-           "NavigationReader": NavigationReader, "CV": CV, "json": json, "math": math,
+           "NavigationReader": lambda: NavigationReader(tmp_path / 'navdy-feedback.json'),
+           "CV": CV, "json": json, "math": math,
            "GPSSources": GPSSources, "RoutePublication": RoutePublication,
            "parse_carrot_navi_control": parse_carrot_navi_control}
   cls = load_class("carrot_serv.py", "CarrotServ", scope)

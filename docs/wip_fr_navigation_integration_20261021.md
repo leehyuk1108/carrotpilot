@@ -56,6 +56,10 @@ the web does not silently switch away from Navdy.
 
 ## Important Limits
 
+The subsequent model-navigation transport work is documented in
+`navdy_model_navigation_20261021.md`. The following describes this integration's
+original baseline before that separate phone/HUD/comma extension.
+
 Current Navdy feedback supplies turn guidance, not the complete route geometry.
 Selecting Navdy therefore still leaves the coupled N16 map/navigation input
 unavailable until that transport supplies a full route. Existing Navdy display,

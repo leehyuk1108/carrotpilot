@@ -133,6 +133,46 @@ def test_navdy_without_whole_route_does_not_substitute_network_route(publisher):
   assert selected.source == 'navdy' and not selected.generation and not selected.points
 
 
+def test_navdy_verified_geometry_and_native_maneuver_reach_model_inputs(publisher, monkeypatch):
+  from openpilot.selfdrive.navdy.tests.test_model_navigation import tracker, packet
+  clock, svc, sm, pm, events, new_message = publisher
+  svc.navi_source = 1
+  source = tracker()
+  monkeypatch.setattr(svc.navdy_navigation, 'model_read', lambda: source.snapshot(clock[0]))
+  route = svc._publish_model_route(sm, pm)
+  inst = new_message('navInstructionCarrot', valid=False)
+  svc._stamp_model_instruction(inst, route, 10.)
+  assert inst.valid
+  assert inst.navInstructionCarrot.carrotRouteId == events['navRoute'].navRoute.carrotRouteId > 0
+  assert inst.navInstructionCarrot.navigationSource == 'navdy'
+  assert inst.navInstructionCarrot.instructionMonoTime == 9_900_000_000
+  assert navigation_input(inst.navInstructionCarrot.allManeuvers, 1.)[15] == 1.
+  old_generation = route.generation
+  clock[0] = 10.2
+  source.accept(packet(sequence=2, route='rerouted'), 10.2, 10.2)
+  route = svc._publish_model_route(sm, pm)
+  assert route.generation != old_generation
+  source.accept({**packet(sequence=3), 'active': False}, 10.3, 10.3)
+  clock[0] = 10.3
+  route = svc._publish_model_route(sm, pm)
+  svc._stamp_model_instruction(inst, route)
+  assert not route.generation and not inst.navInstructionCarrot.carrotRouteId
+
+
+def test_navdy_native_observation_expires_without_renewal_by_route_publication(publisher, monkeypatch):
+  from openpilot.selfdrive.navdy.tests.test_model_navigation import tracker
+  clock, svc, sm, pm, _, new_message = publisher
+  svc.navi_source = 1
+  source = tracker()
+  monkeypatch.setattr(svc.navdy_navigation, 'model_read', lambda: source.snapshot(clock[0]))
+  route = svc._publish_model_route(sm, pm)
+  clock[0] = 12.
+  inst = new_message('navInstructionCarrot', valid=True)
+  svc._stamp_model_instruction(inst, route)
+  assert not inst.navInstructionCarrot.carrotRouteId
+  assert not svc._publish_model_route(sm, pm).generation
+
+
 def start_external(publisher, navi):
   _, svc, sm, pm, _, _ = publisher
   svc.carrot_navi_active = True

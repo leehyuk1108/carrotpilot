@@ -2,7 +2,7 @@
 from dataclasses import dataclass
 import math
 
-PRIORITY = ('external_navi', 'phone', 'vehicle', 'device')
+PRIORITY = ('navdy_model', 'external_navi', 'phone', 'vehicle', 'device')
 
 
 @dataclass(frozen=True)

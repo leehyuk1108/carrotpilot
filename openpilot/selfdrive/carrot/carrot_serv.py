@@ -1168,6 +1168,12 @@ class CarrotServ:
   def _update_gps(self, v_ego, sm, gps_service):
     now = time.monotonic()
     sources = self._gps_sources()
+    model_navigation = getattr(self, 'navdy_model_navigation', None)
+    if (self.accepts_navigation(NAVI_SOURCE_NAVDY) and model_navigation is not None
+        and 0 <= now - model_navigation.observed < 2. and model_navigation.position is not None):
+      sources.put('navdy_model', *model_navigation.position)
+    else:
+      sources.remove('navdy_model')
     gps = sm[gps_service]
     if sm.updated[gps_service]:
       if sm.valid[gps_service] and gps.hasFix:
@@ -1658,6 +1664,22 @@ class CarrotServ:
     from openpilot.selfdrive.navigation.helpers import finite_number, valhalla_type
     from openpilot.selfdrive.navigation.provenance import TBT_MAX_AGE
 
+    if self.accepts_navigation(NAVI_SOURCE_NAVDY):
+      instruction = inst.navInstructionCarrot
+      instruction.carrotRouteId = instruction.instructionMonoTime = instruction.distanceMonoTime = 0
+      instruction.navigationSource = ''
+      state = getattr(self, 'navdy_model_navigation', None)
+      now = time.monotonic()
+      if (state is not None and model_route.generation and model_route.source == 'navdy'
+          and model_route.session == state.session and 0 <= now - state.observed < TBT_MAX_AGE
+          and finite_number(speed) and speed >= 0 and state.distance >= speed * (now - state.observed)):
+        inst.valid = True
+        instruction.carrotRouteId = model_route.generation
+        instruction.navigationSource = 'navdy'
+        instruction.instructionMonoTime = instruction.distanceMonoTime = int(state.observed * 1e9)
+        instruction.allManeuvers = [{'distance': state.distance, 'type': state.maneuver_type, 'modifier': state.modifier}]
+      return
+
     if not self._external_navigation_connected():
       return
     instruction = inst.navInstructionCarrot
@@ -1696,6 +1718,17 @@ class CarrotServ:
   def _publish_model_route(self, sm, pm):
     if not hasattr(self, 'model_routes'):
       self.model_routes = RoutePublication()
+    self.navdy_model_navigation = None
+    if self.accepts_navigation(NAVI_SOURCE_NAVDY):
+      state = self.navdy_navigation.model_read()
+      self.navdy_model_navigation = state
+      route_key = (state.identity, state.points) if state else None
+      if route_key != getattr(self, 'navdy_model_route_key', None) or state is None:
+        self.model_routes.offer('navdy', [{'latitude': lat, 'longitude': lon} for lat, lon in state.points] if state else (),
+                                session=state.session if state else '', observed=int(state.observed * 1e9) if state else 0)
+      self.navdy_model_route_key = route_key
+      return self.model_routes.publish('navdy', pm)
+    self.navdy_model_route_key = None
     if sm.updated['navRouteNavd'] and self.accepts_navigation(NAVI_SOURCE_NETWORK):
       route = sm['navRouteNavd']
       self.model_routes.offer('mapbox', route.coordinates if sm.valid['navRouteNavd'] else (),

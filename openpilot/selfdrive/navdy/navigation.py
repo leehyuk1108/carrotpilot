@@ -12,6 +12,7 @@ from openpilot.selfdrive.carrot.carrot_navi_control import (
   CarrotNaviControl, NaviGuidanceControl, NaviRouteControl, NaviSpeedControl,
   NaviTrafficControl, NaviVehicleControl,
 )
+from openpilot.selfdrive.navdy.model_navigation import ModelNavigationTracker
 
 FEEDBACK_PATH = Path('/dev/shm/navdy-feedback.json')
 STATUS_PATH = Path('/dev/shm/navdy-status.json')
@@ -174,6 +175,10 @@ class NavigationReader:
   def __init__(self, path=FEEDBACK_PATH):
     self.path = Path(path)
     self.tracker = FeedbackTracker()
+    self.model_tracker = ModelNavigationTracker()
+    self.model_route_path = self.path.with_name(self.path.stem + '-model-route.json')
+    self.model_route_stat = None
+    self.model_cache_blocked = None
     self.last_poll = -math.inf
     self.last_stat = None
     self.lock = threading.Lock()
@@ -184,6 +189,8 @@ class NavigationReader:
       return self._read(now)
 
   def _read(self, now):
+    if self.model_tracker.value is not None and not self.model_tracker._fresh(now):
+      self._invalidate_model('model_navigation_stale')
     if now - self.last_poll >= 0.1:
       self.last_poll = now
       try:
@@ -196,9 +203,46 @@ class NavigationReader:
           if len(data) <= MAX_FRAME_BYTES + 1024:
             value = json.loads(data)
             self.tracker.accept(value.get('feedback'), value.get('receivedAt'), now)
+            packet = value.get('feedback')
+            self.model_tracker.accept(packet.get('modelNavigation') if isinstance(packet, dict) else None,
+                                      value.get('receivedAt'), now)
+            if self.model_tracker.current is None:
+              self._invalidate_model(self.model_tracker.reason)
+          else:
+            self._invalidate_model('model_feedback_oversized')
       except (OSError, ValueError, TypeError, AttributeError):
-        pass
+        self._invalidate_model('model_feedback_missing')
     return self.tracker.snapshot(now)
+
+  def _invalidate_model(self, reason):
+    self.model_tracker.clear(reason)
+    # A newly replaced sidecar may already belong to the next fresh feedback.
+    # Invalidate only the cache this reader actually associated with old input.
+    if self.model_route_stat is not None:
+      self.model_cache_blocked = self.model_route_stat[:2]
+
+  def model_read(self, now=None):
+    now = time.monotonic() if now is None else now
+    with self.lock:
+      self._read(now)
+      if not self.model_tracker._fresh(now):
+        return None
+      try:
+        info = self.model_route_path.stat()
+        stamp = info.st_ino, info.st_mtime_ns, self.model_tracker.current
+        if stamp[:2] != self.model_cache_blocked and stamp != self.model_route_stat:
+          self.model_route_stat = stamp
+          with self.model_route_path.open('rb') as stream:
+            data = stream.read(140001)
+          if len(data) <= 140000:
+            self.model_tracker.import_route(json.loads(data))
+      except FileNotFoundError:
+        # No sidecar is expected while the bridge is still assembling chunks.
+        if self.model_tracker.points:
+          self._invalidate_model('model_route_cache_missing')
+      except (OSError, ValueError, TypeError, AttributeError):
+        self._invalidate_model('model_route_cache_missing')
+      return self.model_tracker.snapshot(now)
 
   def status(self):
     now = time.monotonic()
@@ -206,6 +250,8 @@ class NavigationReader:
       state = self._read(now)
       connected = 0 <= now - self.tracker.received_at < LINK_TTL
       return {'connected': connected, 'extendedFeedback': self.tracker.extended,
+              'modelRouteReady': bool(self.model_tracker.points),
+              'modelNavigationReason': self.model_tracker.reason,
               'navigationFresh': state is not None,
               'reason': ('navdy_disconnected' if not connected else 'navdy_apk_feedback_update_required'
                          if not self.tracker.extended else 'navdy_navigation_stale' if state is None else '')}
