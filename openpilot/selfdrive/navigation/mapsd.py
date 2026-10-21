@@ -11,7 +11,7 @@ from openpilot.selfdrive.navigation.pmtiles import PMTiles
 from openpilot.selfdrive.navigation.preview import write_preview, preview_fresh, WEB_DEMAND_PATH
 from openpilot.selfdrive.navigation.renderer import SIZE, MapRenderer, Position
 from openpilot.selfdrive.navigation.route import RouteTracker, route_coordinates
-from openpilot.selfdrive.navigation.provenance import context_ready
+from openpilot.selfdrive.navigation.provenance import context_ready, route_point_limit
 from openpilot.selfdrive.navigation.map_frame import write_frame
 
 
@@ -62,7 +62,8 @@ def main():
       if sm['navRoute'].carrotRouteId != route_id:
         route_id = sm['navRoute'].carrotRouteId
         route = route_coordinates(sm['navRoute']) if sm.valid['navRoute'] else np.empty((0, 2))
-        tracker = RouteTracker(route) if route_id and 2 <= len(route) <= 4096 and np.isfinite(route).all() else None
+        tracker = RouteTracker(route) if (route_id and 2 <= len(route) <= route_point_limit(sm['navRoute'].navigationSource)
+                                         and np.isfinite(route).all()) else None
         next_render = 0.
       gps = position.update(sm)
       fresh_tbt = context_ready(sm, now)

@@ -5,8 +5,9 @@ import math
 import re
 
 from openpilot.selfdrive.navigation.helpers import finite_number, valhalla_type
+from openpilot.selfdrive.navigation.provenance import NAVDY_ROUTE_MAX_POINTS
 
-MAX_POINTS = 4096
+MAX_POINTS = NAVDY_ROUTE_MAX_POINTS
 MAX_ENCODED = 65536
 CHUNK_SIZE = 1024
 MAX_AGE = 2.

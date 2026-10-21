@@ -23,7 +23,7 @@ A dedicated `WAYON_MODEL_NAVIGATION_V1` notification carries a JSON object:
   ORIGINAL `observedAtMs`. Missing direction is not synthesized as north.
 - Optional `route`: `polyline6`, `pointCount`, `sha256`. The SHA-256 covers the
   complete ASCII polyline6 (latitude then longitude). Sent on route change/reconnection,
-  not on every display update. Maximum 4096 points and 65536 encoded bytes.
+  not on every display update. Maximum 8192 points and 65536 encoded bytes.
 
 The HUD validates native observation identity, sizes, numbers and source before
 storing. At first receipt it bounds age using original phone wall time; accepted

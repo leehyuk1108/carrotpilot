@@ -73,6 +73,19 @@ def test_upstream_stream_context_timestamps_and_pixel_scale(setup):
   assert reader.status['nav_map_available'] and not reader.status['nav_input_not_yet_available']
 
 
+@pytest.mark.parametrize('source,count,ready', [('navdy', 5627, True), ('navdy', 8192, True),
+                                               ('navdy', 8193, False), ('mapbox', 4097, False),
+                                               ('network-v2', 4097, False)])
+def test_full_navdy_route_has_separate_bounded_capacity(setup, source, count, ready):
+  _, context, _, model, reader = setup
+  context['navRoute'].navigationSource = source
+  context['navInstructionCarrot'].navigationSource = source
+  context['navRoute'].coordinates = [NS(latitude=37. + i * .00001, longitude=127.) for i in range(count)]
+  result = reader.update(model)
+  assert bool(result['nav_map'].any()) == ready
+  assert bool(result['navigation'].any()) == ready
+
+
 @pytest.mark.parametrize('services', [('navRoute',), ('navInstructionCarrot',), ('navRoute', 'navInstructionCarrot')])
 def test_clock_resampled_after_submaster_stamps_new_messages(setup, services):
   clock, context, _, model, reader = setup

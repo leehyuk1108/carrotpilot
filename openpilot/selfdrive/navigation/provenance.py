@@ -8,6 +8,11 @@ from openpilot.selfdrive.navigation.helpers import finite_number
 ROUTE_MAX_AGE = 3.
 TBT_MAX_AGE = 2.
 SOURCES = frozenset(('mapbox', 'network-v1', 'network-v2', 'navdy'))
+NAVDY_ROUTE_MAX_POINTS = 8192
+
+
+def route_point_limit(source):
+  return NAVDY_ROUTE_MAX_POINTS if source == 'navdy' else 4096
 
 
 def fresh(stamp, now, limit):
@@ -17,7 +22,7 @@ def fresh(stamp, now, limit):
 def context_ready(sm, now):
   route, instruction = sm['navRoute'], sm['navInstructionCarrot']
   return bool(sm.valid['navRoute'] and sm.valid['navInstructionCarrot']
-              and route.carrotRouteId > 0 and 2 <= len(route.coordinates) <= 4096
+              and route.carrotRouteId > 0 and 2 <= len(route.coordinates) <= route_point_limit(route.navigationSource)
               and route.navigationSource in SOURCES
               and instruction.carrotRouteId == route.carrotRouteId
               and instruction.navigationSource == route.navigationSource
@@ -50,7 +55,7 @@ class RoutePublication:
     if source not in SOURCES:
       return
     values = []
-    if len(points) <= 4096:
+    if len(points) <= route_point_limit(source):
       for point in points:
         lat, lon = ((point['latitude'], point['longitude']) if isinstance(point, dict)
                     else (point.latitude, point.longitude))

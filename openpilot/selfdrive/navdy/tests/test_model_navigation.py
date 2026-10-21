@@ -117,7 +117,7 @@ def test_fragmented_route_reordering_and_missing_chunks():
 
 
 @pytest.mark.parametrize('field,value', [('data', 'bad'), ('sha256', '0' * 64), ('count', 65),
-                                      ('pointCount', 4097), ('encodedLength', 65537), ('index', -1)])
+                                      ('pointCount', 8193), ('encodedLength', 65537), ('index', -1)])
 def test_bad_manifest_or_hash_never_publishes(field, value):
   item = packet()
   item['routeChunk'][field] = value
@@ -133,10 +133,24 @@ def test_malformed_polyline(encoded, count):
 
 
 def test_route_points_cap_and_geo_bounds():
-  for points in ([(0., 0.), (90., 1.)], [(0., 0.), (1., 181.)], POINTS * 2000):
+  for points in ([(0., 0.), (90., 1.)], [(0., 0.), (1., 181.)], POINTS * 3000):
     data = encode(points)
     with pytest.raises(ValueError):
       decode_route(data, len(points), hashlib.sha256(data.encode()).hexdigest())
+
+
+@pytest.mark.parametrize('count', [5627, 8192])
+def test_long_whole_route_preserved_without_decimation(count):
+  points = [(round(37. + i * .00001, 6), 127.) for i in range(count)]
+  first = packet(points)
+  state = tracker(first)
+  assert state.snapshot(10.) is None
+  for index in range(1, first['routeChunk']['count']):
+    now = 10. + index / 100.
+    state.accept(packet(points, index=index), now, now)
+  assert state.snapshot(now).points == tuple(points)
+  assert state.route_cache()['polyline6'] == encode(points)
+  assert state.request(now)['index'] == -1
 
 
 def test_round_trip_age_charged_to_independent_position_and_deadline():

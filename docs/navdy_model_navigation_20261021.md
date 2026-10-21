@@ -33,10 +33,18 @@ existing 400-metre preview is not a proven full route and is not accepted as
 such. Unsupported native maneuvers and oversized routes fail closed. These
 limitations must not be reported as complete support for every navigation app.
 
+Native phone diagnostics identified the user's active approximately 406-km
+route as 5627 points, `RouteGuiding`, `VALID`, `RouteOn`, and `Right`. The initial
+4096-point gate rejected it. Navdy's complete-route limit is now 8192 points;
+the 65536 encoded-byte/64-chunk/32-KiB ACK bounds are unchanged. No route points
+are truncated, decimated or replaced by destination chords. Other navigation
+sources retain their previous 4096-point bound.
+
 ## Verification
 
-- Comma isolated candidate, fresh ignition-OFF/noOutput guard: 1206 tests and
-  146 subtests passed in 67.78 seconds after the final reader/freshness review.
+- Comma isolated candidate, fresh ignition-OFF/noOutput guard: 1217 tests and
+  146 subtests passed in 70.94 seconds after the reader/freshness and whole-route
+  capacity corrections.
   The suite includes native map rasterization, N16 input packing, Navdy,
   Jetlink faults, GM manual hold/display speed, NNFF and vehicle tuning.
 - The new tracker/reader tests cover duplicate source age, independent position

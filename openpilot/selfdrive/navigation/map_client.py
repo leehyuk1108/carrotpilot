@@ -4,7 +4,7 @@ import time
 import numpy as np
 
 from openpilot.selfdrive.navigation.helpers import finite_number, navigation_input
-from openpilot.selfdrive.navigation.provenance import context_ready, fresh
+from openpilot.selfdrive.navigation.provenance import context_ready, fresh, route_point_limit
 
 MAP_SHAPE = (1, 1, 256, 256)
 NAVIGATION_SHAPE = (1, 47)
@@ -111,7 +111,8 @@ class MapInput:
       route = sm['navRoute']
       route_id = getattr(route, 'carrotRouteId', 0)
       self._status(True, 'route_unavailable')
-      if (not sm.valid['navRoute'] or not route_id or not 2 <= len(route.coordinates) <= 4096
+      if (not sm.valid['navRoute'] or not route_id
+          or not 2 <= len(route.coordinates) <= route_point_limit(route.navigationSource)
           or not fresh(sm.recv_time['navRoute'], now, ROUTE_MAX_AGE)):
         self.image = None
         self.selected_route_id = 0

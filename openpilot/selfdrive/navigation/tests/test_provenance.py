@@ -34,6 +34,18 @@ def test_ego_projection_does_not_double_subtract_original_guidance_age(setup):
 POINTS = [{'latitude': 37., 'longitude': 127.}, {'latitude': 37.01, 'longitude': 127.01}]
 
 
+@pytest.mark.parametrize('source,count,accepted', [('navdy', 5627, True), ('navdy', 8192, True),
+                                                  ('navdy', 8193, False), ('network-v2', 4097, False)])
+def test_route_publication_preserves_all_points_with_source_bound(source, count, accepted):
+  points = [{'latitude': 37. + i * .00001, 'longitude': 127.} for i in range(count)]
+  routes = RoutePublication()
+  routes.offer(source, points, session='full-path')
+  selected = routes.choose(source)
+  assert len(selected.points) == (count if accepted else 0)
+  if accepted:
+    assert selected.points == tuple((p['latitude'], p['longitude']) for p in points)
+
+
 def test_geometry_and_session_generations_are_stable_on_heartbeat(monkeypatch):
   clock = [10_000_000_000]
   monkeypatch.setattr('time.monotonic_ns', lambda: clock[0])
