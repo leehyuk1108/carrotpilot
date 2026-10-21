@@ -23,6 +23,7 @@ except ImportError:
 
 ROOT = Path(__file__).resolve().parents[2]
 STATE = Path('/data/hl-jetson')
+N16_SELECTION = Path('/data/models/carrot-jetlink-n16.json')
 ALIAS = 'hl-paired-jetson'
 DEPLOYMENT_BRANCHES = frozenset({'cluster_jetson', 'WIP-FR'})
 TERMINAL = {'succeeded', 'failed', 'rolled-back', 'needs-attention', 'interrupted', 'cancelled'}
@@ -381,19 +382,44 @@ def cancel_pending(state):
     return dict(state='cancel-requested', token=job['token'])
 
 
+def recover_n16_role(state, safe):
+  # Optional, explicitly selected recovery must not change updater job/status.
+  try:
+    try:
+      from . import n16_usb_role
+    except ImportError:
+      import n16_usb_role
+    if n16_usb_role.link_ready():
+      return  # Keep the last recovery diagnostic; READY is not a recovery error.
+    report = n16_usb_role.recover_once(safe, state=state, selection_path=N16_SELECTION)
+  except Exception as error:
+    report = {'state': 'probe-error', 'reason': str(error)[-2400:]}
+  try:
+    private_json(state / 'n16-usb-role-status.json', dict(updated=time.monotonic(), **report))
+  except Exception:
+    pass  # Diagnostic disk failure must not interrupt existing jobs or leases.
+
+
 def daemon():
   safe = Safety()
   stable_since = None
   completed_commit = None
   retry_commit, retry_after, retry_delay = None, 0., 30.
+  n16_after = 0.
   while True:
     try:
       if (STATE / 'usb-internet.enabled').is_file():
         run(['sudo', '-n', '/usr/bin/python3', str(ROOT / 'tools/jetlink/usb_internet.py'), 'start-service'], timeout=20)
       config = read_json(STATE / 'config.json', {})
       permitted = safe()
-      stable_since = (stable_since or time.monotonic()) if permitted else None
-      if config.get('automatic') is True and stable_since and time.monotonic() - stable_since >= 30:
+      now = time.monotonic()
+      stable_since = (now if stable_since is None else stable_since) if permitted else None
+      stable_offroad = stable_since is not None and now - stable_since >= 30
+      if (stable_offroad and now >= n16_after and not (STATE / 'job.json').exists()
+          and (N16_SELECTION.exists() or N16_SELECTION.is_symlink())):
+        n16_after = now + 30  # Bound failed/no-.55-route probes as well as dispatch.
+        recover_n16_role(STATE, safe)
+      if config.get('automatic') is True and stable_offroad:
         commit = run(['git', '-C', str(ROOT), 'rev-parse', 'HEAD']).strip()
         if commit != retry_commit:
           retry_commit, retry_after, retry_delay = commit, 0., 30.
