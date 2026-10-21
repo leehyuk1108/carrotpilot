@@ -415,8 +415,8 @@ def hardware_thread(end_event, hw_queue) -> None:
       power_reason = None
     if power_reason:
       if not power_shutdown_pending:
-        cloudlog.warning("automatic shutdown requested", reason=power_reason, offroad_since=off_ts,
-                         voltage=voltage, filtered_voltage=power_monitor.car_voltage_mV)
+        cloudlog.warning({"event": "automatic shutdown requested", "reason": power_reason, "offroad_since": off_ts,
+                          "voltage": voltage, "filtered_voltage": power_monitor.car_voltage_mV})
       params.put(REQUEST_KEY, {"reason": power_reason, "monotonicTime": time.monotonic()})
       power_shutdown_pending = True
     elif power_shutdown_pending:
