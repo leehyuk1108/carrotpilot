@@ -109,8 +109,16 @@ def test_client_close_failure_cannot_abort_native_fallback_or_clear_fault(monkey
   m.client.close = close
   assert m.run({}, {}, inputs, False) == 'local'
   assert m.client is None and not m.active
-  assert output_valid(m) is not active
+  assert not output_valid(m)
   assert resets == ([True] if active else [])
+
+
+def test_first_inference_timeout_also_invalidates_late_local_result(monkeypatch, tmp_path):
+  m, inputs = failed_active_model(monkeypatch, tmp_path / 'fault')
+  m.active = False
+  assert m.run({}, {}, inputs, False) == 'local'
+  assert not m.output_valid and m.fault_until == 105.
+  assert (tmp_path / 'fault').is_file()
 
 
 def test_unwritable_status_cannot_abort_following_frames_or_clear_ipc_fault(monkeypatch, tmp_path):

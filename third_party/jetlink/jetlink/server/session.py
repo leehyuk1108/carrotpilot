@@ -452,12 +452,14 @@ class EngineHost:
       entry.write_meta({**meta, 'spec': spec.to_dict()})
 
   def _warm(self, engine, spec: ModelSpec) -> Loaded:
-    from jetlink.queues import PolicyQueues
-    queues = PolicyQueues(spec)
+    from jetlink.queues import make_queues
     _check_shapes(engine, spec)
     # Warm runs on zeros, so the first real frame pays for nothing lazy: CUDA
     # state and the graph capture for TensorRT, a first replay for the others.
+    if spec.stateful and hasattr(engine, 'configure_state_feedback'):
+      engine.configure_state_feedback(spec.state_pairs)
     host_inputs = {n: engine.host_input(n) for n in engine.inputs}
+    queues = make_queues(spec, host_inputs)
     warped = np.zeros(spec.warped_shape, np.uint8)
     packed = np.zeros(spec.packed_nelem, np.float32)
     queues.step_into(warped, packed, host_inputs)
@@ -519,14 +521,21 @@ def _check_shapes(engine, spec: ModelSpec) -> None:
     want = spec.input_shapes.get(name)
     if want is None:
       raise ValueError(f"engine input {name!r} is not in the model spec")
-    if int(np.prod(io.shape)) != int(np.prod(want)):
+    if (tuple(io.shape) != want if spec.stateful else int(np.prod(io.shape)) != int(np.prod(want))):
       raise ValueError(f"input {name}: engine {tuple(io.shape)} vs spec {want}")
   missing = set(spec.input_shapes) - set(engine.inputs)
   if missing:
     raise ValueError(f"engine has no input(s) {sorted(missing)} the model spec declares")
-  out = next(iter(engine.outputs.values())).shape
-  if int(np.prod(out)) != spec.output_nelem:
-    raise ValueError(f"output: engine {tuple(out)} vs spec {spec.output_nelem}")
+  if spec.stateful:
+    if set(engine.outputs) != set(spec.output_shapes):
+      raise ValueError('Engine output names do not match the model spec')
+    for name, shape in spec.output_shapes.items():
+      if tuple(engine.outputs[name].shape) != shape:
+        raise ValueError(f'output {name}: engine {tuple(engine.outputs[name].shape)} vs spec {shape}')
+  else:
+    out = next(iter(engine.outputs.values())).shape
+    if int(np.prod(out)) != spec.output_nelem:
+      raise ValueError(f"output: engine {tuple(out)} vs spec {spec.output_nelem}")
 
 
 class Session:
@@ -656,6 +665,9 @@ class Session:
     info = self.host.backend.describe()
     resp = {
       'protocol': P.VERSION,
+      # Graph-owned state is supported with the original, uncompressed v2
+      # framing. Clients must not infer this capability from version 2 alone.
+      'stateful_v2': True,
       **info,   # backend, runtime_version, device
       'engine_state': self.host.status(*self._wanted())['state'],
       'loaded': self.host.loaded_sha(),
@@ -752,15 +764,28 @@ class Session:
     loaded.queues.step_into(warped, packed, loaded.host_inputs)
     queue_us = int((time.perf_counter() - t0) * 1e6)
 
-    outputs = loaded.engine.run()
-    out = next(iter(outputs.values())).reshape(-1)
+    try:
+      outputs = loaded.engine.run()
+    except Exception:
+      if spec.stateful:
+        loaded.queues.reset()
+      raise
+    try:
+      loaded.queues.feedback(outputs)
+      status = P.Status.OK
+    except FloatingPointError:
+      status = P.Status.NOT_FINITE
+    out = (outputs['outputs'] if spec.stateful else next(iter(outputs.values()))).reshape(-1)
 
     # asarray, not astype: a no-op when the engine already outputs float32.
     # isfinite is ~7x faster on float32 and the non-finites map across exactly.
     # openpilot drops to the small model on a non-finite output either way, so
     # checking here saves the comma rescanning 18452 floats to find out.
     out32 = np.asarray(out, dtype=np.float32)
-    status = P.Status.OK if np.all(np.isfinite(out32)) else P.Status.NOT_FINITE
+    if not np.all(np.isfinite(out32)):
+      status = P.Status.NOT_FINITE
+      if spec.stateful:
+        loaded.queues.reset()
 
     total_us = int((time.perf_counter() - t0) * 1e6)
     parts = [P.pack_infer_resp(frame_id, status, loaded.engine.last_gpu_us, queue_us, total_us),

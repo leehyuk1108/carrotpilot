@@ -7,6 +7,7 @@ import re
 from jetlink.spec import ModelSpec
 
 DEFAULT_SPEC = ModelSpec.from_dict(json.loads(Path(__file__).with_name('cinque_v2.json').read_text()))
+N16_SPEC = ModelSpec.from_dict(json.loads(Path(__file__).with_name('n16.json').read_text()))
 
 # Widths consumed by Carrot's parser, message publisher and action calculation.
 OUTPUT_WIDTHS = {
@@ -45,6 +46,11 @@ def validate_model_spec(spec):
     if spec.input_shapes.get('new_img') != (2, 6, 128, 256) or math.prod(spec.input_shapes.get('desire', ())) != 8:
       raise ValueError('Unsupported Jetlink stateful camera/desire contract')
     scalar_names = {'new_img', 'desire', 'traffic_convention', 'action_t'}
+    nav = set(spec.input_shapes) & {'nav_map', 'navigation'}
+    if nav:
+      if spec != N16_SPEC:
+        raise ValueError('Unsupported Jetlink N16 navigation contract')
+      scalar_names |= nav
     states = set(spec.input_shapes) - scalar_names
     if not states or any(not name.startswith('state_') or
                          spec.output_shapes.get('next_' + name) != spec.input_shapes[name] for name in states):
@@ -77,10 +83,14 @@ def validate_model_spec(spec):
     raise ValueError('Unsupported Jetlink action output')
   if spec.sha256 == DEFAULT_SPEC.sha256 and spec.to_dict() != DEFAULT_SPEC.to_dict():
     raise ValueError('Jetlink model identity or input/output contract mismatch')
+  if spec.sha256 == N16_SPEC.sha256 and spec != N16_SPEC:
+    raise ValueError('Jetlink model identity or input/output contract mismatch')
   return spec
 
 
 def model_name(spec):
+  if spec.sha256 == N16_SPEC.sha256:
+    return 'N16 Nav (96244b1f)'
   return 'Cinque v2' if spec.sha256 == DEFAULT_SPEC.sha256 else f'App model {spec.sha256[:12]}'
 
 

@@ -114,6 +114,9 @@ class PreparationTransport:
 
 def prepare(client, peer, offroad, connected, progress, cache=CACHE, mode='usb'):
   """Retain the legacy Jetson path; phones require their explicit cable mode."""
+  from openpilot.selfdrive.modeld.jetlink.jetson_selection import prepare_selected
+  if prepare_selected(client, peer):
+    return
   protocol = peer.get('protocol') if isinstance(peer, dict) else None
   app_capable = protocol == 3 and may_provision(peer, mode)
   legacy_v3 = protocol == 3 and isinstance(peer, dict) and 'loaded' in peer and not app_capable

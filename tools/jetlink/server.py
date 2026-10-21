@@ -25,6 +25,17 @@ from jetlink import protocol as P
 from jetlink.server.session import Session
 from jetlink.server import main as server
 
+# Only a separately installed, content-verified device overlay advertises N16.
+from n16_overlay import verify_runtime
+N16_OVERLAY = None
+
+
+class CachedN16Host(server.EngineHost):
+  def _build_job(self, req, *args, **kwargs):
+    if N16_OVERLAY is not None and req.sha256 == N16_OVERLAY['model']:
+      raise RuntimeError('Prepared N16 engine unavailable; automatic rebuilding is disabled on this NX')
+    return super()._build_job(req, *args, **kwargs)
+
 
 class DisplayTelemetry:
   def __init__(self, original):
@@ -73,6 +84,8 @@ class CarrotSession(Session):
       if host == 'jetson':
         obj['carrot_source_commit'] = (ROOT / 'SOURCE_COMMIT').read_text().strip()
         obj['carrot_boot_update_installed'] = Path('/opt/carrot-jetlink/boot-update-required').is_file()
+        if N16_OVERLAY is not None:
+          obj['carrot_n16_overlay'] = N16_OVERLAY
     return super()._send_json(msg_type, seq, obj, flags)
 
   def handle(self, msg):
@@ -112,7 +125,9 @@ class CarrotSession(Session):
 
 
 if __name__ == '__main__':
+  N16_OVERLAY = verify_runtime(ROOT)
   if Path('/etc/nv_tegra_release').is_file():
     health_worker()
   server.Session = CarrotSession
+  server.EngineHost = CachedN16Host
   raise SystemExit(server.main())

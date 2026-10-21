@@ -10,6 +10,7 @@ import numpy as np
 from openpilot.selfdrive.modeld.jetlink.link import ClientConnection, SPEC, FAULT, FAULT_HOLD_SECONDS, state
 from openpilot.selfdrive.modeld.jetlink.prepare import WarpPreparation
 from openpilot.selfdrive.modeld.jetlink.contracts import model_name, parse_outputs
+from openpilot.selfdrive.modeld.jetlink.inputs import fill_inputs
 from openpilot.selfdrive.modeld.model_join import may_join
 
 MODEL_STATUS = Path('/dev/shm/carrot-jetlink-model.json')
@@ -142,6 +143,7 @@ class JoiningModel:
     if now >= self.next_status:
       self.ready = state().get('state') == 'ready'
       record = {'active': self.active, 'ready': self.ready, 'model': model_name(self.spec), 'sha256': self.spec.sha256,
+                'nav_model': 'nav_map' in self.spec.input_shapes,
                 'error': self.error, 'updated': now}
       tmp = MODEL_STATUS.with_suffix('.tmp')
       try:
@@ -211,12 +213,7 @@ class JoiningModel:
         self.next_join = time.monotonic() + 5
     if self.client is not None:
       try:
-        desire = inputs['desire_pulse'].copy()
-        desire[0] = 0
-        self.views['desire'][:] = np.where(desire - self.prev_desire > .99, desire, 0)
-        self.prev_desire[:] = desire
-        for name in ('traffic_convention', 'action_t'):
-          self.views[name][:] = inputs[name]
+        fill_inputs(self.views, inputs, self.prev_desire)
         self.frame = (self.frame + 1) & 0xFFFFFFFF
         started = time.monotonic()
         images = self.warp(bufs, transforms)
@@ -233,9 +230,10 @@ class JoiningModel:
           self.next_status = 0
         # As in the generic eGPU runtime, run the full recurrent graph for each
         # received pair. Camera gaps still propagate unchanged into pose validity.
+        raw = result.copy() if os.getenv('SEND_RAW_PRED') else None
         parsed = parse_outputs(self.parser, self.spec, result)
-        if os.getenv('SEND_RAW_PRED'):
-          parsed['raw_pred'] = result.copy()
+        if raw is not None:
+          parsed['raw_pred'] = raw
         finished = time.monotonic()
         if finished - started > .05 and finished - self.last_slow_log >= 1:
           self.last_slow_log = finished
@@ -249,9 +247,9 @@ class JoiningModel:
         self.error = str(exc)
         was_active = self.active
         failed_at = time.monotonic()
-        if was_active:
-          # IPC validity must carry the fault even if /dev/shm is unavailable.
-          self.fault_until = failed_at + FAULT_HOLD_SECONDS
+        # The first external request can also time out on an old camera pair.
+        # IPC validity must carry the fault even if /dev/shm is unavailable.
+        self.fault_until = failed_at + FAULT_HOLD_SECONDS
         client = self.client
         self.client = None
         self.active = False
@@ -261,11 +259,11 @@ class JoiningModel:
           client.close()
         except Exception:
           cloudlog.exception('Jetlink client cleanup failed during native fallback')
+        try:
+          FAULT.write_text(str(failed_at))
+        except OSError:
+          cloudlog.exception('Jetlink fault marker unavailable; IPC remains invalid during native fallback')
         if was_active:
-          try:
-            FAULT.write_text(str(failed_at))
-          except OSError:
-            cloudlog.exception('Jetlink fault marker unavailable; IPC remains invalid during native fallback')
           self._reset_small()
     result = self.small.run(bufs, transforms, inputs, prepare_only)
     if result is not None:
