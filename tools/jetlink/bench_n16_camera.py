@@ -16,12 +16,16 @@ another boot and is not treated as fresh. No calibration message is published,
 no Params are changed, and the live mode never silently falls back to this mode.
 """
 import argparse
+import fcntl
 import hashlib
 import json
+import math
+import mmap
 import os
 from pathlib import Path
 import select
 import signal
+import struct
 import subprocess
 import sys
 import tempfile
@@ -36,6 +40,10 @@ SAFETY_MAX_AGE = 2.5
 SETUP_SECONDS = 120
 CAMERA_MAX_AGE = .25
 CAMERA_STATE_MAX_SKEW_NS = 100_000_000
+GUARD_INTERVAL = .25
+GUARD_MAX_AGE = .5
+GUARD_MAILBOX_BYTES = 16384
+GUARD_HEADER = struct.Struct('!QI')
 
 
 def require(condition, detail):
@@ -95,14 +103,127 @@ class DeskGuard:
     self.check()
 
   def check(self):
+    started = time.monotonic()
     self.sm.update(0)
     validate_desk(self.params, self.sm, time.monotonic())
+    sampled = time.monotonic()
     check_processes()
-    return {'mono': time.monotonic(), 'vehicle_disconnected': True, 'offroad': True,
+    finished = time.monotonic()
+    return {'mono': finished, 'check_started': started, 'sampling_ms': (sampled - started) * 1000,
+            'proc_scan_ms': (finished - sampled) * 1000, 'check_ms': (finished - started) * 1000,
+            'vehicle_disconnected': True, 'offroad': True,
             'started': False, 'pandas': [{'harness': str(p.harnessStatus), 'safety': str(p.safetyModel),
               'controls_allowed': bool(p.controlsAllowed), 'ignition_line': bool(p.ignitionLine),
               'ignition_can': bool(p.ignitionCan)} for p in self.sm['pandaStates']],
-            'source_mono_ns': {name: self.sm.logMonoTime[name] for name in SAFETY_SERVICES}}
+            'source_mono_ns': {name: self.sm.logMonoTime[name] for name in SAFETY_SERVICES},
+            'source_recv_time': {name: self.sm.recv_time[name] for name in SAFETY_SERVICES}}
+
+
+class GuardMailbox:
+  """One bounded snapshot, no startup queue; POSIX locks are per process, not FD.
+
+  All samples remain in the watcher's report. Unsafe is latched and the watcher
+  stops immediately; it can never be overwritten by a later safe heartbeat.
+  """
+  def __init__(self, fd):
+    self.fd = fd
+    self.memory = mmap.mmap(fd, GUARD_MAILBOX_BYTES)
+    self.failed = False
+
+  def publish(self, sample):
+    require(not self.failed, 'unsafe guard mailbox is latched')
+    self.failed = sample['safe'] is not True
+    payload = json.dumps(sample, allow_nan=False).encode()
+    require(len(payload) <= GUARD_MAILBOX_BYTES - GUARD_HEADER.size, 'oversized guard heartbeat')
+    fcntl.lockf(self.fd, fcntl.LOCK_EX)
+    try:
+      # An interrupted writer leaves an invalid snapshot, never a renewed old one.
+      self.memory[:GUARD_HEADER.size] = GUARD_HEADER.pack(sample['sequence'], 0)
+      self.memory[GUARD_HEADER.size:GUARD_HEADER.size + len(payload)] = payload
+      self.memory[:GUARD_HEADER.size] = GUARD_HEADER.pack(sample['sequence'], len(payload))
+    finally:
+      fcntl.lockf(self.fd, fcntl.LOCK_UN)
+
+  def read(self, previous_sequence):
+    try:
+      fcntl.lockf(self.fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+    except BlockingIOError:
+      return None  # The cached heartbeat's original expiry still applies.
+    try:
+      sequence, size = GUARD_HEADER.unpack(self.memory[:GUARD_HEADER.size])
+      if sequence == 0 or sequence == previous_sequence:
+        return None
+      require(sequence > previous_sequence and 0 < size <= GUARD_MAILBOX_BYTES - GUARD_HEADER.size,
+              'invalid guard mailbox header')
+      sample = json.loads(self.memory[GUARD_HEADER.size:GUARD_HEADER.size + size])
+      require(sample['sequence'] == sequence, 'guard mailbox sequence mismatch')
+      return sample
+    finally:
+      fcntl.lockf(self.fd, fcntl.LOCK_UN)
+
+  def close(self):
+    self.memory.close()
+
+
+class GuardHeartbeat:
+  """Nonblocking private IPC only; never sample Params, SubMaster or /proc here."""
+  def __init__(self, child, channel):
+    self.child, self.channel = child, channel
+    self.current = None
+    self.sequence = 0
+    self.expires = 0.
+
+  def check(self, report, power_active=True):
+    started = time.monotonic()
+    evidence = {'started': started, 'accepted': False}
+    try:
+      sample = self.channel.read(self.sequence)
+      if sample is not None:
+        sample['unread_safe_samples'] = sample['sequence'] - self.sequence - 1
+        report['safety_checks'].append(sample)
+        require(sample['sequence'] > self.sequence, 'guard heartbeat sequence replay')
+        self.sequence = sample['sequence']
+        require(sample['safe'] is True, f"unsafe guard heartbeat: {sample.get('error', 'unknown')}")
+        require(sample['scheduler'] == 'SCHED_OTHER' and sample['cpus'] == [0, 1, 2, 3], 'guard scheduling changed')
+        start, end = sample['check_started'], sample['mono']
+        sources = [*sample['source_recv_time'].values(), *(v * 1e-9 for v in sample['source_mono_ns'].values())]
+        require(set(sample['source_recv_time']) == set(sample['source_mono_ns']) == set(SAFETY_SERVICES),
+                'incomplete guard source evidence')
+        require(all(math.isfinite(v) for v in [start, end, *sources]) and start <= end and
+                all(0 <= end - v < SAFETY_MAX_AGE for v in sources), 'invalid guard source timestamps')
+        self.current = sample
+        # Completion time must not renew evidence after a slow/blocked proc scan.
+        self.expires = min(start + GUARD_MAX_AGE, *(v + SAFETY_MAX_AGE for v in sources))
+      require(self.child.poll() is None, 'guard/restoration watcher exited prematurely')
+      now = time.monotonic()
+      require(self.current is not None and self.current['mono'] <= now < self.expires, 'stale/missing guard heartbeat')
+      require(not power_active or (self.current['power_active'] and self.current['cpu_online'] == '0-7'),
+              'power policy changed during benchmark')
+      evidence.update(accepted=True, sequence=self.sequence, heartbeat_age_ms=(now - self.current['check_started']) * 1000)
+      return evidence
+    finally:
+      evidence.update(finished=time.monotonic())
+      evidence['check_ms'] = (evidence['finished'] - started) * 1000
+      report.setdefault('guard_heartbeat_checks', []).append(evidence)
+
+  def wait_ready(self, report, power_active=False):
+    deadline = time.monotonic() + 10
+    while True:
+      require(self.child.poll() is None, 'guard/restoration watcher exited prematurely')
+      require(time.monotonic() < deadline, 'guard heartbeat startup timeout')
+      # Only startup waits; steady-state check() never sleeps or blocks on a lock.
+      sample = self.channel.read(self.sequence)
+      if sample is not None:
+        self.check(report, power_active=False)
+        if not power_active or self.current['power_active']:
+          self.check(report, power_active=power_active)
+          return
+      time.sleep(.01)
+
+  def close(self):
+    self.channel.close()
+    if getattr(self, 'backing', None) is not None:
+      self.backing.close()
 
 
 def process_identity(pid):
@@ -112,20 +233,63 @@ def process_identity(pid):
     return None
 
 
-def watchdog(fd, parent, identity, seconds, output, original_online):
-  """Separate session: parent death/timeout must not strand the power override."""
-  report = {'restored': False, 'original_cpu_online': original_online}
+def watchdog(fd, heartbeat_fd, parent, identity, seconds, output, original_online):
+  """Low-priority safety watcher and independent timeout/power restorer."""
+  report = {'restored': False, 'original_cpu_online': original_online, 'guard_checks': []}
+  channel = GuardMailbox(heartbeat_fd)
+  normal = False
   try:
     os.sched_setscheduler(0, os.SCHED_OTHER, os.sched_param(0))
     os.sched_setaffinity(0, {0, 1, 2, 3})
+    os.nice(10)
     from openpilot.system.hardware import HARDWARE
     # Imports must succeed before the caller changes hardware state.
     from openpilot.common.params import Params  # noqa: F401
     from openpilot.cereal import messaging  # noqa: F401
     print('READY', flush=True)
-    readable, _, _ = select.select([fd], [], [], seconds)
-    normal = bool(readable) and os.read(fd, 1) == b'D'
-    report['reason'] = 'cleanup' if normal else 'timeout_or_parent_exit'
+    deadline, next_check, sequence, power_active = time.monotonic() + seconds, 0., 0, False
+    guard = None
+    while True:
+      now = time.monotonic()
+      if now >= deadline:
+        report['reason'] = 'timeout_or_parent_exit'
+        break
+      readable, _, _ = select.select([fd], [], [], max(0., min(next_check, deadline) - now))
+      if readable:
+        command = os.read(fd, 1)
+        if command != b'R':
+          normal = command == b'D'
+          report['reason'] = 'cleanup' if normal else 'timeout_or_parent_exit'
+          break
+        power_active, next_check = True, 0.
+      if time.monotonic() < next_check:
+        continue
+      sequence += 1
+      started = time.monotonic()
+      sample = {'sequence': sequence, 'safe': False, 'check_started': started}
+      try:
+        guard = guard or DeskGuard()
+        sample.update(guard.check())
+        sample.update(cpu_online=CPU_ONLINE.read_text().strip(), power_active=power_active,
+                      scheduler='SCHED_OTHER', cpus=sorted(os.sched_getaffinity(0)))
+        require(os.sched_getscheduler(0) == os.SCHED_OTHER and sample['cpus'] == [0, 1, 2, 3], 'guard scheduling changed')
+        require(not power_active or sample['cpu_online'] == '0-7', 'power policy changed during benchmark')
+        require(time.monotonic() - sample['check_started'] < GUARD_MAX_AGE, 'guard check exceeded heartbeat lifetime')
+        sample['safe'] = True
+      except BaseException as error:
+        sample.update(safe=False, mono=time.monotonic(), error=f'{type(error).__name__}: {error}')
+        sample['check_ms'] = (sample['mono'] - sample['check_started']) * 1000
+      sample['watcher_check_ms'] = (time.monotonic() - started) * 1000
+      report['guard_checks'].append(sample)
+      try:
+        channel.publish(sample)
+      except Exception as error:
+        sample.update(safe=False, error=f'guard heartbeat delivery failed: {error}')
+      if not sample['safe']:
+        report['reason'] = 'unsafe_guard'
+        report['guard_error'] = sample['error']
+        break
+      next_check = sample['check_started'] + GUARD_INTERVAL
     if not normal and process_identity(parent) == identity:
       try:
         os.kill(parent, signal.SIGTERM)
@@ -148,20 +312,28 @@ def watchdog(fd, parent, identity, seconds, output, original_online):
   except BaseException as error:
     report['error'] = f'{type(error).__name__}: {error}'
   finally:
+    channel.close()
+    os.close(heartbeat_fd)
     os.close(fd)
     save_report(output, report)
   return 0 if report['restored'] else 1
 
 
 def arm_watchdog(seconds, output, original_online):
+  # Unlinked file-backed mmap works across exec without inheriting Python locks.
+  backing = tempfile.TemporaryFile(prefix='n16-guard-')
+  backing.truncate(GUARD_MAILBOX_BYTES)
+  receiving = GuardMailbox(backing.fileno())
   read_fd, write_fd = os.pipe()
   try:
     child = subprocess.Popen(
-      [sys.executable, '-B', str(Path(__file__).resolve()), '--restore-watchdog', str(read_fd),
+      [sys.executable, '-B', str(Path(__file__).resolve()), '--restore-watchdog', str(read_fd), str(backing.fileno()),
        str(os.getpid()), process_identity(os.getpid()), str(seconds), str(output), original_online],
-      pass_fds=(read_fd,), start_new_session=True, stdout=subprocess.PIPE)
+      pass_fds=(read_fd, backing.fileno()), start_new_session=True, stdout=subprocess.PIPE)
   except BaseException:
     os.close(write_fd)
+    receiving.close()
+    backing.close()
     raise
   finally:
     os.close(read_fd)
@@ -170,9 +342,13 @@ def arm_watchdog(seconds, output, original_online):
     require(child.stdout.readline().strip() == b'READY', 'restoration watchdog initialization failed')
   except BaseException:
     os.close(write_fd)
+    receiving.close()
+    backing.close()
     child.wait(timeout=15)
     raise
-  return child, write_fd
+  heartbeat = GuardHeartbeat(child, receiving)
+  heartbeat.backing = backing
+  return child, write_fd, heartbeat
 
 
 def checked(result):
@@ -264,6 +440,7 @@ def bench(args, report):
   import numpy as np
   from openpilot.cereal import messaging
   from msgq.visionipc import VisionIpcClient, VisionStreamType
+  from openpilot.common.params import Params
   from openpilot.common.realtime import config_realtime_process
   from openpilot.common.transformations.camera import DEVICE_CAMERAS
   from openpilot.common.transformations.model import get_warp_matrix
@@ -275,8 +452,8 @@ def bench(args, report):
   from openpilot.system.hardware import HARDWARE
 
   require(os.path.isfile('/AGNOS') and HARDWARE.get_device_type() == 'mici', 'native C4/AGNOS required')
-  guard = DeskGuard()
-  static_calibration = read_static_calibration(guard.params) if args.calibration_source == 'params' else None
+  params = Params()
+  static_calibration = read_static_calibration(params) if args.calibration_source == 'params' else None
   if static_calibration is not None:
     report['calibration'] = static_calibration[1]
   streams = VisionIpcClient.available_streams('camerad', block=False)
@@ -286,7 +463,7 @@ def bench(args, report):
   require(original_online in ('0-3', '0-7'), 'unrecognized original power profile')
   restore_path = args.output.with_name(args.output.name + '.restore.json')
   report.update(original_cpu_online=original_online, restoration_report=str(restore_path))
-  restore, lease = arm_watchdog(args.seconds + SETUP_SECONDS + 15, restore_path, original_online)
+  restore, lease, heartbeat = arm_watchdog(args.seconds + SETUP_SECONDS + 15, restore_path, original_online)
   joining = None
   old_fault = model.FAULT
   old_shadow = ShadowClient.__dict__['optional']
@@ -294,8 +471,15 @@ def bench(args, report):
   old_priority = os.sched_getparam(0)
   old_affinity = os.sched_getaffinity(0)
   try:
-    report['safety_checks'].append(guard.check())
+    report['guard_watcher'] = {'scheduler': 'SCHED_OTHER', 'cpus': [0, 1, 2, 3], 'nice_increment': 10,
+      'interval_seconds': GUARD_INTERVAL, 'max_heartbeat_age_seconds': GUARD_MAX_AGE,
+      'freshness_origin': 'check_started, additionally capped by safety source expiry',
+      'transport': 'fixed 16 KiB mmap mailbox, nonblocking parent POSIX lock; unsafe latched',
+      'full_check_history': 'restoration.guard_checks (includes samples superseded during native initialization)'}
+    heartbeat.wait_ready(report)
     HARDWARE.set_power_save(False)
+    os.write(lease, b'R')
+    heartbeat.wait_ready(report, power_active=True)
     config_realtime_process(7, 54)
     require(os.sched_getscheduler(0) == os.SCHED_FIFO and os.sched_getaffinity(0) == {7}, 'RT scheduling not applied')
     # ModelState otherwise may spawn the optional signal observer from saved settings.
@@ -325,7 +509,6 @@ def bench(args, report):
     fallback_done = rejoined = False
     fault_until = 0.
     previous_frame = None
-    next_guard = 0.
     with tempfile.TemporaryDirectory(prefix='n16-camera-') as directory:
       model.FAULT = Path(directory) / 'fault'
       while True:
@@ -333,15 +516,12 @@ def bench(args, report):
         if deadline is not None and now >= deadline:
           break
         require(start is not None or now < setup_deadline, 'N16 camera join exceeded setup deadline')
-        if now >= next_guard:
-          report['safety_checks'].append(guard.check())
-          require(restore.poll() is None, 'restoration watchdog exited prematurely')
-          require(CPU_ONLINE.read_text().strip() == '0-7', 'power policy changed during benchmark')
-          next_guard = now + .5
+        heartbeat.check(report)
         for message in messaging.drain_sock(dm):
           report['dm_frames'].append({'mono_ns': message.logMonoTime, 'frame_id': message.driverStateV2.frameId,
                                      'valid': bool(message.valid), 'received': time.monotonic()})
         frames = receive_camera_pair(main, extra)
+        heartbeat.check(report)  # A blocked camera receive cannot authorize inference on an expired guard.
         if frames is None:
           continue
         buf_main, meta_main, buf_extra, meta_extra = frames
@@ -369,7 +549,7 @@ def bench(args, report):
           report['calibration'] = {'source': 'liveCalibration', 'mode': 'live', 'live': True,
                                    'source_mono_ns': calibration_mono_ns}
         dc = DEVICE_CAMERAS[(str(context['deviceState'].deviceType), str(context['roadCameraState'].sensor))]
-        yaw_trim = guard.params.get_float('CameraYawTrimDeg') * .01
+        yaw_trim = params.get_float('CameraYawTrimDeg') * .01
         require(np.isfinite(yaw_trim), 'invalid camera yaw trim')
         euler[2] -= np.radians(yaw_trim)
         transforms = {'img': get_warp_matrix(euler, dc.fcam.intrinsics, False).astype(np.float32),
@@ -441,17 +621,18 @@ def bench(args, report):
         if len(report['frames']) % 200 == 0:
           print(json.dumps({'frames': len(report['frames']), 'n16_active': joining.active,
                             'rejoined': rejoined, 'last_ms': report['frames'][-1]['run_ms']}), flush=True)
-      report['safety_checks'].append(guard.check())
+      heartbeat.check(report)
       require(fallback_done and rejoined and joining.active and joining.output_valid, 'fallback/rejoin cycle incomplete')
       require(sum(r['phase'] == 'external' and r['finished'] >= fault_until for r in report['frames']) >= 20,
               'fewer than 20 post-rejoin N16 outputs')
       report['dm'] = dm_summary(report['dm_frames'], time.monotonic(), start)
-      if args.require_dm:
-        require(report['dm']['strict_20hz_pass'], 'required valid consecutive DM >=20 Hz not observed')
       times = np.array([r['run_ms'] for r in report['frames'] if r['phase'] == 'external'])
       report['external_timing'] = {'frames': len(times), 'mean_ms': float(times.mean()),
         'p95_ms': float(np.percentile(times, 95)), 'max_ms': float(times.max()), 'over_50ms': int((times > 50).sum())}
-      report.update(completed=True, n16_sha256=N16_SPEC.sha256, rejoined=True)
+      report.update(n16_sha256=N16_SPEC.sha256, rejoined=True)
+      if args.require_dm:
+        require(report['dm']['strict_20hz_pass'], 'required valid consecutive DM >=20 Hz not observed')
+      report['completed'] = True
   finally:
     errors = []
     try:
@@ -488,6 +669,8 @@ def bench(args, report):
           errors.append('power restoration failed; inspect restoration report')
       except Exception as error:
         errors.append(str(error))
+      finally:
+        heartbeat.close()
       if errors:
         report.update(completed=False, cleanup_errors=errors)
         raise RuntimeError('; '.join(errors))
@@ -495,8 +678,8 @@ def bench(args, report):
 
 def main():
   if len(sys.argv) > 1 and sys.argv[1] == '--restore-watchdog':
-    fd, parent, identity, seconds, output, original = sys.argv[2:]
-    return watchdog(int(fd), int(parent), identity, float(seconds), Path(output), original)
+    fd, heartbeat_fd, parent, identity, seconds, output, original = sys.argv[2:]
+    return watchdog(int(fd), int(heartbeat_fd), int(parent), identity, float(seconds), Path(output), original)
   parser = argparse.ArgumentParser(description=__doc__)
   parser.add_argument('--seconds', type=int, default=120, help='measurement seconds after first N16 output (30..300)')
   parser.add_argument('--output', type=Path, required=True)
@@ -528,7 +711,7 @@ def main():
     if 'dm' not in report:
       report['dm'] = dm_summary(report['dm_frames'])
     save_report(args.output, report)
-    print(json.dumps({k: v for k, v in report.items() if k not in ('frames', 'dm_frames', 'safety_checks')}), flush=True)
+    print(json.dumps({k: v for k, v in report.items() if k not in ('frames', 'dm_frames', 'safety_checks', 'guard_heartbeat_checks')}), flush=True)
   return code
 
 

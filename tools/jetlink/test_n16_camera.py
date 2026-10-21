@@ -42,6 +42,7 @@ def native(monkeypatch):
   monkeypatch.setattr(cereal, 'messaging', messaging, raising=False)
   monkeypatch.setattr(bench, 'os', NS(path=NS(isfile=forbidden), kill=forbidden, pipe=forbidden,
     read=forbidden, write=forbidden, close=forbidden, SCHED_FIFO=1, SCHED_OTHER=0,
+    nice=forbidden, getpid=forbidden,
     sched_getscheduler=forbidden, sched_getparam=forbidden, sched_getaffinity=forbidden,
     sched_setscheduler=forbidden, sched_setaffinity=forbidden, sched_param=forbidden))
   monkeypatch.setattr(bench, 'subprocess', NS(Popen=forbidden, PIPE=-1))
@@ -294,23 +295,174 @@ def test_watchdog_restores_only_after_safe_recheck(monkeypatch, native, tmp_path
   monkeypatch.setattr(bench, 'process_identity', lambda pid: None)
   monkeypatch.setattr(bench, 'CPU_ONLINE', NS(read_text=lambda: '0-3'))
   monkeypatch.setattr(bench, 'select', NS(select=lambda *a: ([42], [], [])))
+  monkeypatch.setattr(bench, 'GuardMailbox', lambda fd: NS(close=lambda: None))
   for name, value in {'sched_setscheduler': lambda *a: None, 'sched_setaffinity': lambda *a: None,
-                      'sched_param': lambda *a: None, 'read': lambda *a: b'D' if normal else b'', 'close': closed.append}.items():
+                      'sched_param': lambda *a: None, 'nice': lambda value: None,
+                      'read': lambda *a: b'D' if normal else b'', 'close': closed.append}.items():
     monkeypatch.setattr(bench.os, name, value)
   target = tmp_path / 'restore.json'
-  assert bench.watchdog(42, 123, 'identity', .01, target, '0-3') == int(unsafe)
+  assert bench.watchdog(42, 43, 123, 'identity', .01, target, '0-3') == int(unsafe)
   saved = json.loads(target.read_text())
-  assert saved['restored'] is not unsafe and powers == ([] if unsafe else [True]) and closed == [42]
+  assert saved['restored'] is not unsafe and powers == ([] if unsafe else [True]) and closed == [43, 42]
   assert saved['reason'] == ('cleanup' if normal else 'timeout_or_parent_exit')
+
+
+def guard_sample(start=99.9, sequence=1, **changes):
+  sample = {'sequence': sequence, 'safe': True, 'check_started': start, 'mono': start + .005,
+    'sampling_ms': 2., 'proc_scan_ms': 3., 'check_ms': 5.,
+    'source_mono_ns': dict.fromkeys(bench.SAFETY_SERVICES, int((start - .01) * 1e9)),
+    'source_recv_time': dict.fromkeys(bench.SAFETY_SERVICES, start - .005),
+    'scheduler': 'SCHED_OTHER', 'cpus': [0, 1, 2, 3], 'power_active': True, 'cpu_online': '0-7'}
+  return dict(sample, **changes)
+
+
+@pytest.fixture
+def heartbeat_case(monkeypatch, tmp_path):
+  clock = NS(now=100.)
+  monkeypatch.setattr(bench, 'time', NS(monotonic=lambda: clock.now))
+  with (tmp_path / 'mailbox').open('w+b') as backing:
+    backing.truncate(bench.GUARD_MAILBOX_BYTES)
+    writer, reader = (bench.GuardMailbox(backing.fileno()) for _ in range(2))
+    child = NS(returncode=None)
+    child.poll = lambda: child.returncode
+    heartbeat = bench.GuardHeartbeat(child, reader)
+    try:
+      yield NS(writer=writer, heartbeat=heartbeat, clock=clock, child=child, report={'safety_checks': []})
+    finally:
+      heartbeat.close()
+      writer.close()
+
+
+def test_mailbox_bounds_long_initialization_and_latches_unsafe(heartbeat_case):
+  c = heartbeat_case
+  # More than the full 120 s setup budget at 4 Hz, without any parent reads.
+  for sequence in range(1, 601):
+    c.writer.publish(guard_sample(99.9 - (600 - sequence) * .25, sequence))
+  assert len(c.writer.memory) == 16384
+  c.heartbeat.check(c.report)
+  assert c.heartbeat.sequence == 600 and c.report['safety_checks'][0]['unread_safe_samples'] == 599
+  assert c.report['guard_heartbeat_checks'][-1]['accepted']
+  c.writer.publish(guard_sample(sequence=601, safe=False, error='vehicle changed during init'))
+  with pytest.raises(RuntimeError, match='latched'):
+    c.writer.publish(guard_sample(sequence=602))
+  with pytest.raises(RuntimeError, match='vehicle changed during init'):
+    c.heartbeat.check(c.report)
+
+
+@pytest.mark.parametrize('case', ['missing', 'unsafe', 'dead', 'expired', 'slow_scan', 'future', 'nan',
+                                 'source_expired', 'source_future', 'incomplete', 'cpu7', 'fifo', 'power', 'not_armed'])
+def test_heartbeat_rejects_without_native_access(heartbeat_case, case):
+  c, sample = heartbeat_case, guard_sample()
+  if case == 'unsafe':
+    sample.update(safe=False, error='unsafe desk')
+  elif case == 'dead':
+    c.child.returncode = 1
+  elif case == 'expired':
+    c.clock.now = 100.4
+  elif case == 'slow_scan':
+    sample.update(check_started=99.4, mono=99.99)
+  elif case == 'future':
+    sample['mono'] = 100.01
+  elif case == 'nan':
+    sample['check_started'] = float('nan')
+  elif case == 'source_expired':
+    sample['source_mono_ns']['pandaStates'] = 97_500_000_000
+  elif case == 'source_future':
+    sample['source_recv_time']['deviceState'] = 100.1
+  elif case == 'incomplete':
+    del sample['source_recv_time']['managerState']
+  elif case == 'cpu7':
+    sample['cpus'] = [7]
+  elif case == 'fifo':
+    sample['scheduler'] = 'SCHED_FIFO'
+  elif case == 'power':
+    sample['cpu_online'] = '0-3'
+  elif case == 'not_armed':
+    sample['power_active'] = False
+  if case == 'nan':
+    # Corrupted IPC must fail closed even though the writer itself rejects NaN.
+    payload = json.dumps(sample).encode()
+    c.writer.memory[:bench.GUARD_HEADER.size] = bench.GUARD_HEADER.pack(1, len(payload))
+    c.writer.memory[bench.GUARD_HEADER.size:bench.GUARD_HEADER.size + len(payload)] = payload
+  elif case != 'missing':
+    c.writer.publish(sample)
+  with pytest.raises(RuntimeError):
+    c.heartbeat.check(c.report)
+  assert not c.report['guard_heartbeat_checks'][-1]['accepted']
+
+
+def test_cached_heartbeat_source_expiry_and_nonblocking_writer_contention(heartbeat_case, monkeypatch):
+  c = heartbeat_case
+  c.writer.publish(guard_sample(source_mono_ns=dict.fromkeys(bench.SAFETY_SERVICES, 97_600_000_000)))
+  c.heartbeat.check(c.report)
+  def busy(*args):
+    raise BlockingIOError
+  monkeypatch.setattr(bench, 'fcntl', NS(lockf=busy, LOCK_SH=1, LOCK_NB=4))
+  c.clock.now = 100.05
+  c.heartbeat.check(c.report)
+  c.clock.now = c.heartbeat.expires
+  with pytest.raises(RuntimeError, match='stale/missing'):
+    c.heartbeat.check(c.report)
+
+
+@pytest.mark.parametrize('case', ['cleanup', 'unsafe', 'slow_scan', 'power', 'timeout', 'parent_exit'])
+def test_watcher_samples_off_realtime_core_and_retains_all_checks(monkeypatch, native, tmp_path, case):
+  clock = NS(now=100., selects=0, checks=0)
+  scheduling, samples, powers, closed = [], [], [], []
+  monkeypatch.setattr(bench, 'time', NS(monotonic=lambda: clock.now))
+  monkeypatch.setattr(bench, 'process_identity', lambda pid: None)
+  monkeypatch.setattr(bench, 'CPU_ONLINE', NS(read_text=lambda: '0-3' if case == 'power' and clock.checks == 3 else '0-7'))
+  def check():
+    assert scheduling[:3] == [('policy', 0), ('cpus', {0, 1, 2, 3}), ('nice', 10)]
+    clock.checks += 1
+    if case == 'unsafe' and clock.checks >= 3:
+      raise RuntimeError('unsafe desk')
+    sample = guard_sample(clock.now)
+    del sample['sequence']
+    clock.now += .6 if case == 'slow_scan' and clock.checks == 3 else .005
+    sample['mono'] = clock.now
+    return sample
+  monkeypatch.setattr(bench, 'DeskGuard', lambda: NS(check=check))
+  monkeypatch.setattr(native.hardware, 'set_power_save', powers.append)
+  monkeypatch.setattr(bench, 'GuardMailbox', lambda fd: NS(publish=lambda sample: samples.append(sample.copy()), close=lambda: None))
+  def select(*args):
+    clock.selects += 1
+    if clock.selects in (2, 4) and case != 'timeout':
+      return [42], [], []
+    clock.now += args[-1]
+    return [], [], []
+  monkeypatch.setattr(bench, 'select', NS(select=select))
+  for name, value in {
+    'sched_setscheduler': lambda pid, policy, param: scheduling.append(('policy', policy)),
+    'sched_setaffinity': lambda pid, cpus: scheduling.append(('cpus', cpus)),
+    'nice': lambda value: scheduling.append(('nice', value)), 'sched_param': lambda value: value,
+    'sched_getscheduler': lambda pid: 0, 'sched_getaffinity': lambda pid: {0, 1, 2, 3},
+    'read': lambda *a: b'R' if clock.selects == 2 else b'' if case == 'parent_exit' else b'D',
+    'close': closed.append,
+  }.items():
+    monkeypatch.setattr(bench.os, name, value)
+  target = tmp_path / 'watcher.json'
+  result = bench.watchdog(42, 43, 123, 'identity', .8, target, '0-7')
+  report = json.loads(target.read_text())
+  assert result == int(case == 'unsafe')
+  assert report['guard_checks'] == samples and len(samples) >= 3
+  assert all('watcher_check_ms' in sample and 'check_started' in sample for sample in samples)
+  assert [s['sequence'] for s in samples] == list(range(1, len(samples) + 1))
+  assert closed == [43, 42] and powers == ([] if case == 'unsafe' else [False])
+  if case in ('unsafe', 'slow_scan', 'power'):
+    assert report['reason'] == 'unsafe_guard' and not samples[-1]['safe']
+  else:
+    assert report['reason'] == ('cleanup' if case == 'cleanup' else 'timeout_or_parent_exit')
 
 
 @pytest.mark.parametrize('failure,error', [
   (None, None), ('identity', 'exact pinned N16'), ('nav', 'navigation unexpectedly active'),
   ('camera', 'stale camera pair'), ('context', 'stale roadCameraState'),
   ('guard', 'desk changed'), ('live_calibration', 'stale liveCalibration'),
+  ('dm', 'required valid consecutive DM'),
 ])
 def test_bench_provenance_metrics_and_fail_closed(monkeypatch, native, calibration, output, tmp_path, failure, error):
-  clock, calls, reads, checks = NS(now=100., frame=0), [], [], []
+  clock, calls, reads, checks = NS(now=100., frame=0, realtime=False), [], [], []
   monkeypatch.setattr(bench, 'time', NS(monotonic=lambda: clock.now))
   monkeypatch.setattr(bench.os.path, 'isfile', lambda path: path == '/AGNOS')
   for name, value in {'sched_getscheduler': lambda *a: 1, 'sched_getparam': lambda *a: 54,
@@ -318,20 +470,40 @@ def test_bench_provenance_metrics_and_fail_closed(monkeypatch, native, calibrati
                       'sched_setaffinity': lambda *a: None, 'write': lambda *a: None, 'close': lambda *a: None}.items():
     monkeypatch.setattr(bench.os, name, value)
   native.hardware.set_power_save = lambda value: calls.append(('power', value))
-  monkeypatch.setattr(bench, 'CPU_ONLINE', NS(read_text=lambda: '0-7'))
+  def cpu_online():
+    assert not clock.realtime, 'CPU policy sampling must not run on the realtime parent'
+    return '0-7'
+  monkeypatch.setattr(bench, 'CPU_ONLINE', NS(read_text=cpu_online))
   def get(key):
     reads.append(key)
     return saved_calibration()
-  def check():
-    checks.append(clock.now)
-    bench.require(failure != 'guard' or clock.now < 100.6, 'desk changed')
-    return {'safe': True, 'mono': clock.now}
   params = NS(get=get, get_float=lambda key: 100.)
-  monkeypatch.setattr(bench, 'DeskGuard', lambda: NS(params=params, check=check))
+  monkeypatch.setattr(bench, 'DeskGuard', forbidden)
+  monkeypatch.setattr(sys.modules['openpilot.common.params'], 'Params', lambda: params)
   restore_path = tmp_path / 'run.json.restore.json'
   restore_path.write_text('{"restored": true}')
   restore = NS(poll=lambda: None, wait=lambda **kw: None, returncode=0, stdout=NS(close=lambda: None))
-  monkeypatch.setattr(bench, 'arm_watchdog', lambda *a: (restore, 42))
+  class Channel:
+    next_sample, sequence, power_active, closed, sample = 0., 0, False, False, None
+    def read(self, sequence):
+      if clock.now >= self.next_sample:
+        self.sequence += 1
+        self.next_sample = clock.now + bench.GUARD_INTERVAL
+        checks.append(clock.now)
+        self.sample = guard_sample(clock.now - .005, self.sequence, power_active=self.power_active)
+        if failure == 'guard' and clock.now >= 100.6:
+          self.sample.update(safe=False, error='desk changed')
+      return self.sample.copy() if sequence < self.sequence else None
+    def close(self):
+      self.closed = True
+  channel = Channel()
+  heartbeat = bench.GuardHeartbeat(restore, channel)
+  def write(fd, value):
+    if value == b'R':
+      channel.power_active, channel.next_sample = True, 0.
+  monkeypatch.setattr(bench.os, 'write', write)
+  monkeypatch.setattr(bench, 'select', NS(select=lambda *a: ([channel], [], [])))
+  monkeypatch.setattr(bench, 'arm_watchdog', lambda *a: (restore, 42, heartbeat))
 
   class Context(dict):
     def __init__(self, services):
@@ -410,6 +582,7 @@ def test_bench_provenance_metrics_and_fail_closed(monkeypatch, native, calibrati
     return np.eye(3, dtype=np.float32)
   def schedule(core, priority):
     assert (core, priority) == (7, 54)
+    clock.realtime = True
   old_fault, old_shadow = model.FAULT, Shadow.__dict__['optional']
   modules = {
     'msgq.visionipc': NS(VisionIpcClient=Vision, VisionStreamType=NS(VISION_STREAM_ROAD=0, VISION_STREAM_WIDE_ROAD=1)),
@@ -425,7 +598,7 @@ def test_bench_provenance_metrics_and_fail_closed(monkeypatch, native, calibrati
     monkeypatch.setitem(sys.modules, name, module)
   monkeypatch.setattr(bench, 'layout', lambda *a: None)  # Layout has its own native-independent contract test below.
   source = 'live' if failure == 'live_calibration' else 'params'
-  args = NS(seconds=30, output=tmp_path / 'run.json', require_dm=False, calibration_source=source)
+  args = NS(seconds=30, output=tmp_path / 'run.json', require_dm=failure == 'dm', calibration_source=source)
   report = {'frames': [], 'dm_frames': [], 'safety_checks': []}
   if error is None:
     bench.bench(args, report)
@@ -434,18 +607,23 @@ def test_bench_provenance_metrics_and_fail_closed(monkeypatch, native, calibrati
       bench.bench(args, report)
   assert model.FAULT == old_fault and Shadow.__dict__['optional'] is old_shadow
   assert report['restoration']['restored'] and calls == [('power', False)]
+  assert channel.closed and len(report['guard_heartbeat_checks']) > 0
   assert reads == ([] if source == 'live' else ['CalibrationParams'])
   if error is not None:
     assert not report.get('completed', False)
     if source == 'live':
       assert 'calibration' not in report  # Stale live data must not silently use stored params.
+    if failure == 'dm':
+      assert report['rejoined'] and report['external_timing']['frames'] > 100
+      assert not report['dm']['strict_20hz_pass']
     return
   assert report['completed'] and report['rejoined'] and report['restoration']['restored']
   assert report['n16_sha256'] == N16_SPEC.sha256
   assert 'unused' in report['camera_validity']['visionipc_valid']
   assert report['camera_validity']['max_age_seconds'] == .25
-  assert len(checks) > 50 and checks[0] == 100.
-  assert max(np.diff(checks)) < .7  # Guard remains periodic through IPC fault and rejoin.
+  assert len(checks) > 100 and checks[0] == 100.
+  assert max(np.diff(checks)) < .4
+  assert len(report['guard_heartbeat_checks']) > len(checks) * 2
   assert not report['calibration']['live'] and report['camera_context']['calibration_mono_ns'] is None
   assert report['camera_context']['calibration_mode'] == 'static_recorded'
   np.testing.assert_allclose(report['calibration']['rpy_recorded'], [0., .04, -.02])
