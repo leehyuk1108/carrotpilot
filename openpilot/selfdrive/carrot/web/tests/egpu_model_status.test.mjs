@@ -133,14 +133,25 @@ test("Jetson-only card shows IP and temperature, clears stale values and cannot 
     if (!elements.has(id)) elements.set(id, { dataset: {}, style: {}, classList: { toggle() {}, remove() {} } });
     return elements.get(id);
   } };
-  const jetlink = { label: "jetSON", severity: "ok", addresses: ["192.168.0.199"], temp_c: 64.5 };
+  const jetlink = { label: "jetSON", severity: "ok", addresses: ["192.168.0.199"], temp_c: 64.5,
+    fresh: true, model: "N16 Nav (96244b1f)" };
   CarrotEgpuModel.render({ available: false, jetlink });
   assert.equal(elements.get("egpuModelCard").hidden, false);
+  assert.equal(elements.get("egpuModelTitle").textContent, "jetSON · N16 Nav (96244b1f)");
   assert.match(elements.get("jetlinkHealth").textContent, /192\.168\.0\.199.*64\.5/);
   assert.equal(elements.get("btnEgpuCompileRestart").hidden, true);
-  CarrotEgpuModel.render({ available: false, jetlink: { ...jetlink, severity: "error", addresses: [], temp_c: null } });
+  for (const model of ["Cinque v2", "Future model"]) {
+    CarrotEgpuModel.render({ available: false, jetlink: { ...jetlink, model } });
+    assert.equal(elements.get("egpuModelTitle").textContent, `jetSON · ${model}`);
+  }
+  CarrotEgpuModel.render({ available: false, jetlink: { ...jetlink, severity: "error", fresh: false, addresses: [], temp_c: null } });
+  assert.equal(elements.get("egpuModelTitle").textContent, "jetSON · Checking model");
   assert.doesNotMatch(elements.get("jetlinkHealth").textContent, /192\.168|64\.5/);
   assert.equal(elements.get("egpuModelCard").dataset.state, "error");
+  for (const model of [undefined, null, "", " ", { name: "N16" }]) {
+    CarrotEgpuModel.render({ available: false, jetlink: { ...jetlink, model } });
+    assert.equal(elements.get("egpuModelTitle").textContent, "jetSON · Checking model");
+  }
 });
 
 test("host reasons use Korean translations while preserving unknown diagnostics", (t) => {

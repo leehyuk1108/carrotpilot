@@ -1,6 +1,7 @@
 """Desk-only harness regressions: real schema/parser, simulated native boundaries.
 
 No device, GPU, service, process signalling or driving publication is permitted.
+One short local Python child verifies mmap/lock inheritance, without native imports.
 """
 import hashlib
 import importlib.util
@@ -347,6 +348,37 @@ def test_mailbox_bounds_long_initialization_and_latches_unsafe(heartbeat_case):
     c.writer.publish(guard_sample(sequence=602))
   with pytest.raises(RuntimeError, match='vehicle changed during init'):
     c.heartbeat.check(c.report)
+
+
+def test_mailbox_across_exec_and_real_process_lock(heartbeat_case):
+  import subprocess
+  c = heartbeat_case
+  code = '''
+import fcntl, json, sys, time
+from tools.jetlink.bench_n16_camera import GuardMailbox
+box = GuardMailbox(int(sys.argv[1]))
+fcntl.lockf(box.fd, fcntl.LOCK_EX)
+print('LOCKED', flush=True)
+time.sleep(.2)
+sample = json.loads(sys.argv[2])
+for sequence in range(1, 601):
+  sample['sequence'] = sequence
+  box.publish(sample)
+sample.update(sequence=601, safe=False, error='unsafe during native initialization')
+box.publish(sample)
+box.close()
+'''
+  child = subprocess.Popen([sys.executable, '-B', '-c', code, str(c.writer.fd), json.dumps(guard_sample())],
+                           cwd=ROOT, pass_fds=(c.writer.fd,), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+  try:
+    assert child.stdout.readline() == b'LOCKED\n'
+    assert c.heartbeat.channel.read(0) is None  # Never block the realtime parent on the writer.
+  finally:
+    _, stderr = child.communicate(timeout=5)
+  assert child.returncode == 0, stderr.decode()
+  with pytest.raises(RuntimeError, match='unsafe during native initialization'):
+    c.heartbeat.check(c.report)
+  assert c.report['safety_checks'][-1]['sequence'] == 601
 
 
 @pytest.mark.parametrize('case', ['missing', 'unsafe', 'dead', 'expired', 'slow_scan', 'future', 'nan',

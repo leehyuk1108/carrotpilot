@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from aiohttp import web
-from openpilot.common.jetlink_status import diagnostics as jetlink_diagnostics
+from openpilot.common.jetlink_status import web_status as jetlink_web_status
 from openpilot.common.egpu_recovery_status import read_status as read_egpu_recovery
 
 from openpilot.selfdrive.modeld.big_model import active_manifest, active_model_compiled, active_model_path, model_cache_dir
@@ -93,7 +93,13 @@ def build_status_payload(params: Any | None = None) -> dict[str, Any]:
 
 
 async def api_status(_request: web.Request) -> web.Response:
-  return web.json_response({**build_status_payload(), 'jetlink': jetlink_diagnostics()})
+  snapshot = jetlink_web_status()
+  host = snapshot.get('health')
+  if host is not None:
+    current = snapshot.get('fresh') and snapshot.get('state') == 'ready'
+    host = {**host, 'model': snapshot.get('model', '') if current else '',
+            'sha256': snapshot.get('sha256', '') if current else ''}
+  return web.json_response({**build_status_payload(), 'jetlink': host})
 
 
 async def api_diagnostics(_request: web.Request) -> web.Response:

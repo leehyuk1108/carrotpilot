@@ -130,6 +130,26 @@ def test_card_hidden_without_egpu_history(feature):
   assert feature.build_status_payload(SimpleNamespace(get_bool=lambda _key: False)) == {"ok": True, "available": False}
 
 
+@pytest.mark.parametrize('model', ['N16 Nav (96244b1f)', 'Cinque v2', 'Future model'])
+@pytest.mark.parametrize('fresh,state,current', [(True, 'ready', True), (False, 'ready', False),
+                                               (True, 'waiting', False), (True, 'retrying', False)])
+def test_api_reports_current_jetlink_model_not_a_fixed_name(feature, monkeypatch, model, fresh, state, current):
+  monkeypatch.setattr(feature, 'build_status_payload', lambda: {'ok': True, 'available': False})
+  health = {'label': 'jetSON', 'fresh': fresh, 'severity': 'ok'}
+  monkeypatch.setattr(feature, 'jetlink_web_status', lambda: {
+    'health': health, 'fresh': fresh, 'state': state, 'model': model, 'sha256': 'b' * 64,
+  })
+  result = json.loads(asyncio.run(feature.api_status(None)).body)
+  assert result['jetlink'] == {**health, 'model': model if current else '', 'sha256': 'b' * 64 if current else ''}
+  assert 'model' not in health
+
+
+def test_api_does_not_invent_a_jetlink_card_without_a_peer(feature, monkeypatch):
+  monkeypatch.setattr(feature, 'build_status_payload', lambda: {'ok': True, 'available': False})
+  monkeypatch.setattr(feature, 'jetlink_web_status', lambda: {'health': None})
+  assert json.loads(asyncio.run(feature.api_status(None)).body)['jetlink'] is None
+
+
 @pytest.mark.parametrize('state', ['waiting_for_network', 'installing'])
 def test_auto_delivery_explains_failure_without_requesting_reboot(feature, tmp_path, state):
   write_big_model_status(tmp_path, state, sha256='a' * 64, error_code='dns', detail='resolver unavailable',

@@ -6,6 +6,10 @@ Run with --seconds 120 --output /tmp/n16-camera.json [--require-dm].
 Navigation is explicitly absent (zero map/TBT), not live navigation validation.
 Camera validity comes from fresh road/wide CameraState events correlated with
 native frame IDs/timestamps; this producer does not populate VisionIPC.valid.
+Safety sampling runs in the power-restoration watcher on SCHED_OTHER/CPU0-3.
+A fixed mailbox survives blocking model initialization without queuing samples;
+unsafe is latched, all checks are retained in the restoration report, and the
+realtime parent requires a heartbeat younger than 500 ms from check start.
 
 Default --calibration-source live requires fresh calibrated liveCalibration.
 For offroad operation with calibrationd stopped, --calibration-source params

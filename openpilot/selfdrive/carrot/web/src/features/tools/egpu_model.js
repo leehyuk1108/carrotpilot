@@ -104,6 +104,11 @@ function modelDisplayTitle(status, fallbackTitle = t("title")) {
   return name ? `${name} · eGPU` : fallbackTitle;
 }
 
+function hostModelTitle(host) {
+  const name = host.fresh === true && typeof host.model === "string" ? host.model.trim() : "";
+  return `${host.label} · ${name || t("checking")}`;
+}
+
 function render(status = lastStatus) {
   const card = document.getElementById("egpuModelCard");
   if (!card) return;
@@ -155,7 +160,7 @@ function render(status = lastStatus) {
     card.hidden = false;
     card.dataset.state = host.severity === "error" ? "error" : "compiled";
     card.classList.remove("is-running");
-    document.getElementById("egpuModelTitle").textContent = `${host.label} · Cinque v2`;
+    document.getElementById("egpuModelTitle").textContent = hostModelTitle(host);
     stateEl.textContent = t(`host_${host.severity || "unknown"}`);
     detailEl.textContent = "";
     progressEl.hidden = true;
