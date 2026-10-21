@@ -265,7 +265,7 @@ def manager_thread(update_status: UpdateStatus) -> None:
     automatic_reason = try_automatic_shutdown(sm, params, HARDWARE.shutdown)
     if automatic_reason is not None:
       params.put("LastManagerExitReason", f"AutomaticShutdown {automatic_reason} {datetime.datetime.now()}")
-      cloudlog.warning("Automatic poweroff requested", reason=automatic_reason)
+      cloudlog.warning({"event": "Automatic poweroff requested", "reason": automatic_reason})
       break
 
 def main() -> None:

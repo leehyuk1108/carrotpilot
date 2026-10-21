@@ -7,6 +7,7 @@ from unittest.mock import Mock
 import pytest
 
 from openpilot.cereal import log
+from openpilot.common.logging_extra import SwagLogger
 from openpilot.system.hardware.automatic_shutdown import REQUEST_KEY, automatic_shutdown_reason, try_automatic_shutdown
 
 PandaType = log.PandaState.PandaType
@@ -184,7 +185,7 @@ def test_actual_manager_loop_uses_cancellable_auto_path(mode):
   sm.update = update
   globals_ = {
     "UpdateStatus": object, "Params": lambda: params, "log": log,
-    "cloudlog": Mock(), "os": NS(environ={}, getenv=lambda key, default=None: default),
+    "cloudlog": SwagLogger(), "os": NS(environ={}, getenv=lambda key, default=None: default),
     "UNREGISTERED_DONGLE_ID": "unregistered", "managed_processes": {},
     "messaging": NS(SubMaster=lambda *a, **kw: sm, PubMaster=lambda *_: Mock(),
                     new_message=lambda *a, **kw: NS(managerState=NS())),
