@@ -4,6 +4,8 @@ The operator must own camerad and, optionally, dmonitoringmodeld beforehand.
 This file never starts/stops those services, the manager, HUD or USB daemon.
 Run with --seconds 120 --output /tmp/n16-camera.json [--require-dm].
 Navigation is explicitly absent (zero map/TBT), not live navigation validation.
+Camera validity comes from fresh road/wide CameraState events correlated with
+native frame IDs/timestamps; this producer does not populate VisionIPC.valid.
 
 Default --calibration-source live requires fresh calibrated liveCalibration.
 For offroad operation with calibrationd stopped, --calibration-source params
@@ -32,6 +34,8 @@ FORBIDDEN = ('modeld', 'controlsd', 'selfdrived', 'card')
 CPU_ONLINE = Path('/sys/devices/system/cpu/online')
 SAFETY_MAX_AGE = 2.5
 SETUP_SECONDS = 120
+CAMERA_MAX_AGE = .25
+CAMERA_STATE_MAX_SKEW_NS = 100_000_000
 
 
 def require(condition, detail):
@@ -188,6 +192,33 @@ def layout(buf, width, height):
           (width, height, stride, stride * y_height, size), 'camera NV12 layout mismatch')
 
 
+def camera_state_evidence(context, main_meta, wide_meta, now):
+  evidence = {}
+  for service, meta in (('roadCameraState', main_meta), ('wideRoadCameraState', wide_meta)):
+    require(context.seen[service] and context.alive[service] and context.valid[service], f'invalid {service}')
+    message_age = now - context.logMonoTime[service] * 1e-9
+    receive_age = now - context.recv_time[service]
+    require(0 <= message_age < CAMERA_MAX_AGE and 0 <= receive_age < CAMERA_MAX_AGE, f'stale {service}')
+    state = context[service]
+    require(0 < state.timestampSof <= state.timestampEof, f'invalid {service} exposure timestamps')
+    capture_age = now - state.timestampEof * 1e-9
+    require(0 <= capture_age < CAMERA_MAX_AGE, f'stale {service} capture')
+    delta = int(state.frameId) - meta.frame_id
+    sof_delta, eof_delta = state.timestampSof - meta.timestamp_sof, state.timestampEof - meta.timestamp_eof
+    # sendState publishes VIPC first, then the same metadata as CameraState.
+    # Separate transports may expose the adjacent frame (native cadence varies).
+    require(abs(delta) <= 1, f'{service} frame ID mismatch')
+    require((delta == 0 and sof_delta == eof_delta == 0) or
+            (delta != 0 and 0 < delta * sof_delta <= CAMERA_STATE_MAX_SKEW_NS and
+             0 < delta * eof_delta <= CAMERA_STATE_MAX_SKEW_NS), f'{service} exposure mismatch')
+    evidence[service] = {'valid': bool(context.valid[service]), 'frame_id': int(state.frameId),
+      'vipc_frame_delta': delta, 'event_mono_ns': context.logMonoTime[service],
+      'message_age_ms': message_age * 1000, 'receive_age_ms': receive_age * 1000,
+      'sof_ns': state.timestampSof, 'eof_ns': state.timestampEof, 'capture_age_ms': capture_age * 1000,
+      'vipc_sof_delta_ns': sof_delta, 'vipc_eof_delta_ns': eof_delta}
+  return evidence
+
+
 def read_static_calibration(params):
   """Read the same saved Event as Calibrator.__init__, without starting it."""
   import numpy as np
@@ -274,7 +305,12 @@ def bench(args, report):
     require(main.connect(False) and extra.connect(False), 'existing camerad streams unavailable')
     require((main.width, main.height) == (extra.width, extra.height), 'road/wide dimensions differ')
     report['camera_size'] = [main.width, main.height]
-    context_services = ['deviceState', 'roadCameraState']
+    report['camera_validity'] = {'source': 'roadCameraState + wideRoadCameraState valid Events',
+      'visionipc_valid': 'unused: CameraBuf::sendFrameToVipc does not populate this field',
+      'max_age_seconds': CAMERA_MAX_AGE, 'max_frame_delta': 1,
+      'max_adjacent_exposure_delta_ns': CAMERA_STATE_MAX_SKEW_NS,
+      'same_frame_timestamps': 'exact', 'producer': 'camera_qcom2.cc CameraState::sendState'}
+    context_services = ['deviceState', 'roadCameraState', 'wideRoadCameraState']
     if static_calibration is None:
       context_services.append('liveCalibration')
     context = messaging.SubMaster(context_services)
@@ -309,17 +345,16 @@ def bench(args, report):
         if frames is None:
           continue
         buf_main, meta_main, buf_extra, meta_extra = frames
-        require(main.valid and extra.valid, 'invalid camera frame')
         received = time.monotonic()
         require(all(0 < m.timestamp_sof <= m.timestamp_eof for m in (meta_main, meta_extra)), 'invalid camera timestamps')
-        require(all(0 <= received - m.timestamp_eof * 1e-9 < .25 for m in (meta_main, meta_extra)), 'stale camera pair')
+        require(all(0 <= received - m.timestamp_eof * 1e-9 < CAMERA_MAX_AGE for m in (meta_main, meta_extra)), 'stale camera pair')
         context.update(0)
         if not all(context.seen.values()):
           continue
         require(all(context.valid.values()), 'invalid camera/calibration context')
         context_now = time.monotonic()
-        for service in ('deviceState', 'roadCameraState'):
-          require(0 <= context_now - context.logMonoTime[service] * 1e-9 < 2.5, f'stale {service}')
+        require(0 <= context_now - context.logMonoTime['deviceState'] * 1e-9 < 2.5, 'stale deviceState')
+        camera_evidence = camera_state_evidence(context, meta_main, meta_extra, context_now)
         if static_calibration is not None:
           # Copy before applying yaw trim: never accumulate it in the frozen pose.
           euler = static_calibration[0].copy()
@@ -395,6 +430,7 @@ def bench(args, report):
           'road_frame_id': meta_main.frame_id, 'wide_frame_id': meta_extra.frame_id, 'ipc_frame': joining.frame,
           'sof_ns': meta_main.timestamp_sof, 'eof_ns': meta_main.timestamp_eof,
           'wide_sof_ns': meta_extra.timestamp_sof, 'wide_eof_ns': meta_extra.timestamp_eof,
+          'camera_state_evidence': camera_evidence,
           'started': run_start, 'finished': finished, 'dropped': dropped, 'prepare_only': dropped > 0,
           'output_present': result is not None, 'output_valid': bool(joining.output_valid),
           'capture_age_start_ms': (run_start - meta_main.timestamp_eof * 1e-9) * 1000,
