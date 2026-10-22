@@ -82,6 +82,26 @@ def test_single_delayed_frame_does_not_clear_entire_display(sm, service):
   assert bridge.live_payload(sm, 1) == expected
 
 
+def test_zero_crossing_preserves_gear_but_not_stale_or_invalid_data(sm):
+  sm.data['carState'].vEgo = -3.39526e-22
+  sm.data['carState'].standstill = True
+  result = bridge.live_payload(sm, 1)
+  assert result['gear'] == 'drive'
+  assert result['active'] and result['ambientState'] == 'onroad'
+  sm.data['carState'].gearShifter = 'reverse'
+  result = bridge.live_payload(sm, 2)
+  assert result['gear'] == 'reverse' and result['ambientState'] == 'reverse'
+  assert not result['active']
+  sm.delay('carState', 0.6)
+  result = bridge.live_payload(sm, 3)
+  assert result['gear'] == 'unknown' and not result['active']
+  sm.recv_time['carState'] = 100.0
+  sm.logMonoTime['carState'] = 100_000_000_000
+  sm.data['carState'].canValid = False
+  result = bridge.live_payload(sm, 4)
+  assert result['gear'] == 'unknown' and not result['active']
+
+
 @pytest.mark.parametrize('age', [0.2, 0.4, 0.499])
 def test_display_grace_is_bounded_by_receipt_age(sm, age):
   sm.delay('selfdriveState', age)

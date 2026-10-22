@@ -246,7 +246,9 @@ def payload_from_messages(*, car_state: Any = None, selfdrive_state: Any = None,
   car_valid = (car_state is not None and bool(getattr(car_state, "canValid", False))
                and not bool(getattr(car_state, "canTimeout", False)))
   if onroad:
-    car_valid = car_valid and 0.0 <= finite_float(getattr(car_state, "vEgo", None), -1.0) < 100.0
+    # GM speed is signed and its filter can cross zero at rest. Neither is a
+    # lost CAN connection; reverse display suppression is handled by gear below.
+    car_valid = car_valid and abs(finite_float(getattr(car_state, "vEgo", None), math.inf)) < 100.0
   connected = car_valid and (not onroad or selfdrive_state is not None)
   gear = enum_text(getattr(car_state, "gearShifter", "unknown")).lower() if car_valid else "unknown"
   door = bool(getattr(car_state, "doorOpen", False) if door_open is None else door_open)

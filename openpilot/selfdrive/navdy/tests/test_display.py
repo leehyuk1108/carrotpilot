@@ -74,6 +74,35 @@ class TestDisplay:
     assert payload(controls_state=NS(vCruise=150), longitudinal_plan=NS(cruiseTarget=140),
                    carrot_man=NS(desiredSpeed=130))["setSpeedKph"] == 91.0
 
+  @pytest.mark.parametrize("gear", ["drive", "neutral", "park", "reverse"])
+  def test_signed_speed_does_not_invalidate_fresh_vehicle_state(self, gear):
+    # GM supplies signed wheel speed; the filter also crosses zero after stopping.
+    speeds = (0.018, -0.01721164584, 0.0010106927, -0.000053814, 2.313e-6,
+              -3.7476e-17, 2.34338e-18, -3.39526e-22, -1.22067e-41, 0.0)
+    reference = payload(car_state=car(gearShifter=gear, vEgo=0, vEgoCluster=0, standstill=True))
+    for speed in speeds:
+      result = payload(car_state=car(gearShifter=gear, vEgo=speed, vEgoCluster=0, standstill=True))
+      assert result["gear"] == gear
+      for key in ("enabled", "active", "engageable", "opAvailable", "ambientState", "setSpeedKph", "actualAccSetKph"):
+        assert result[key] == reference[key], key
+      assert result["vEgoKph"] >= 0
+
+  def test_reverse_signed_speed_never_grants_active_visuals(self):
+    for speed in (-1.2078565, -0.018, 0, 0.018):
+      result = payload(car_state=car(gearShifter="reverse", vEgo=speed), model=model())
+      assert result["gear"] == "reverse"
+      assert result["ambientState"] == "reverse"
+      assert not result["active"] and not result["enabled"]
+      assert result["navVehicles"] == [] and "navPathLeft" not in result
+
+  @pytest.mark.parametrize("speed", [math.nan, math.inf, -math.inf, None, "bad", -100.0, 100.0, -101.0, 101.0])
+  def test_invalid_speed_is_still_rejected(self, speed):
+    result = payload(car_state=car(vEgo=speed), model=model())
+    assert result["gear"] == "unknown"
+    assert not result["active"] and not result["enabled"]
+    assert result["ambientState"] == "disconnected"
+    assert result["navVehicles"] == [] and "navPathLeft" not in result
+
   def test_original_alerts_are_never_suppressed_or_replaced(self):
     for event in ("resumeRequired", "brakeHold", "silentBrakeHold", "steerRequired"):
       for status, size in (("normal", "small"), ("userPrompt", "mid"), ("critical", "full")):
