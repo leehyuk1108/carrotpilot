@@ -65,8 +65,28 @@ recorded frames remain private, outside this repository.
 
 ## Deployment
 
-Pending a fresh offroad/ignition-OFF/no-output guard, publish to the requested
-WIP-FR branch and fast-forward the matching device. Restart only navdy_bridge;
-retain USB diagnostics and Bluetooth-only telemetry. Record actual recovery
-and protected-process checks below after deployment; no physical display or
-road-validation result is implied by this plan.
+Published single-parent correction `b0ddb09b` to WIP-FR and fast-forwarded the
+matching Comma after repeated fresh offroad/ignition-OFF/no-output guards.
+Native post-install pure mapping checks passed all 31 cases. Restarted only
+navdy_bridge, PID 74265 -> 113733. No whole-device reboot or APK installation.
+HUD PID 12405 and UI/pandad/hardwared/carrot_man/jetlinkd PIDs are unchanged.
+Generated DBC edits, N16 pin and Bluetooth configuration were preserved.
+
+The deployment script's final comparison mistakenly compared complete Android
+`ps` rows (which include changing memory values). It failed after installation
+and successful reconnection. A separate read-only verification compared stable
+process identity and passed; the deployment was not repeated.
+
+Final 90.088-second offroad observation sampled 450 distinct bridge updates:
+
+- Bluetooth session 41 unchanged; all display acknowledgements accepted.
+- Receiver clears 207 -> 207, no new link failures, skipped snapshots zero.
+- USB telemetry updates remain zero while USB diagnostic reads succeed.
+- Maximum sampled RTT 134.68 ms, receiver age 134.01 ms.
+- Runtime mapper SHA256:
+  `7cfcfba931320f96b4c0f7b71f5da16de185715a48dc7c626277d6650974c91a`.
+
+Backup: `/data/navdy/backups/signed-speed-20261022-46foay4d`.
+Private verification output: `/tmp/hl-navdy-usb-20261022/verify-result.txt`.
+This is offroad protocol/process validation, not optical HUD, physical ambient
+or driving validation. Independent ambient interruption remains unresolved.
