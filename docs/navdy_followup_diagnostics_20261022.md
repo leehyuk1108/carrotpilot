@@ -75,3 +75,26 @@ DBC cases are excluded on macOS, as in the preceding pipeline validation; they
 are not counted as passes for this change. Ruff passes for the changed production
 modules and new test file. Native deployment/recovery results, if performed, are
 recorded separately from this pre-deployment source validation.
+
+## Guarded Device Follow-Up
+
+Published and installed `faae6e6fb1f9ead58fdbe99fd9a9f536b8b55803` after fresh
+device/panda state confirmed offroad, ignition OFF, controls disallowed and
+noOutput. Preserved unrelated generated DBC changes, Bluetooth-only settings,
+model pin and all transport/ambient implementation hashes. Backups remain under
+`/data/navdy/backups/link-diagnostics-20261022-*`. The deployment helper's first
+working-directory check stopped before restart; the verified process inherits
+the manager directory. After correcting that helper check, repeated the guards
+and all nine pure diagnostic tests on Comma, then restarted only navdy_bridge.
+UI, Panda, hardware, carrot_man and Jetson daemon PIDs stayed unchanged.
+
+The next completed 60.047-second observation contained 298 status samples,
+no read errors, no disconnected samples and one protocol-2 receiver session.
+Clears remained 206 -> 206 and power invalidations 221 -> 221; the increment
+from the preceding session occurred across the deliberate bridge restart.
+USB updates remained zero. RTT median/max was 41.805/95.69 ms and maximum
+observed ACK receipt gap was 418.882 ms. The three baseline/transport events
+were read back from persistent swaglog, not merely the shared-memory status.
+No live failure was induced. This confirms diagnostic installation and bounded
+offroad reconnection, not a fix or a successful driving reproduction. No APK,
+pairing, ambient timeout, driving-model or control change was made.
