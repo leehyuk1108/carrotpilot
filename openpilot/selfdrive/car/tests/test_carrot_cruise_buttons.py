@@ -449,6 +449,110 @@ def test_auto_hold_blocks_automatic_cruise_activation():
   assert helper._activate_cruise == 0
 
 
+def make_pedal_speed_helper(auto_cruise, speed=50, enabled=False):
+  helper, CS, CC = make_cruise_helper(80, 0, False, enabled)
+  helper._update_cruise_state = VCruiseCarrot._update_cruise_state.__get__(helper)
+  helper.CP = SimpleNamespace(pcmCruise=False)
+  helper.params = SimpleNamespace(get_bool=lambda key: False)
+  helper.autoCruiseControl = auto_cruise
+  helper.autoGasTokSpeed = 0
+  helper.autoGasCancelSpeed = 30
+  helper.autoGasSyncSpeed = 1
+  helper.disengage_on_accelerator = False
+  helper.enabled_last = enabled
+  helper.v_cruise_kph = 80
+  helper.v_ego_kph_set = speed
+  helper._gas_pressed_count = -10
+  helper._gas_pressed_count_last = 0
+  helper._gas_pressed_value = 0
+  helper._gas_tok_timer = 40
+  helper._gas_tok = False
+  helper.speedcam_gas_tok_consumed = False
+  helper._brake_pressed_count = -10
+  helper._soft_hold_count = 0
+  helper.soft_hold_on_cancel = False
+  helper.xState = 0
+  helper.aTarget = 0
+  helper.d_rel = helper.v_rel = helper.v_lead_kph = 0
+  helper.desiredSpeed = 250
+  helper.cruiseOnDist = 0
+  helper.nRoadLimitSpeed = helper.nRoadLimitSpeed_last = 80
+  helper.applyModelSpeed = helper.autoRoadSpeedAdjust = 0
+  helper.autoSpeedUptoRoadSpeedLimit = 0.2
+  helper.autoRoadSpeedLimitOffset = -1
+  CS.vEgo = CS.vEgoCluster = speed / 3.6
+  CS.canValid = CS.cruiseState.available = True
+  CS.gearShifter = 'drive'
+  return helper, CS, CC
+
+
+@pytest.mark.parametrize('auto_cruise', [0, 1, 2, 3])
+@pytest.mark.parametrize('scenario,speed,enabled,auto_speed,activation', [
+  ('brake_release', 50, False, 50, 1),
+  ('brake_signal', 20, False, 20, 1),
+  ('gas_release', 50, False, 50, 1),
+  ('gas_signal', 50, False, 50, -1),
+  ('gas_tap_off', 90, False, 90, 1),
+  ('gas_tap_on', 50, True, 90, 0),
+])
+def test_pedal_release_speed_changes_require_auto_cruise(auto_cruise, scenario, speed, enabled, auto_speed, activation):
+  helper, CS, CC = make_pedal_speed_helper(auto_cruise, speed, enabled)
+  if scenario.startswith('brake'):
+    helper._brake_pressed_count = -1
+  else:
+    helper._gas_pressed_count = -1
+  helper._gas_tok = scenario.startswith('gas_tap')
+  if scenario.endswith('signal'):
+    helper.xState = 3
+  if scenario == 'brake_signal':
+    helper.autoGasTokSpeed = 30
+
+  assert helper._update_cruise_state(CS, CC, 80) == (auto_speed if auto_cruise else 80)
+  assert helper._activate_cruise == (activation if auto_cruise else 0)
+
+
+@pytest.mark.parametrize('button,expected', [(ButtonType.accelCruise, 80), (ButtonType.decelCruise, 50)])
+def test_manual_braking_keeps_set_and_resume_speed_until_explicit_button(button, expected):
+  helper, CS, CC = make_pedal_speed_helper(0, 80, True)
+  CS.brakePressed = True
+  helper._prepare_brake_gas(CS, CC)
+  assert helper._v_cruise_kph_at_brake == 80
+  CC.enabled = helper.enabled_last = False
+  CS.vEgo = CS.vEgoCluster = 50 / 3.6
+  helper.v_ego_kph_set = 50
+  assert helper._update_cruise_state(CS, CC, 80) == 80
+
+  CS.brakePressed = False
+  helper._prepare_brake_gas(CS, CC)
+  assert helper._brake_pressed_count == -1
+  assert helper._update_cruise_state(CS, CC, 80) == 80
+  assert helper._v_cruise_kph_at_brake == 80
+  assert helper._activate_cruise == 0
+
+  helper._prepare_brake_gas(CS, CC)
+  helper._prepare_buttons = lambda *args: (80, button, False)
+  assert helper._update_cruise_buttons(CS, CC, 80) == expected
+  assert helper._v_cruise_kph_at_brake == 0
+
+
+@pytest.mark.parametrize('sync,speed,expected', [(0, 90, 80), (1, 90, 90), (1, 50, 80)])
+def test_manual_gas_sync_setting_is_independent_of_auto_cruise(sync, speed, expected):
+  helper, CS, CC = make_pedal_speed_helper(0, speed, True)
+  helper.autoGasSyncSpeed = sync
+  helper._gas_pressed_count = helper._gas_tok_timer + 1
+  CS.gasPressed = True
+  assert helper._update_cruise_state(CS, CC, 80) == expected
+
+
+@pytest.mark.parametrize('xstate,lead', [(3, 0), (0, 10)])
+def test_paddle_decel_speed_selection_is_unchanged(xstate, lead):
+  helper, CS, CC = make_pedal_speed_helper(0, 50, True)
+  helper._paddle_decel_active = True
+  helper.xState, helper.d_rel = xstate, lead
+  assert helper._update_cruise_state(CS, CC, 80) == 50
+  assert not helper._paddle_decel_active
+
+
 def test_large_steering_angle_blocks_automatic_cruise_activation():
   helper = VCruiseCarrot.__new__(VCruiseCarrot)
   helper._cruise_available = True

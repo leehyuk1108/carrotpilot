@@ -130,6 +130,7 @@ These 123 settings can affect vehicle motion. Change one item at a time.
 - Always Lateral waits for the first confirmation of valid model, vehicle-parameter, pose, and other required inputs after system startup. Once confirmed, this startup check ends; later input interruptions or disengagement/reengagement do not rearm it. Existing runtime safety handling remains unchanged. Expiry of the startup waiting period alone does not pass this check.
 - `AutoEngage`: `0` off, `1` lateral on, `2` lateral on with cruise ready.
 - `AutoCruiseControl` covers Hyundai/Kia auto-cruise and soft-hold behavior.
+- In the shared `WIP-FR` cruise logic, `AutoCruiseControl=0` also prevents automatic-activation speed selection from changing the set speed when a pedal is released. SET/RES buttons, the separate `AutoGasSyncSpeed` setting while holding the accelerator, paddles, and road/model speed features retain their existing behavior.
 - `DisableMinSteerSpeed` is vehicle-specific and relates to low-speed steering restrictions on SMDPS-equipped cars.
 
 ### Buttons and presets — 15 settings

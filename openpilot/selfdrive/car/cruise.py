@@ -862,6 +862,8 @@ class VCruiseCarrot:
     self._cruise_control(1, -1, "Cruise on (soft hold)", allow_cancel_state=self.soft_hold_on_cancel)
 
   def _update_cruise_state(self, CS, CC, v_cruise_kph):
+    # Disabling automatic activation must also disable its pedal-release speed selection.
+    auto_cruise_enabled = self.autoCruiseControl != 0
     if not CC.enabled:
       #self._pause_auto_speed_up = False
       if self._brake_pressed_count == -1 and self._soft_hold_active > 0:
@@ -883,9 +885,9 @@ class VCruiseCarrot:
       if not CC.enabled:
         #self._cruise_cancel_state = False
         self._cruise_control(1, -1, "Cruise on (gas tok)")
-        if self.v_ego_kph_set > v_cruise_kph:
+        if auto_cruise_enabled and self.v_ego_kph_set > v_cruise_kph:
           v_cruise_kph = self.v_ego_kph_set
-      else:
+      elif auto_cruise_enabled:
         v_cruise_kph = self._v_cruise_desired(CS, v_cruise_kph)
     elif self._gas_pressed_count == -1:
       if 0 < self.d_rel < CS.vEgo * 0.8:
@@ -896,22 +898,25 @@ class VCruiseCarrot:
       elif self.v_ego_kph_set < self.autoGasCancelSpeed:
         self._cruise_control(-1, 0, "Cruise off (gas speed)")
       elif self.xState == 3:
-        v_cruise_kph = min(self.v_ego_kph_set, v_cruise_kph)
+        if auto_cruise_enabled:
+          v_cruise_kph = min(self.v_ego_kph_set, v_cruise_kph)
         self._cruise_control(-1, 3, "Cruise off (traffic sign)")
       elif CS.leftBlinker or CS.rightBlinker:
         pass
       elif not self.disengage_on_accelerator and self.v_ego_kph_set >= self.autoGasTokSpeed and not CC.enabled:
-        v_cruise_kph = min(self.v_ego_kph_set, v_cruise_kph)
+        if auto_cruise_enabled:
+          v_cruise_kph = min(self.v_ego_kph_set, v_cruise_kph)
         self._cruise_control(1, -1 if self.aTarget > 0.0 else 0, "Cruise on (gas pressed)")
     elif self._brake_pressed_count == -1 and self._soft_hold_active == 0:
       if CS.leftBlinker or CS.rightBlinker:
         pass
       elif self.v_ego_kph_set > self.autoGasTokSpeed:
-        v_cruise_kph = self.v_ego_kph_set
+        if auto_cruise_enabled:
+          v_cruise_kph = self.v_ego_kph_set
         self._cruise_control(1, -1 if self.aTarget > 0.0 else 0, "Cruise on (speed)")
       elif abs(CS.steeringAngleDeg) < 20:
         if self.xState in [3, 5]:
-          if self.xState == 3:  # 감속중
+          if auto_cruise_enabled and self.xState == 3:  # 감속중
             v_cruise_kph = self.v_ego_kph_set
           self._cruise_control(1, 0, "Cruise on (traffic sign)")
         elif 0 < self.d_rel < 20: 
