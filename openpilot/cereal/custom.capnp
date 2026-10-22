@@ -49,6 +49,15 @@ struct CarrotMan @0x81c2f05a394cf4af {
 	positionMonoTime @34 : UInt64;
 	positionSource @35 : Text;
 	positionHeadingValid @36 : Bool;
+	externalNavigationSource @37 : Text;
+	externalNavigationActive @38 : Bool;
+	routeTrafficTotalMeters @39 : UInt32;
+	routeTrafficSegments @40 : List(RouteTrafficSegment);
+
+	struct RouteTrafficSegment {
+		endM @0 : UInt32;
+		status @1 : Text;
+	}
 }
 
 struct CarrotNaviState @0xaedffd8f31e7b55d {

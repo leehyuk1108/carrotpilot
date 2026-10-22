@@ -133,6 +133,8 @@ class CarrotServ:
 
     self.nGoPosDist = 0
     self.nGoPosTime = 0
+    self.route_traffic_total = 0
+    self.route_traffic_segments = ()
     self.szPosRoadName = ""
     self.nSdiPlusType = -1
     self.nSdiPlusSpeedLimit = 0
@@ -953,6 +955,8 @@ class CarrotServ:
     self.navModifier = self.navModifierNext = ""
 
     self.nGoPosDist = self.nGoPosTime = 0
+    self.route_traffic_total = 0
+    self.route_traffic_segments = ()
     self.last_update_gps_time_navi = 0
     self._gps_sources().remove('external_navi')
     self.szPosRoadName = ""
@@ -1054,6 +1058,8 @@ class CarrotServ:
     self.carrot_navi_route_sequence = route.sequence
     self.nGoPosDist = route.remaining_distance_m if route.present else 0
     self.nGoPosTime = route.remaining_time_sec if route.present else 0
+    self.route_traffic_total = route.traffic_total_m if route.present else 0
+    self.route_traffic_segments = route.traffic_segments if route.present else ()
 
   def _apply_carrot_navi_traffic(self, navi: CarrotNaviControl):
     traffic = navi.traffic
@@ -1561,11 +1567,20 @@ class CarrotServ:
     self._update_countdown_alert(left_sec, source, v_ego_kph)
 
     self._update_cmd()
+    navdy_selected = self.accepts_navigation(NAVI_SOURCE_NAVDY)
+    # Zero is unknown, not a speed target. Do not publish the last Navdy limit
+    # after its own component expires while TBT or camera data is still fresh.
+    published_road_limit = 0 if navdy_selected and not self.carrot_navi_road_limit_valid else int(self.nRoadLimitSpeed)
     msg = messaging.new_message('carrotMan')
     msg.valid = True
     msg.carrotMan.activeCarrot = self.active_carrot
-    msg.carrotMan.nRoadLimitSpeed = int(self.nRoadLimitSpeed)
+    msg.carrotMan.nRoadLimitSpeed = published_road_limit
     msg.carrotMan.remote = remote_ip
+    msg.carrotMan.externalNavigationSource = 'navdy' if navdy_selected else 'network'
+    msg.carrotMan.externalNavigationActive = (
+      self.carrot_navi_active and self.carrot_navi_has_control if navdy_selected else self.external_navigation_active)
+    msg.carrotMan.routeTrafficTotalMeters = self.route_traffic_total
+    msg.carrotMan.routeTrafficSegments = [{'endM': end, 'status': status} for end, status in self.route_traffic_segments]
     msg.carrotMan.xSpdType = int(self.xSpdType)
     msg.carrotMan.xSpdLimit = int(self.xSpdLimit)
     msg.carrotMan.xSpdDist = int(self.xSpdDist)
@@ -1600,7 +1615,8 @@ class CarrotServ:
 
     msg.carrotMan.nGoPosDist = self.nGoPosDist
     msg.carrotMan.nGoPosTime = self.nGoPosTime
-    msg.carrotMan.szSdiDescr = self._get_sdi_descr(-1 if self.nSdiType == 0 and self.nSdiDist == 0 else self.nSdiType)
+    description_type = 22 if self.xSpdType == 22 else self.nSdiType
+    msg.carrotMan.szSdiDescr = self._get_sdi_descr(-1 if description_type == 0 and self.nSdiDist == 0 else description_type)
     if rear_camera_holding and source == "cam":
       label = {"ko": "후면단속 속도 유지", "en": "Rear camera speed hold", "zh": "后向测速限速保持"}.get(self.lang, "Rear camera speed hold")
       msg.carrotMan.szSdiDescr = f"{label} {math.ceil(rear_camera_remaining)}m"
@@ -1619,7 +1635,7 @@ class CarrotServ:
       instruction = inst.navInstructionCarrot
       instruction.distanceRemaining = self.nGoPosDist
       instruction.timeRemaining = self.nGoPosTime
-      instruction.speedLimit = self.nRoadLimitSpeed / 3.6 if self.nRoadLimitSpeed > 0 else 0
+      instruction.speedLimit = published_road_limit / 3.6 if published_road_limit > 0 else 0
       instruction.maneuverDistance = float(self.nTBTDist)
       instruction.maneuverSecondaryText = self.szNearDirName
       if self.szFarDirName and len(self.szFarDirName):

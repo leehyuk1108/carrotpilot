@@ -774,6 +774,9 @@ class VCruiseCarrot:
     return v_cruise_kph
 
   def _auto_speed_up(self, v_cruise_kph):
+    # Zero denotes missing navigation data, never a zero-speed target.
+    if self.nRoadLimitSpeed <= 0:
+      return v_cruise_kph
     #if self._pause_auto_speed_up:
     #  return v_cruise_kph
     if not self._pause_auto_speed_up and self.applyModelSpeed != 0.0:

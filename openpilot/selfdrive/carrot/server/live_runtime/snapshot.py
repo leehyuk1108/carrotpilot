@@ -484,6 +484,13 @@ def _build_carrot(service: Any, previous: dict[str, Any] | None = None) -> dict[
   p["vehicleNaviSectionActive"] = safe_bool(safe_get(service, "vehicleNaviSectionActive"))
   p["vehicleNaviAvailable"] = safe_bool(safe_get(service, "vehicleNaviAvailable"))
   p["activeCarrot"] = safe_int(safe_get(service, "activeCarrot"))
+  p["externalNavigationSource"] = safe_text(safe_get(service, "externalNavigationSource"))
+  p["externalNavigationActive"] = safe_bool(safe_get(service, "externalNavigationActive"))
+  p["routeTrafficTotalMeters"] = safe_int(safe_get(service, "routeTrafficTotalMeters"))
+  segments = _ensure_list(p, "routeTrafficSegments")
+  segments.clear()
+  for item in to_list(safe_get(service, "routeTrafficSegments"))[:64]:
+    segments.append({"endM": safe_int(safe_get(item, "endM")), "status": safe_text(safe_get(item, "status"))})
   p["xState"] = safe_text(safe_get(service, "xState"))
   p["trafficState"] = safe_text(safe_get(service, "trafficState"))
   p["tFollow"] = safe_float(safe_get(service, "tFollow"))

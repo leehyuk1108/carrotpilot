@@ -884,6 +884,10 @@ class HudRenderer(Widget):
     carrot_man = sm['carrotMan']
     vehicle_navi_available = bool(getattr(carrot_man, "vehicleNaviAvailable", False))
     try:
+      carrot_man_fresh = bool(sm.alive['carrotMan'] and sm.valid['carrotMan'])
+    except (AttributeError, KeyError):
+      carrot_man_fresh = False
+    try:
       carrot_navi_connected = bool(
         sm.alive['carrotNavi']
         and sm.valid['carrotNavi']
@@ -892,7 +896,9 @@ class HudRenderer(Widget):
     except Exception:
       carrot_navi_connected = False
     external_navi_connected = external_navigation_connected(
-      getattr(carrot_man, "remote", ""), carrot_navi_connected,
+      getattr(carrot_man, "remote", "") if carrot_man_fresh else "", carrot_navi_connected,
+      external_navigation_source=getattr(carrot_man, "externalNavigationSource", ""),
+      external_navigation_active=carrot_man_fresh and bool(getattr(carrot_man, "externalNavigationActive", False)),
     )
     navi_status = navigation_status_presentation(vehicle_navi_available, external_navi_connected)
     if navi_status is not None:

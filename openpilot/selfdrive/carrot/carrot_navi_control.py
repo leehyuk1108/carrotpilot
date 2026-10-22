@@ -68,6 +68,8 @@ class NaviRouteControl:
   remaining_time_sec: int = 0
   polyline: tuple[tuple[float, float], ...] = ()
   received_mono_time_ns: int = 0
+  traffic_total_m: int = 0
+  traffic_segments: tuple[tuple[int, str], ...] = ()
 
 
 @dataclass(frozen=True)

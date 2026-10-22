@@ -62,6 +62,19 @@ def navigation_status_presentation(vehicle_available: bool, external_active: boo
   return None
 
 
-def external_navigation_connected(legacy_remote: str | None, carrot_navi_connected: bool) -> bool:
-  """Return external-navigation connectivity without consulting speed-control state."""
-  return bool(str(legacy_remote or "").strip()) or bool(carrot_navi_connected)
+def external_navigation_connected(
+  legacy_remote: str | None,
+  carrot_navi_connected: bool,
+  *,
+  external_navigation_source: str = "",
+  external_navigation_active: bool = False,
+) -> bool:
+  """Return navigation availability from fresh inputs, not speed-control state.
+
+  Callers must gate remote/active by the publishing service's alive/valid state.
+  Keep the selected source even when stale so Navdy cannot fall back to network
+  inputs. Its active flag represents verified navigation, not a Bluetooth link.
+  """
+  if external_navigation_source == "navdy":
+    return bool(external_navigation_active)
+  return bool(external_navigation_active) or bool(str(legacy_remote or "").strip()) or bool(carrot_navi_connected)

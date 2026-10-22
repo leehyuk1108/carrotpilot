@@ -171,3 +171,99 @@ def test_no_vehicle_command_or_bluetooth_reset_in_transport():
   source = (Path(__file__).parents[1] / 'transport.py').read_text()
   for forbidden in ('kill-server', 'svc bluetooth', 'force-stop', '/sys/kernel', 'reboot'):
     assert forbidden not in source
+
+
+def test_preview_bump_survives_another_selected_sign():
+  value = packet()
+  value['roadPreview'].update(guidance=True, bumpDistanceM=96)
+  value['navigationFeedback']['guidance']['sdi'] = {'type': 18, 'distanceMeters': 40}
+  tracker = FeedbackTracker()
+  tracker.accept(value, 10, 10)
+  state = tracker.snapshot(10)
+  assert state.speed.secondary_sdi_type == 22
+  assert state.speed.secondary_sdi_distance_m == 96
+  assert state.speed.sdi_type == 1
+
+
+def test_guidance_bump_takes_precedence_over_preview():
+  value = packet()
+  value['roadPreview'].update(guidance=True, bumpDistanceM=130)
+  value['navigationFeedback']['guidance']['sdi'] = {'type': 22, 'distanceMeters': 96}
+  tracker = FeedbackTracker()
+  tracker.accept(value, 10, 10)
+  assert tracker.snapshot(10).speed.secondary_sdi_distance_m == 96
+
+
+@pytest.mark.parametrize('distance', [0, -1, None, True, '0', float('nan'), float('inf')])
+def test_new_bump_clear_cannot_revive_older_preview(distance):
+  value = packet()
+  value['roadPreview'].update(guidance=True, bumpDistanceM=96)
+  value['navigationFeedback']['guidance']['sdi'] = {'type': 22, 'distanceMeters': 5}
+  tracker = FeedbackTracker()
+  tracker.accept(value, 10, 10)
+  assert tracker.snapshot(10).speed.secondary_sdi_distance_m == 5
+  value['navigationFeedback']['sequence'] = 2
+  value['navigationFeedback']['guidance']['sdi']['distanceMeters'] = distance
+  tracker.accept(value, 11, 11)
+  state = tracker.snapshot(11)
+  assert not state.speed.secondary_sdi_present
+  assert state.speed.secondary_sdi_distance_m == 0
+
+
+@pytest.mark.parametrize('distance', [True, None, '96', -1, 0, 2001, float('nan'), float('inf')])
+def test_preview_bump_rejects_invalid_distance(distance):
+  value = packet()
+  value['roadPreview'].update(guidance=True, bumpDistanceM=distance)
+  tracker = FeedbackTracker()
+  tracker.accept(value, 10, 10)
+  assert not tracker.snapshot(10).speed.secondary_sdi_present
+
+
+@pytest.mark.parametrize('clear', ['guidance', 'road', 'expiry'])
+def test_preview_bump_clear_and_frozen_sequence(clear):
+  value = packet()
+  value['roadPreview'].update(guidance=True, bumpDistanceM=96)
+  tracker = FeedbackTracker()
+  tracker.accept(value, 10, 10)
+  assert tracker.snapshot(10).speed.secondary_sdi_present
+  if clear == 'guidance':
+    value['navigationFeedback']['sequence'] = 2
+    value['navigationFeedback']['guidance']['active'] = False
+  elif clear == 'road':
+    value['roadPreview']['sequence'] = 2
+    value['roadPreview']['guidance'] = False
+  for now in (11, 12, 13, 14):
+    tracker.accept(value, now, now)
+    if clear != 'expiry':
+      assert not tracker.snapshot(now).speed.secondary_sdi_present
+  assert not tracker.snapshot(14).speed.secondary_sdi_present
+
+
+@pytest.mark.parametrize('segments,total', [
+  ([{'endM': 1500, 'status': 'G'}], 1500),
+  ([{'endM': 500, 'status': 'G'}, {'endM': 1500, 'status': 'R'}], 1500),
+])
+def test_route_traffic_is_preserved(segments, total):
+  value = packet()
+  value['navigationFeedback']['guidance'].update(trafficTotalMeters=total, trafficSegments=segments)
+  tracker = FeedbackTracker()
+  tracker.accept(value, 10, 10)
+  route = tracker.snapshot(10).route
+  assert route.traffic_total_m == total
+  assert route.traffic_segments == tuple((s['endM'], s['status']) for s in segments)
+
+
+@pytest.mark.parametrize('segments', [
+  [{'endM': True, 'status': 'G'}], [{'endM': float('nan'), 'status': 'G'}],
+  [{'endM': 2000, 'status': 'G'}], [{'endM': 500, 'status': 'G'}, {'endM': 400, 'status': 'R'}],
+  [{'endM': 500, 'status': 'bad'}], [{'endM': 500, 'status': []}],
+  [{'endM': i+1, 'status': 'G'} for i in range(65)], 'not-an-array',
+])
+def test_bad_route_traffic_cannot_break_guidance(segments):
+  value = packet()
+  value['navigationFeedback']['guidance'].update(trafficTotalMeters=1500, trafficSegments=segments)
+  tracker = FeedbackTracker()
+  tracker.accept(value, 10, 10)
+  state = tracker.snapshot(10)
+  assert state.current.present
+  assert state.route.traffic_segments == () and state.route.traffic_total_m == 0

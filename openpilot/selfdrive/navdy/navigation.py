@@ -37,6 +37,24 @@ def camera_distance(value):
   return int(distance) if 0 < distance <= 10000 else None
 
 
+def route_traffic(guidance):
+  total = guidance.get('trafficTotalMeters')
+  items = guidance.get('trafficSegments')
+  if type(total) is not int or not 1 <= total <= 10000000 or not isinstance(items, list) or not 1 <= len(items) <= 64:
+    return 0, ()
+  segments = []
+  previous = 0
+  for item in items:
+    if not isinstance(item, dict):
+      return 0, ()
+    end, status = item.get('endM'), item.get('status')
+    if type(end) is not int or not previous < end <= total or status not in ('G', 'O', 'R'):
+      return 0, ()
+    segments.append((end, status))
+    previous = end
+  return total, tuple(segments)
+
+
 class FeedbackTracker:
   def __init__(self):
     self.received_at = -math.inf
@@ -123,8 +141,13 @@ class FeedbackTracker:
     revision = self.revisions['guidance']
     sdi = guidance.get('sdi')
     bump_distance = None
-    if isinstance(sdi, dict) and type(sdi.get('type')) is int and sdi['type'] == 22:
+    bump_selected = isinstance(sdi, dict) and type(sdi.get('type')) is int and sdi['type'] == 22
+    if bump_selected:
       bump_distance = number(sdi.get('distanceMeters'), 1, 10000)
+    # TMAP keeps a separate bump when another sign owns the single SDI slot.
+    # Both independent components must still be fresh and guidance active.
+    if not bump_selected and guidance and road and road.get('guidance') is True:
+      bump_distance = number(road.get('bumpDistanceM'), 1, 2000)
     # A route/road heartbeat must not rewind Carrot's ego-motion distance estimate.
     signature = (road_limit, camera, bump_distance)
     if signature != self.speed_signature:
@@ -159,9 +182,11 @@ class FeedbackTracker:
                             secondary_sdi_present=bump_distance is not None, secondary_sdi_type=22 if bump_distance is not None else -1,
                             secondary_sdi_distance_m=int(bump_distance or 0))
     current, upcoming = turn('primary'), turn('secondary')
+    traffic_total, traffic_segments = route_traffic(guidance)
     route = NaviRouteControl(bool(guidance), revision,
                              int(number(guidance.get('remainingDistanceMeters'), 0, 10000000) or 0),
-                             int(number(guidance.get('remainingTimeSeconds'), 0, 604800) or 0))
+                             int(number(guidance.get('remainingTimeSeconds'), 0, 604800) or 0),
+                             traffic_total_m=traffic_total, traffic_segments=traffic_segments)
     if not (speed.present or current.present or upcoming.present or route.present or traffic.present):
       return None
     # Preserve producer identity after component expiry, but reset Carrot's
