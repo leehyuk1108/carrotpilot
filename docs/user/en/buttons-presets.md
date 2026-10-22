@@ -53,6 +53,12 @@ Separate `SET`/`RES` buttons act once on release, whether tapped or held. The bu
 
 Manual engagement with openpilot longitudinal control is still requested when the physical `SET` or `RES` button is released. The standalone `+`/`-` buttons do not gain an engagement action.
 
+On `WIP-FR`, **Navigation Speed on SET Engagement** (`NavigationSetSpeed`) is off by default. When enabled, SET engagement from cruise-off uses the greater of current cluster speed and a valid external-navigation road limit plus 10 km/h. A road limit of exactly 30 km/h uses a 5 km/h offset instead. Existing minimum and maximum set-speed bounds remain in effect.
+
+Find the toggle under **Driving → Buttons & Presets → Button Modes**, directly after Cruise Button Mode. Changes are read about every 0.1 seconds without a reboot and apply at the next SET engagement. Toggling alone never changes the current set speed.
+
+Missing or expired navigation limits and stock-ACC speed ownership retain the existing SET behavior. RES restoration, SET deceleration while engaged, long presses, and existing soft-hold/ready handling are unchanged. Camera, speed-bump and lead-vehicle deceleration and engagement safety checks still apply. The offset exceeds the posted limit, so the driver must check and obey the applicable road limit.
+
 | Value | Short RES/+ | Short SET/- |
 |---:|---|---|
 | `0` normal | Next `CruiseSpeedUnitBasic` grid point | Previous `CruiseSpeedUnitBasic` grid point |

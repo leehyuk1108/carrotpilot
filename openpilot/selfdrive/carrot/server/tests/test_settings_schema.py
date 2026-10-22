@@ -43,6 +43,20 @@ def test_the_catalogue_is_readable_and_populated(params):
   assert all(isinstance(p.get("name"), str) and p["name"] for p in params)
 
 
+def test_navigation_set_speed_is_default_off_live_toggle_next_to_cruise_button_mode(settings):
+  _, by_name, _ = group_index(settings)
+  toggle = by_name['NavigationSetSpeed']
+  assert (toggle['control'], toggle['min'], toggle['max'], toggle['default']) == ('toggle', 0, 1, 0)
+  assert toggle['risk'] == 'high'
+  assert '재부팅 없이' in toggle['descr'] and '다음 SET' in toggle['descr']
+  assert all(toggle[key] for key in ('title', 'descr', 'etitle', 'edescr', 'ctitle', 'cdescr'))
+  assert '{"NavigationSetSpeed", {PERSISTENT, BOOL, "0"}}' in PARAMS_KEYS_PATH.read_text(encoding='utf-8')
+  categories = build_menu_categories(settings, by_name)
+  section = next(section for category in categories for group in category['groups'] for section in group['sections']
+                 if 'CruiseButtonMode' in section['items'])
+  assert section['items'][section['items'].index('CruiseButtonMode') + 1] == 'NavigationSetSpeed'
+
+
 @pytest.mark.parametrize("maximum", (3, 4))
 def test_gap_cycle_catalog_uses_vehicle_maximum_without_mutating_cache(settings, maximum):
   groups, by_name, groups_list = group_index(settings)

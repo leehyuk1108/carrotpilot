@@ -58,6 +58,7 @@ class NaviSpeedControl:
   section_active: bool = False
   section_speed_limit_kph: int = 0
   section_remaining_distance_m: int = 0
+  received_mono_time_ns: int = 0
 
 
 @dataclass(frozen=True)
@@ -285,6 +286,7 @@ def parse_carrot_navi_control(data: Any) -> CarrotNaviControl | None:
     section_active=section_active,
     section_speed_limit_kph=section_limit if section_active else 0,
     section_remaining_distance_m=section_distance if section_active else 0,
+    received_mono_time_ns=max(0, _int(_get(speed_item, "meta"), "receivedMonoTimeNanos")),
   )
 
   lane = _get(data, "laneCurrent")

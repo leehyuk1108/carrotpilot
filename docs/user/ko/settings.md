@@ -135,13 +135,13 @@ Carrot Web 설정 화면에서는 다음 기능을 사용할 수 있습니다.
 - `WIP-FR`의 공통 크루즈 처리에서는 `AutoCruiseControl=0`일 때 페달을 놓아도 자동 활성화용 속도 선택으로 기존 설정속도를 바꾸지 않습니다. SET/RES 버튼, 가속페달을 계속 밟을 때의 별도 `AutoGasSyncSpeed` 설정, 패들 및 도로·모델 속도 기능은 그대로 적용됩니다.
 - `DisableMinSteerSpeed`: SMDPS 장착 차량의 저속 조향 제한과 관련된 차량별 설정입니다.
 
-### 버튼·프리셋 — 15개
+### 버튼·프리셋 — 16개
 
 아래 표의 **세부 구역 제목을 누르면** 실제 코드 기준의 버튼 상태기계, 속도 단위와 적용 조건을 설명한 페이지로 이동합니다.
 
 | 세부 구역 | 파라미터 | 용도 |
 |---|---|---|
-| [버튼 모드](buttons-presets.md#button-modes) | `CruiseButtonMode`, `CancelButtonMode`, `LfaButtonMode`, `PaddleMode` | 크루즈, 캔슬, LFA와 패들 버튼의 동작 지정 |
+| [버튼 모드](buttons-presets.md#button-modes) | `CruiseButtonMode`, `NavigationSetSpeed`, `CancelButtonMode`, `LfaButtonMode`, `PaddleMode` | 크루즈, SET 진입 속도, 캔슬, LFA와 패들 버튼의 동작 지정 |
 | [속도 단위](buttons-presets.md#speed-units) | `CruiseSpeedUnit`, `CruiseSpeedUnitBasic`, `CruiseButtonLongDelay` | 짧게·길게 누를 때의 속도 변경 단위와 판정 시간 |
 | [버튼 테스트](buttons-presets.md#button-spam) | `CruiseButtonTest1`, `CruiseButtonTest2`, `CruiseButtonTest3` | 순정 SCC 목표속도 동기화용 버튼 메시지 값 |
 | [속도 프리셋](buttons-presets.md#speed-presets) | `CruiseSpeed1`, `CruiseSpeed2`, `CruiseSpeed3`, `CruiseSpeed4`, `CruiseSpeed5` | 사용자3 모드에서 사용하는 속도 테이블 |
@@ -149,6 +149,8 @@ Carrot Web 설정 화면에서는 다음 기능을 사용할 수 있습니다.
 버튼 설정은 순정 SCC 사용 여부와 차량 버튼 메시지에 따라 체감이 크게 다릅니다. 버튼이 예상과 다르게 작동하면 사용자 모드보다 `CruiseButtonMode=0`의 일반 동작에서 먼저 확인하세요.
 
 폭스바겐의 별도 `SET`은 현재 속도 설정, `RES`는 이전 설정속도 복원에 사용하고, `+`·`-`는 버튼 모드·속도 단위·길게 누르기 설정을 따릅니다. 오픈파일럿 종방향 제어의 수동 인게이지 버튼은 기존 물리 `SET`·`RES`로 유지됩니다.
+
+`WIP-FR`의 `NavigationSetSpeed`를 켜면 SET 인게이지에 유효한 내비 제한속도 +10km/h(30 제한은 +5)와 현재속도 중 큰 값을 사용하는 [내비 기반 초기 설정속도](buttons-presets.md#button-modes)가 적용됩니다. 기본값은 꺼짐이며, 변경은 약 0.1초 내 반영되어 다음 SET 진입부터 적용됩니다. 내비가 없거나 오래된 경우, 순정 ACC 및 이미 인게이지된 상태의 버튼 동작은 기존과 같습니다.
 
 <a id="vehicle-steering"></a>
 ### 차량 조향 — 상위 37개 + ONNX 상세 6개 + 검색 전용 1개

@@ -53,6 +53,7 @@
               "zh": "按钮模式",
               "params": [
                 "CruiseButtonMode",
+                "NavigationSetSpeed",
                 "CancelButtonMode",
                 "LfaButtonMode",
                 "PaddleMode"
@@ -1542,6 +1543,24 @@
       "max": 3,
       "default": 0,
       "unit": 1
+    },
+    {
+      "group": "버튼설정",
+      "name": "NavigationSetSpeed",
+      "title": "SET 진입 시 내비 제한속도 적용",
+      "descr": "SET으로 오파를 켤 때 현재속도와 내비 도로 제한속도+10km/h 중 큰 값을 설정합니다. 제한속도 30km/h에서는 +5km/h를 적용합니다. 유효한 최신 도로 제한속도가 없으면 기존 SET 동작을 유지합니다. 오파 종방향 제어 차량 전용이며 RES, 이미 활성화된 상태의 버튼 동작, 길게 누르기는 변경하지 않습니다. 기본값은 꺼짐입니다. 변경은 재부팅 없이 약 0.1초 내 반영되며 다음 SET 진입부터 적용됩니다. 토글만으로 현재 설정속도를 변경하지 않습니다. 제한속도 초과 값이므로 실제 도로 규정과 안전속도를 확인하세요.",
+      "egroup": "BUTN",
+      "etitle": "Navigation Speed on SET Engagement",
+      "edescr": "On SET engagement, use the greater of current speed and the navigation road limit plus 10 km/h; add 5 km/h at a 30 km/h limit. Missing or stale road limits retain normal SET behavior. Requires openpilot longitudinal control. RES, engaged button actions and long presses are unchanged. Off by default. Changes apply live in about 0.1 seconds for the next SET engagement; toggling alone never changes the current set speed. The target exceeds the posted limit: check road rules and safe speeds.",
+      "cgroup": "按键设置",
+      "ctitle": "SET 启用时采用导航限速",
+      "cdescr": "按 SET 启用时，取当前车速与导航道路限速加 10 km/h 中较大值；限速为 30 km/h 时加 5 km/h。缺少有效最新限速时保留原有 SET 行为。仅用于 openpilot 纵向控制；不改变 RES、已启用时的按钮操作或长按。默认关闭。更改约 0.1 秒内生效，无需重启，仅影响下次 SET 启用，不会立即改变当前设定速度。目标超过限速，请遵守道路规定并确认安全车速。",
+      "min": 0,
+      "max": 1,
+      "default": 0,
+      "unit": 1,
+      "control": "toggle",
+      "risk": "high"
     },
     {
       "group": "버튼설정",

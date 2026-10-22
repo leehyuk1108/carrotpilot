@@ -11,6 +11,7 @@ from openpilot.selfdrive.carrot.bluetooth.model import BLUETOOTH_CANCEL
 def make_cruise_helper(button_kph, cruise_button_mode, carrot_cruise_active, cruise_enabled,
                        cruise_speed_initialized=True, cruise_speed_at_brake=0):
   helper = VCruiseCarrot.__new__(VCruiseCarrot)
+  helper.CP = SimpleNamespace(pcmCruise=False, openpilotLongitudinalControl=True)
   helper.bluetooth_commands = SimpleNamespace(read=lambda **kwargs: None)
   helper._prepare_buttons = lambda CS, v_cruise_kph, remote=None: (button_kph, ButtonType.accelCruise, False)
   helper._carrot_command = lambda v_cruise_kph, button_type, long_pressed: (v_cruise_kph, button_type, long_pressed)
@@ -36,6 +37,9 @@ def make_cruise_helper(button_kph, cruise_button_mode, carrot_cruise_active, cru
   helper._cruise_button_mode = cruise_button_mode
   helper._cruise_speed_unit = 10
   helper._cruise_speed_min = 5
+  helper._cruise_speed_max = 161
+  helper.navigation_set_speed = False
+  helper.disengage_on_accelerator = False
   helper._paddle_mode = 0
   helper.v_ego_kph_set = 70
   helper.carrot_cruise_active = carrot_cruise_active
@@ -551,6 +555,213 @@ def test_paddle_decel_speed_selection_is_unchanged(xstate, lead):
   helper.xState, helper.d_rel = xstate, lead
   assert helper._update_cruise_state(CS, CC, 80) == 50
   assert not helper._paddle_decel_active
+
+
+@pytest.mark.parametrize('button', [ButtonType.decelCruise, ButtonType.setCruise])
+@pytest.mark.parametrize('metric', [False, True])
+@pytest.mark.parametrize('limit,current,expected', [
+  (80, 50, 90), (80, 90, 90), (80, 100, 100),
+  (30, 20, 35), (30, 35, 35), (30, 40, 40),
+  (50, 0, 60), (160, 140, 161),
+  (0, 50, 50), (-1, 50, 50), (200, 50, 50),
+])
+def test_set_engagement_uses_fresh_road_limit_in_kph(button, metric, limit, current, expected):
+  helper, CS, CC = make_remote_helper(None)
+  helper.navigation_set_speed = True
+  CS.buttonEnable = True
+  helper.is_metric = metric
+  helper.v_ego_kph_set = current
+  helper._set_speed_road_limit = limit
+  helper._prepare_buttons = lambda *args: (80, button, False)
+  assert helper._update_cruise_buttons(CS, CC, 80) == expected
+
+
+@pytest.mark.parametrize('button,expected', [(ButtonType.decelCruise, 79), (ButtonType.setCruise, 50),
+                                         (ButtonType.accelCruise, 81), (ButtonType.resumeCruise, 80)])
+def test_navigation_does_not_change_engaged_buttons(button, expected):
+  helper, CS, CC = make_remote_helper(None, enabled=True)
+  helper.navigation_set_speed = True
+  CS.buttonEnable = True
+  helper._set_speed_road_limit = 80
+  helper.v_ego_kph_set = 50
+  helper._prepare_buttons = lambda *args: (79 if button == ButtonType.decelCruise else 81, button, False)
+  assert helper._update_cruise_buttons(CS, CC, 80) == expected
+
+
+@pytest.mark.parametrize('button', [ButtonType.accelCruise, ButtonType.resumeCruise])
+def test_resume_uses_saved_speed_instead_of_road_limit(button):
+  helper, CS, CC = make_remote_helper(None)
+  helper.navigation_set_speed = True
+  CS.buttonEnable = True
+  helper._set_speed_road_limit = 80
+  helper._v_cruise_kph_at_brake = 70
+  helper._prepare_buttons = lambda *args: (51, button, False)
+  assert helper._update_cruise_buttons(CS, CC, 50) == 70
+
+
+@pytest.mark.parametrize('block', ['pcm', 'lateral_only', 'can', 'unavailable', 'park', 'brake', 'gas', 'hold', 'parking_brake'])
+def test_navigation_set_speed_does_not_bypass_engagement_inputs(block):
+  helper, CS, _ = make_remote_helper(None)
+  helper.navigation_set_speed = True
+  helper.disengage_on_accelerator = True
+  helper._set_speed_road_limit = 80
+  helper.CP.pcmCruise = block == 'pcm'
+  helper.CP.openpilotLongitudinalControl = block != 'lateral_only'
+  CS.canValid = block != 'can'
+  CS.cruiseState.available = block != 'unavailable'
+  CS.gearShifter = 'park' if block == 'park' else 'drive'
+  CS.brakePressed = block == 'brake'
+  CS.gasPressed = block == 'gas'
+  CS.brakeHoldActive = block == 'hold'
+  CS.parkingBrake = block == 'parking_brake'
+  assert helper._navigation_set_speed(CS) is None
+
+
+def test_navigation_set_owns_engagement_frame_without_changing_no_navigation_behavior():
+  helper, CS, CC = make_remote_helper(None)
+  helper.navigation_set_speed = True
+  CS.buttonEnable = True
+  helper.v_ego_kph_set = 50
+  helper._prepare_buttons = lambda *args: (79, ButtonType.decelCruise, False)
+  calls = []
+  helper._update_cruise_state = lambda *args: calls.append(args[2]) or 20
+  helper._set_speed_road_limit = 80
+  assert helper._update_cruise_buttons(CS, CC, 80) == 90
+  assert calls == [90]
+  helper._set_speed_road_limit = 0
+  assert helper._update_cruise_buttons(CS, CC, 80) == 20
+
+
+@pytest.mark.parametrize('brand,button,expected', [
+  ('gm', ButtonType.decelCruise, 90),
+  ('volkswagen', ButtonType.setCruise, 90),
+  ('volkswagen', ButtonType.decelCruise, 50),
+])
+@pytest.mark.parametrize('option', [False, True])
+def test_navigation_set_requires_actual_vehicle_enable_button(brand, button, expected, option):
+  from opendbc.car.gm.carstate import CarState as GmCarState
+  from opendbc.car.volkswagen.carstate import CarState as VwCarState
+  cls = GmCarState if brand == 'gm' else VwCarState
+  vehicle = cls.__new__(cls)
+  vehicle.CP = SimpleNamespace(pcmCruise=False)
+  helper, CS, CC = make_remote_helper(None)
+  helper.navigation_set_speed = option
+  helper._set_speed_road_limit = 80
+  helper.v_ego_kph_set = 50
+  speed = 80
+  for pressed in (True, False):
+    CS.buttonEvents = [{'type': button, 'pressed': pressed}]
+    CS.buttonEnable = vehicle.update_button_enable(CS.buttonEvents)
+    speed = helper._update_cruise_buttons(CS, CC, speed)
+  assert speed == (expected if option else 50)
+  assert helper._navigation_set_applied == (option and expected == 90)
+
+
+@pytest.mark.parametrize('disengage_on_gas,expected', [(False, 90), (True, 50)])
+def test_physical_navigation_set_keeps_existing_gas_override_policy(disengage_on_gas, expected):
+  helper, CS, CC = make_remote_helper(None)
+  helper.navigation_set_speed = True
+  helper.disengage_on_accelerator = disengage_on_gas
+  helper._set_speed_road_limit = 80
+  helper.v_ego_kph_set = 50
+  CS.buttonEnable = CS.gasPressed = True
+  helper._prepare_buttons = lambda *args: (79, ButtonType.decelCruise, False)
+  assert helper._update_cruise_buttons(CS, CC, 80) == expected
+
+
+@pytest.mark.parametrize('gas,expected,activation', [(False, 90, 1), (True, 50, 0)])
+def test_bluetooth_navigation_set_preserves_remote_gas_gate(gas, expected, activation):
+  helper, CS, CC = make_remote_helper('decelCruise')
+  helper._cruise_control = VCruiseCarrot._cruise_control.__get__(helper)
+  helper.navigation_set_speed = True
+  helper._set_speed_road_limit = 80
+  helper.v_ego_kph_set = 50
+  CS.gasPressed = gas
+  assert not CS.buttonEnable
+  assert helper._update_cruise_buttons(CS, CC, 80) == expected
+  assert helper._activate_cruise == activation
+
+
+def test_navigation_set_toggle_refreshes_live_without_changing_existing_speed():
+  helper, CS, CC = make_remote_helper(None)
+  values = {'NavigationSetSpeed': 0}
+  helper.params = SimpleNamespace(get_bool=lambda key: bool(values.get(key, 0)),
+                                  get_int=lambda key: int(values.get(key, 0)),
+                                  get_float=lambda key: float(values.get(key, 0)))
+  helper._set_speed_road_limit = helper.nRoadLimitSpeed = 80
+  helper.v_ego_kph_set = 50
+  helper.v_cruise_kph = 75
+  CS.buttonEnable = True
+  helper._prepare_buttons = lambda *args: (74, ButtonType.decelCruise, False)
+  for frame, enabled, expected in [(0, False, 50), (10, True, 90), (20, False, 50)]:
+    values['NavigationSetSpeed'] = int(enabled)
+    helper.frame = frame
+    helper.update_params(True)
+    assert helper.navigation_set_speed is enabled
+    assert helper.v_cruise_kph == 75
+    assert helper._update_cruise_buttons(CS, CC, 75) == expected
+
+
+def test_navigation_set_is_off_when_setting_is_missing():
+  helper, CS, _ = make_remote_helper(None)
+  helper._set_speed_road_limit = 80
+  del helper.navigation_set_speed
+  assert helper._navigation_set_speed(CS) is None
+
+
+@pytest.mark.parametrize('first_available', [False, True])
+def test_navigation_set_full_update_loop_and_live_toggle(monkeypatch, first_available):
+  import openpilot.selfdrive.car.cruise as cruise
+  from openpilot.selfdrive.carrot.server.services import params as web_params
+  from openpilot.selfdrive.car.tests.test_toyota_pcm_mode0 import MemoryParams, MemoryReader, SubMaster
+
+  monkeypatch.setattr(cruise, 'Params', MemoryParams)
+  monkeypatch.setattr(cruise, 'CommandReader', MemoryReader)
+  helper = VCruiseCarrot(car.CarParams(brand='gm', carFingerprint='CHEVROLET_TRAVERSE',
+                                      pcmCruise=False, openpilotLongitudinalControl=True))
+  helper.params.put_bool = helper.params.values.__setitem__
+  monkeypatch.setattr(web_params, 'HAS_PARAMS', True)
+  monkeypatch.setattr(web_params, 'Params', lambda: helper.params)
+  monkeypatch.setattr(web_params, 'ParamKeyType', None)
+  definition = {'min': 0, 'max': 1, 'default': 0, 'control': 'toggle'}
+  helper.cruise_state_available_last = True
+  helper.v_cruise_kph = helper.v_cruise_cluster_kph = 75
+  helper._gas_pressed_count = helper._brake_pressed_count = -2
+  CS = car.CarState(canValid=True, gearShifter='drive', vEgo=50 / 3.6, vEgoCluster=50 / 3.6,
+                    cruiseState={'available': True})
+  sm = SubMaster(CS)
+  sm['carControl'].enabled = False
+  sm['carrotMan'].externalNavigationActive = sm['carrotMan'].roadLimitSpeedValid = True
+  assert not helper.navigation_set_speed
+
+  def tick():
+    helper.update_v_cruise(CS, sm, True)
+    return helper.v_cruise_kph
+
+  web_params.set_param_value('NavigationSetSpeed', 1, definition)
+  for _ in range(10):
+    assert tick() == 75  # Enabling the option alone does not retarget cruise.
+  assert helper.navigation_set_speed
+  CS.buttonEvents = [{'type': 'decelCruise', 'pressed': True}]
+  tick()
+  CS.buttonEvents = [{'type': 'decelCruise', 'pressed': False}]
+  CS.buttonEnable = True
+  helper.cruise_state_available_last = not first_available
+  assert tick() == 90
+
+  CS.buttonEvents = []
+  CS.buttonEnable = False
+  sm['carControl'].enabled = True
+  web_params.set_param_value('NavigationSetSpeed', 0, definition)
+  for _ in range(10):
+    assert tick() == 90  # Disabling also leaves the active set speed untouched.
+  assert not helper.navigation_set_speed
+  sm['carControl'].enabled = False
+  CS.buttonEvents = [{'type': 'decelCruise', 'pressed': True}]
+  tick()
+  CS.buttonEvents = [{'type': 'decelCruise', 'pressed': False}]
+  CS.buttonEnable = True
+  assert tick() == 50
 
 
 def test_large_steering_angle_blocks_automatic_cruise_activation():

@@ -1,7 +1,7 @@
 import ast
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock  # noqa: TID251 -- mocks only; tests use pytest
+from unittest.mock import MagicMock, Mock  # noqa: TID251 -- mocks only; tests use pytest
 
 import pytest
 
@@ -79,6 +79,7 @@ def test_navdy_expired_limit_is_not_published_to_cruise_or_ui(navigation_publica
   cm, inst = apply(value, now)
   assert not svc.carrot_navi_road_limit_valid
   assert cm.nRoadLimitSpeed == 0
+  assert not cm.roadLimitSpeedValid
   if hasattr(inst, 'speedLimit'):
     assert inst.speedLimit == 0
 
@@ -87,8 +88,10 @@ def test_navdy_connection_flag_uses_accepted_data_not_old_remote(navigation_publ
   _, _, apply = navigation_publication
   cm, _ = apply(packet(), 10)
   assert (cm.externalNavigationSource, cm.externalNavigationActive) == ('navdy', True)
+  assert cm.roadLimitSpeedValid
   cm, _ = apply({'navigationFeedback': None, 'roadPreview': None}, 11)
   assert (cm.externalNavigationSource, cm.externalNavigationActive) == ('navdy', False)
+  assert not cm.roadLimitSpeedValid
 
 
 def test_traffic_segments_publish_then_clear_with_guidance(navigation_publication):
@@ -108,18 +111,147 @@ def test_traffic_schema_roundtrip_and_web_clear():
   from openpilot.selfdrive.carrot.server.live_runtime.snapshot import _build_carrot
 
   msg = custom.CarrotMan.new_message(
-    externalNavigationSource='navdy', externalNavigationActive=True,
+    externalNavigationSource='navdy', externalNavigationActive=True, roadLimitSpeedValid=True,
     routeTrafficTotalMeters=1500,
     routeTrafficSegments=[{'endM': 500, 'status': 'G'}, {'endM': 1500, 'status': 'R'}])
   with custom.CarrotMan.from_bytes(msg.to_bytes()) as decoded:
     payload = _build_carrot(decoded)
   assert payload['externalNavigationSource'] == 'navdy'
   assert payload['externalNavigationActive'] is True
+  assert payload['roadLimitSpeedValid'] is True
   assert payload['routeTrafficTotalMeters'] == 1500
   assert payload['routeTrafficSegments'] == [{'endM': 500, 'status': 'G'}, {'endM': 1500, 'status': 'R'}]
   cleared = _build_carrot(custom.CarrotMan.new_message(), previous=payload)
   assert cleared['routeTrafficSegments'] == [] and cleared['routeTrafficTotalMeters'] == 0
   assert cleared['externalNavigationActive'] is False
+  assert cleared['roadLimitSpeedValid'] is False
+
+
+@pytest.mark.parametrize('age,limit,current,expected', [
+  (0.1, 80, 80, True), (4.0, 80, 80, True), (4.001, 80, 80, False),
+  (-0.01, 80, 80, False), (0.1, 0, 30, False), (0.1, 60, 80, False),
+])
+def test_legacy_road_limit_has_its_own_freshness(services, monkeypatch, age, limit, current, expected):
+  cls, _ = services
+  svc = cls()
+  monkeypatch.setattr(cls._road_limit_speed_valid.__globals__['time'], 'monotonic', lambda: 100.)
+  svc.navi_source = 0
+  svc.external_navigation_active = True
+  svc.nRoadLimitSpeed = current
+  svc.legacy_road_limit_kph = limit
+  svc.legacy_road_limit_received_at = 100. - age
+  assert svc._road_limit_speed_valid() is expected
+  svc.external_navigation_active = False
+  assert not svc._road_limit_speed_valid()
+
+
+def test_default_or_unselected_limit_cannot_enable_set_speed(services):
+  cls, _ = services
+  svc = cls()
+  svc.external_navigation_active = True
+  assert svc.nRoadLimitSpeed == 30
+  assert not svc._road_limit_speed_valid()
+  svc.navi_source = 1
+  assert not svc._road_limit_speed_valid()
+
+
+def test_legacy_limit_updates_do_not_treat_unknown_as_default_30(services, monkeypatch):
+  cls, _ = services
+  svc = cls()
+  monkeypatch.setattr(cls._road_limit_speed_valid.__globals__['time'], 'monotonic', lambda: 100.)
+  for _ in range(6):
+    svc.update({'carrotIndex': 1, 'nRoadLimitSpeed': 80}, source=0)
+  svc._update_navigation_source()
+  assert svc._road_limit_speed_valid()
+  svc.update({'carrotIndex': 2, 'nRoadLimitSpeed': 0}, source=0)
+  assert not svc._road_limit_speed_valid()
+  svc.update({'carrotIndex': 3, 'nTBTTurnType': 12}, source=0)
+  assert not svc._road_limit_speed_valid()
+
+
+def test_kisa_limit_is_converted_to_kph_and_invalidated(services, monkeypatch):
+  cls, _ = services
+  svc = cls()
+  svc.is_metric = False
+  monkeypatch.setattr(cls._road_limit_speed_valid.__globals__['time'], 'monotonic', lambda: 100.)
+  svc.update_kisa({'kisawazeroadspdlimit': 50})
+  svc._update_navigation_source()
+  assert svc.nRoadLimitSpeed == pytest.approx(80.4672)
+  assert svc._road_limit_speed_valid()
+  svc.update_kisa({'kisawazeroadspdlimit': 0})
+  assert not svc._road_limit_speed_valid()
+
+
+@pytest.fixture
+def network_publication(navigation_publication, monkeypatch):
+  svc, values, _ = navigation_publication
+  values['CarrotNaviSource'] = svc.navi_source = 0
+  clock = [100_000_000_000]
+  monkeypatch.setattr(svc._road_limit_speed_valid.__globals__['time'], 'monotonic_ns', lambda: clock[0])
+  data = {
+    'schemaVersion': 1, 'connected': True, 'sessionId': 'network-session',
+    'speed': {
+      'meta': {'present': True, 'sequence': 1, 'receivedMonoTimeNanos': clock[0]},
+      'roadLimitValid': True, 'roadLimitKph': 80,
+      'sdiPresent': True, 'sdiType': 1, 'sdiDistanceM': 420, 'sdiSpeedLimitKph': 60,
+    },
+  }
+  sm = MagicMock()
+  sm.alive = {'carState': False, 'selfdriveState': False, 'carrotNavi': True}
+  sm.valid = {'carrotNavi': True}
+  sm.updated = {'carrotNavi': True}
+  sm.__getitem__.return_value = data
+  sent = {}
+  publisher = SimpleNamespace(send=lambda name, msg: sent.update({name: msg}))
+
+  def publish(now_ns, updated=True):
+    clock[0] = now_ns
+    sm.updated['carrotNavi'] = updated
+    svc.update_navi('network-host', sm, publisher, 200., [], [], 200., 'gpsLocationExternal')
+    return sent['carrotMan'].carrotMan
+
+  return svc, data, publish
+
+
+@pytest.mark.parametrize('received,expected', [
+  (None, False), (0, False), (-1, False), ('invalid', False),
+  (100_000_000_001, False), (100_000_000_000, True),
+  (99_000_000_000, True), (90_000_000_001, True),
+  (90_000_000_000, False), (1, False),
+])
+def test_network_set_limit_uses_original_speed_timestamp(network_publication, received, expected):
+  svc, data, publish = network_publication
+  if received is None:
+    del data['speed']['meta']['receivedMonoTimeNanos']
+  else:
+    data['speed']['meta']['receivedMonoTimeNanos'] = received
+  cm = publish(100_000_000_000)
+  assert cm.roadLimitSpeedValid is expected
+  assert cm.externalNavigationActive and cm.externalNavigationSource == 'network'
+  # The SET boost gate must not change existing road-limit or camera control.
+  assert svc.carrot_navi_road_limit_valid and cm.nRoadLimitSpeed == 80
+  assert (cm.xSpdType, cm.xSpdDist, cm.xSpdLimit) == (1, 420, 60)
+
+
+@pytest.mark.parametrize('updated', [False, True])
+def test_network_heartbeats_cannot_renew_set_limit(network_publication, updated):
+  svc, data, publish = network_publication
+  original = publish(100_000_000_000)
+  assert original.roadLimitSpeedValid
+  assert publish(109_999_999_999, updated=updated).roadLimitSpeedValid
+  data['guidanceCurrent'] = {
+    'meta': {'present': True, 'sequence': 2, 'receivedMonoTimeNanos': 110_000_000_000},
+    'distanceM': 131, 'turnType': 117,
+  }
+  expired = publish(110_000_000_000, updated=updated)
+  assert not expired.roadLimitSpeedValid
+  assert svc.carrot_navi_control.speed.received_mono_time_ns == 100_000_000_000
+  assert expired.nRoadLimitSpeed == original.nRoadLimitSpeed
+  assert expired.desiredSpeed == original.desiredSpeed
+  assert (expired.xSpdType, expired.xSpdDist, expired.xSpdLimit) == (1, 420, 60)
+
+  data['speed']['meta'].update(sequence=2, receivedMonoTimeNanos=110_000_000_000)
+  assert publish(110_000_000_000).roadLimitSpeedValid
 
 
 @pytest.fixture

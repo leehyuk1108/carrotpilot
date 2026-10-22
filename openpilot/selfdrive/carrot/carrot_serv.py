@@ -103,6 +103,8 @@ class CarrotServ:
     self.nRoadLimitSpeed = 30
     self.nRoadLimitSpeed_last = 30
     self.nRoadLimitSpeed_counter = 0
+    self.legacy_road_limit_received_at = 0.0
+    self.legacy_road_limit_kph = 0.0
 
     self.active_carrot = 0     ## 1: CarrotMan Active, 2: sdi active , 3: speed decel active, 4: section active, 5: bump active, 6: speed limit active
     self.active_count = 0
@@ -382,6 +384,26 @@ class CarrotServ:
   def _external_navigation_connected(self):
     # Connection freshness, not the presence of a camera/bump or active guidance.
     return self.carrot_navi_active or self.active_count > 0 or self.active_kisa_count > 0
+
+  def _road_limit_speed_valid(self):
+    if not self.external_navigation_active:
+      return False
+    if self.carrot_navi_active:
+      navi = getattr(self, 'carrot_navi_control', None)
+      if not (self.carrot_navi_road_limit_valid and navi is not None
+              and navi.speed.road_limit_kph == self.nRoadLimitSpeed):
+        return False
+      if self.accepts_navigation(NAVI_SOURCE_NAVDY):
+        return True  # The Navdy reader already expires the original road component.
+      received = navi.speed.received_mono_time_ns
+      # Match the v2 JSON stream's 10-second timeout, not its IPC publication age.
+      return received > 0 and 0 <= time.monotonic_ns() - received < 10_000_000_000
+    if self.accepts_navigation(NAVI_SOURCE_NAVDY):
+      return False
+    received = getattr(self, 'legacy_road_limit_received_at', 0.0)
+    limit = getattr(self, 'legacy_road_limit_kph', 0.0)
+    # Other navigation heartbeats must not renew a missing or old road limit.
+    return received > 0 and 0 <= time.monotonic() - received <= 4.0 and 0 < limit == self.nRoadLimitSpeed
 
   def _update_navigation_source(self):
     external_active = self._external_navigation_connected()
@@ -1335,11 +1357,14 @@ class CarrotServ:
       pass
     if "kisawazeroadspdlimit" in data:
       road_limit_speed = data["kisawazeroadspdlimit"]
+      self.legacy_road_limit_received_at = time.monotonic()
+      self.legacy_road_limit_kph = 0.0
       if road_limit_speed > 0:
         print(f"kisawazeroadspdlimit: {road_limit_speed} km/h")
         if not self.is_metric:
           road_limit_speed *= CV.MPH_TO_KPH
         self.nRoadLimitSpeed = road_limit_speed
+        self.legacy_road_limit_kph = road_limit_speed
     if "kisawazealert" in data:
       pass
     if "kisawazeendalert" in data:
@@ -1575,6 +1600,7 @@ class CarrotServ:
     msg.valid = True
     msg.carrotMan.activeCarrot = self.active_carrot
     msg.carrotMan.nRoadLimitSpeed = published_road_limit
+    msg.carrotMan.roadLimitSpeedValid = self._road_limit_speed_valid() and published_road_limit > 0
     msg.carrotMan.remote = remote_ip
     msg.carrotMan.externalNavigationSource = 'navdy' if navdy_selected else 'network'
     msg.carrotMan.externalNavigationActive = (
@@ -1877,11 +1903,14 @@ class CarrotServ:
       self.active_sdi_count = self.active_sdi_count_max
       ### roadLimitSpeed
       nRoadLimitSpeed = int(json.get("nRoadLimitSpeed", 20))
+      self.legacy_road_limit_received_at = now
+      self.legacy_road_limit_kph = 0.0
       if nRoadLimitSpeed > 0:
         if nRoadLimitSpeed > 200:
           nRoadLimitSpeed = (nRoadLimitSpeed - 20) / 10
         elif nRoadLimitSpeed == 120:
           nRoadLimitSpeed = 115 # 120 -> 115 fix bug
+        self.legacy_road_limit_kph = nRoadLimitSpeed
       else:
         nRoadLimitSpeed = 30
       #self.nRoadLimitSpeed = nRoadLimitSpeed

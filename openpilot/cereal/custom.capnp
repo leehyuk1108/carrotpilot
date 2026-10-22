@@ -53,6 +53,7 @@ struct CarrotMan @0x81c2f05a394cf4af {
 	externalNavigationActive @38 : Bool;
 	routeTrafficTotalMeters @39 : UInt32;
 	routeTrafficSegments @40 : List(RouteTrafficSegment);
+	roadLimitSpeedValid @41 : Bool;
 
 	struct RouteTrafficSegment {
 		endM @0 : UInt32;

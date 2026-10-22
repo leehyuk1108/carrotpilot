@@ -520,6 +520,7 @@ def _build_carrot(service: Any, previous: dict[str, Any] | None = None) -> dict[
   # Extra carrotMan fields surfaced for the parent-side nav HUD card
   # (capnp unchanged — these were already in the struct).
   p["nRoadLimitSpeed"] = safe_int(safe_get(service, "nRoadLimitSpeed"))
+  p["roadLimitSpeedValid"] = safe_bool(safe_get(service, "roadLimitSpeedValid"))
   p["atcType"] = safe_text(safe_get(service, "atcType"))
   p["vTurnSpeed"] = safe_int(safe_get(service, "vTurnSpeed"))
   p["leftSec"] = safe_int(safe_get(service, "leftSec"))

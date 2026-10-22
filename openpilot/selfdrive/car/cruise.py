@@ -219,6 +219,8 @@ class VCruiseCarrot:
     self.trafficState = 0
     self.aTarget = 0
     self.nRoadLimitSpeed = 30
+    self._set_speed_road_limit = 0
+    self.navigation_set_speed = self.params.get_bool("NavigationSetSpeed")
     self.desiredSpeed = 250
     self.road_limit_kph = 30
     self.nRoadLimitSpeed_last = 30
@@ -266,9 +268,21 @@ class VCruiseCarrot:
   def _current_speed_for_initial_resume(self):
     return max(self.v_ego_kph_set, self._cruise_speed_min)
 
+  def _navigation_set_speed(self, CS):
+    speed = self._current_speed_for_initial_resume()
+    limit = getattr(self, '_set_speed_road_limit', 0)
+    if (not getattr(self, 'navigation_set_speed', False)
+        or getattr(self.CP, 'pcmCruise', True) or not getattr(self.CP, 'openpilotLongitudinalControl', False)
+        or not CS.canValid or not CS.cruiseState.available or CS.gearShifter != GearShifter.drive
+        or CS.brakePressed or (CS.gasPressed and self.disengage_on_accelerator) or CS.brakeHoldActive or CS.parkingBrake
+        or not 0 < limit <= self._cruise_speed_max):
+      return None
+    return min(self._cruise_speed_max, max(speed, limit + (5 if limit == 30 else 10)))
+
   def update_params(self, is_metric):
     unit_factor = 1.0 if is_metric else CV.MPH_TO_KPH
     if self.frame % 10 == 0:
+      self.navigation_set_speed = self.params.get_bool("NavigationSetSpeed")
       self.autoCruiseControl = self.params.get_int("AutoCruiseControl") * unit_factor
       self.soft_hold_on_cancel = self.params.get_bool("SoftHoldOnCancel")
       self.autoGasTokSpeed = self.params.get_int("AutoGasTokSpeed") * unit_factor
@@ -309,8 +323,11 @@ class VCruiseCarrot:
 
   def _update_carrot_man(self, sm):
     carrot_man = get_carrot_man(sm)
+    self._set_speed_road_limit = 0
     if carrot_man is not None:
       self.nRoadLimitSpeed = carrot_man.nRoadLimitSpeed
+      if getattr(carrot_man, 'externalNavigationActive', False) and getattr(carrot_man, 'roadLimitSpeedValid', False):
+        self._set_speed_road_limit = self.nRoadLimitSpeed
       self.desiredSpeed = carrot_man.desiredSpeed
       self.carrot_cmd_index = carrot_man.carrotCmdIndex
       self.carrot_cmd = carrot_man.carrotCmd
@@ -387,7 +404,8 @@ class VCruiseCarrot:
     if CS.cruiseState.available:
       if not self.cruise_state_available_last:
         self._lat_enabled = True
-        v_cruise_kph = self.v_ego_kph_set
+        if not self._navigation_set_applied:
+          v_cruise_kph = self.v_ego_kph_set
       if not self.CP.pcmCruise:
         # if stock cruise is completely disabled, then we can use our own set speed logic
         self.v_cruise_kph = np.clip(v_cruise_kph, self._cruise_speed_min, self._cruise_speed_max)
@@ -573,6 +591,8 @@ class VCruiseCarrot:
     return v_cruise_kph, button_type, long_pressed
 
   def _update_cruise_buttons(self, CS, CC, v_cruise_kph):
+    set_engagement = False
+    self._navigation_set_applied = False
     remote = self.bluetooth_commands.read(allowed=(CS.canValid and CS.cruiseState.available and
       CS.gearShifter == GearShifter.drive and not CS.buttonEvents and self.button_cnt == 0))
     if getattr(self.bluetooth_commands, 'is_repeat', False) and not CC.enabled:
@@ -582,6 +602,9 @@ class VCruiseCarrot:
     # SET during soft hold retains its existing cancel behavior.
     if remote == 'decelCruise' and self._soft_hold_active > 0:
       remote_enable = False
+
+    # Dedicated +/- buttons on some vehicles are not engagement requests.
+    set_enable = CS.buttonEnable or (remote_enable and not CS.gasPressed)
 
     v_cruise_kph, button_type, long_pressed = self._carrot_command(v_cruise_kph, button_type, long_pressed)
 
@@ -602,7 +625,9 @@ class VCruiseCarrot:
         self.carrot_cruise_active = False
         self._pause_auto_speed_up = button_type == ButtonType.setCruise
         if button_type == ButtonType.setCruise:
-          v_cruise_kph = self._current_speed_for_initial_resume()
+          nav_set_speed = self._navigation_set_speed(CS) if not CC.enabled and set_enable else None
+          v_cruise_kph = self._current_speed_for_initial_resume() if nav_set_speed is None else nav_set_speed
+          self._navigation_set_applied = nav_set_speed is not None
         elif self._v_cruise_kph_at_brake > 0:
           v_cruise_kph = self._v_cruise_kph_at_brake
         elif not self._cruise_speed_initialized:
@@ -652,7 +677,10 @@ class VCruiseCarrot:
           self._paddle_decel_active = True
           pass
         elif not CC.enabled:
-          v_cruise_kph = max(self.v_ego_kph_set, self._cruise_speed_min)
+          nav_set_speed = self._navigation_set_speed(CS) if set_enable else None
+          v_cruise_kph = self._current_speed_for_initial_resume() if nav_set_speed is None else nav_set_speed
+          set_engagement = nav_set_speed is not None
+          self._navigation_set_applied = set_engagement
         elif self.v_ego_kph_set > v_cruise_kph + 2 and self._cruise_button_mode in [2, 3]:
           v_cruise_kph = max(self.v_ego_kph_set, self._cruise_speed_min)
         elif self._cruise_button_mode in [0, 1]:
@@ -740,7 +768,7 @@ class VCruiseCarrot:
     updated_speed = self._update_cruise_state(CS, CC, v_cruise_kph)
     # Keep automatic engagement/disengagement checks, but let an explicit SET/RES
     # own the speed selected on this frame (e.g. simultaneous pedal release).
-    if button_type not in (ButtonType.setCruise, ButtonType.resumeCruise):
+    if not set_engagement and button_type not in (ButtonType.setCruise, ButtonType.resumeCruise):
       v_cruise_kph = updated_speed
     if remote in ('cancel', 'cancelLong'):
       self._cruise_control(BLUETOOTH_CANCEL, -1, 'Cruise off (Bluetooth cancel)', allow_cancel_state=True, manual=True)

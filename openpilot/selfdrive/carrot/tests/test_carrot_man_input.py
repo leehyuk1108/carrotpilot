@@ -28,6 +28,7 @@ def clock(monkeypatch):
 def planner():
   value = CarrotPlanner.__new__(CarrotPlanner)
   value.trafficState_carrot = 0
+  value.signal_detection_suspended = False
   value.soft_hold_active = 0
   value.xState = XState.e2eCruise
   return value
@@ -103,3 +104,17 @@ def test_cruise_helper_drops_stale_speed_and_commands_then_recovers():
   sm.recv_time['carrotMan'] = 99.95
   value._update_carrot_man(sm)
   assert value.desiredSpeed == 30
+
+
+@pytest.mark.parametrize('overrides', [{}, {'seen': False}, {'valid': False}, {'alive': False},
+                                      {'age': 1.001}, {'age': -0.01}, {'speed': 0}])
+@pytest.mark.parametrize('active,limit_valid', [(True, True), (True, False), (False, True)])
+def test_set_speed_requires_fresh_external_navigation_and_road_limit(overrides, active, limit_valid):
+  value = VCruiseCarrot.__new__(VCruiseCarrot)
+  sm = SubMaster(**overrides)
+  sm['carrotMan'].nRoadLimitSpeed = 80
+  sm['carrotMan'].externalNavigationActive = active
+  sm['carrotMan'].roadLimitSpeedValid = limit_valid
+  value._set_speed_road_limit = 110
+  value._update_carrot_man(sm)
+  assert value._set_speed_road_limit == (80 if not overrides and active and limit_valid else 0)

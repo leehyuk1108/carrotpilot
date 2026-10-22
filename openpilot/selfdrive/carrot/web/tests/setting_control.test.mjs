@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
@@ -67,6 +68,15 @@ test("a toggle produces the shared switch primitive followed by the value", () =
   assert.deepEqual(classesOf(switchLabel), ["c-switch__input", "c-switch__track"]);
   assert.equal(refs.toggleInput.type, "checkbox");
   assert.equal(refs.toggleInput.getAttribute("aria-label"), "모델 주행속도");
+});
+
+test("navigation SET speed uses the shared toggle from the actual catalogue", () => {
+  const catalog = JSON.parse(readFileSync(new URL("../../../carrot_settings.json", import.meta.url), "utf8"));
+  const setting = catalog.params.find((item) => item.name === "NavigationSetSpeed");
+  const refs = build(setting.control, { label: setting.title });
+  assert.equal(setting.default, 0);
+  assert.equal(refs.toggleInput.type, "checkbox");
+  assert.equal(refs.toggleInput.getAttribute("aria-label"), setting.title);
 });
 
 test("segments carry their value, label and initial pressed state", () => {

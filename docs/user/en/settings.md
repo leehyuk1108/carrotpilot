@@ -133,13 +133,13 @@ These 123 settings can affect vehicle motion. Change one item at a time.
 - In the shared `WIP-FR` cruise logic, `AutoCruiseControl=0` also prevents automatic-activation speed selection from changing the set speed when a pedal is released. SET/RES buttons, the separate `AutoGasSyncSpeed` setting while holding the accelerator, paddles, and road/model speed features retain their existing behavior.
 - `DisableMinSteerSpeed` is vehicle-specific and relates to low-speed steering restrictions on SMDPS-equipped cars.
 
-### Buttons and presets — 15 settings
+### Buttons and presets — 16 settings
 
 Select a section title for the code-based state machine, units, and application conditions.
 
 | Section | Parameters | Purpose |
 |---|---|---|
-| [Button modes](buttons-presets.md#button-modes) | `CruiseButtonMode`, `CancelButtonMode`, `LfaButtonMode`, `PaddleMode` | Cruise, cancel, LFA, and paddle-button behavior |
+| [Button modes](buttons-presets.md#button-modes) | `CruiseButtonMode`, `NavigationSetSpeed`, `CancelButtonMode`, `LfaButtonMode`, `PaddleMode` | Cruise, SET engagement speed, cancel, LFA, and paddle-button behavior |
 | [Speed units](buttons-presets.md#speed-units) | `CruiseSpeedUnit`, `CruiseSpeedUnitBasic`, `CruiseButtonLongDelay` | Short/long-press increments and long-press timing |
 | [Button-message tests](buttons-presets.md#button-spam) | `CruiseButtonTest1`, `CruiseButtonTest2`, `CruiseButtonTest3` | Values used to synchronize the stock SCC set speed |
 | [Speed presets](buttons-presets.md#speed-presets) | `CruiseSpeed1` through `CruiseSpeed5` | Speed table used by custom mode 3 |
@@ -147,6 +147,8 @@ Select a section title for the code-based state machine, units, and application 
 The result depends heavily on whether the car uses stock SCC and which button message the vehicle accepts. Diagnose unexpected behavior with the normal `CruiseButtonMode=0` behavior first.
 
 Volkswagen's separate `SET` button sets current speed and `RES` restores the previous set speed, while `+`/`-` follow the button mode, speed units, and long-press setting. Manual engagement with openpilot longitudinal control remains tied to the physical `SET`/`RES` buttons.
+
+With `NavigationSetSpeed` enabled, `WIP-FR` SET engagement uses the greater of current speed and a valid navigation road limit plus 10 km/h (plus 5 for a 30 km/h limit); see [navigation-based initial set speed](buttons-presets.md#button-modes). The toggle defaults off and updates within about 0.1 seconds for the next SET engagement. Missing/stale navigation, stock ACC, and buttons while already engaged retain their existing behavior.
 
 <a id="vehicle-steering"></a>
 ### Vehicle steering — 37 top-level + 6 ONNX detail + 1 search-only setting
