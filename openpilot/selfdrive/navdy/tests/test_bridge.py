@@ -217,7 +217,7 @@ def run_fake_bridge(monkeypatch, tmp_path, *, connect_delay=0, invalidate=False,
     def exchange(self, payload):
       sent.append(payload)
       if disconnect and len(sent) == 1:
-        raise ConnectionError('Test disconnect')
+        raise ConnectionError('Navdy Bluetooth disconnected')
       return {'navigationFeedback': None}
 
     def close(self):
@@ -238,6 +238,18 @@ def run_fake_bridge(monkeypatch, tmp_path, *, connect_delay=0, invalidate=False,
   assert json.loads((tmp_path / 'status.json').read_text())['reason'] == 'bridge_stopped'
   assert not (tmp_path / 'feedback.json').exists()
   return sent, statuses, connections
+
+
+def test_link_failure_remains_visible_after_success_and_shutdown(monkeypatch, tmp_path):
+  _, statuses, _ = run_fake_bridge(monkeypatch, tmp_path, disconnect=True)
+  assert statuses
+  for status in statuses:
+    failure = status['diagnostics']['lastFailure']
+    assert failure['phase'] == 'exchange'
+    assert failure['reason'] == 'Navdy Bluetooth disconnected'
+    assert status['connected'] and status['reason'] == ''
+  stopped = json.loads((tmp_path / 'status.json').read_text())
+  assert stopped['diagnostics']['lastFailure']['reason'] == 'Navdy Bluetooth disconnected'
 
 
 def test_model_route_cache_precedes_feedback_and_rotates_after_clear(monkeypatch, tmp_path):

@@ -19,6 +19,7 @@ from openpilot.selfdrive.navdy.bluetooth import BluetoothTransport, CONFIG_PATH,
 from openpilot.selfdrive.navdy.connection import UsbProbe
 from openpilot.selfdrive.navdy.ambient import DoorMonitor, read_override, road_state
 from openpilot.selfdrive.navdy.model_navigation import ModelNavigationTracker, ModelRouteCache, age_model_feedback
+from openpilot.selfdrive.navdy.diagnostics import LinkDiagnostics
 
 MAINTENANCE_STATE = Path('/data/hl-jetson')
 JETSON_PYTHON = '/opt/carrot-jetlink/venv/bin/python'
@@ -161,6 +162,7 @@ def live_payload(sm, sequence, *, sources=None, door_open=False, ambient_overrid
 
 def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_config=CONFIG_PATH):
   from openpilot.cereal import messaging
+  from openpilot.common.swaglog import cloudlog
   sm = messaging.SubMaster(SERVICES)
   lock_path = feedback.with_suffix('.lock')
   with lock_path.open('a') as lock:
@@ -186,6 +188,7 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
     model_navigation = ModelNavigationTracker()
     model_route_path = feedback.with_name(feedback.stem + '-model-route.json')
     model_route_cache = ModelRouteCache(model_route_path, atomic_json)
+    diagnostics = LinkDiagnostics(cloudlog.event)
     doors = DoorMonitor()
     doors.start()
     try:
@@ -203,6 +206,7 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
             peer, config_error = None, str(error)[:160]
           if transport is not None and (old_policy != bluetooth_only or
                                         (transport_name == 'bluetooth' and peer != transport.peer)):
+            diagnostics.record('policy_changed', transport=transport_name, bluetoothOnly=bluetooth_only)
             transport.close()
             transport = None
             usb_probe.close()
@@ -215,6 +219,7 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
         if not bluetooth_only and transport_name in ('bluetooth', 'jetson') and transport is not None:
           ready = usb_probe.poll(tick)
           if ready is not None:
+            diagnostics.record('usb_handover', transport=transport_name)
             transport.close()
             usb_probe.close()
             usb_probe = UsbProbe(AdbTransport)
@@ -230,6 +235,7 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
         if transport is None and tick < next_attempt:
           time.sleep(0.1)
           continue
+        phase = 'connect'
         try:
           if transport is None:
             transport_name = 'bluetooth' if bluetooth_only else 'usb'
@@ -261,12 +267,19 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
                 transport = SshTransport(target)
                 transport.connect()
             connected_at = time.monotonic()
+            diagnostics.record('transport_open', transport=transport_name, connectedAt=connected_at)
             # Discovery/service startup can block. Drain fresh messages before sending.
             sm.update(0)
+          phase = 'payload'
           captured_ns = time.monotonic_ns()
           sources = display_sources(sm)
           payload = live_payload(sm, sequence, sources=sources, door_open=doors.door_open, ambient_override=read_override())
           payload['modelRoute'] = model_navigation.request(time.monotonic())
+          car_state = sm['carState']
+          diagnostics.sources(sources, payload,
+                              can_valid=car_state.canValid if sources['carState']['usable'] else True,
+                              can_timeout=car_state.canTimeout if sources['carState']['usable'] else False)
+          phase = 'exchange'
           exchange_started = time.monotonic()
           if transport_name == 'bluetooth':
             replies = transport.exchange_batch(payload, captured_ns=captured_ns)
@@ -275,7 +288,10 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
             received = time.monotonic()
             replies = [(response, received, (received - exchange_started) * 1000.)]
           received = time.monotonic()
+          phase = 'feedback'
           for response, reply_received, elapsed_ms in replies:
+            diagnostics.feedback(response, transport=transport_name, received_at=reply_received, elapsed_ms=elapsed_ms,
+                                 wireless=getattr(transport, 'last_exchange', None))
             age_model_feedback(response, elapsed_ms)
             model_navigation.accept(response.get('modelNavigation'), reply_received, received)
           cache_token = model_route_cache.update(model_navigation)
@@ -306,6 +322,7 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
             response, reply_received, _ = replies[-1]
             extended_feedback = 'navigationFeedback' in response
             atomic_json(feedback, {'receivedAt': reply_received, 'feedback': response, 'modelRouteCacheToken': cache_token})
+          phase = 'status'
           atomic_json(status, {'updatedAt': received, 'connected': True, 'transport': transport_name,
                                'connectedAt': connected_at, 'extendedFeedback': extended_feedback,
                                'display': {'sequence': sequence, 'onroad': payload['onroad'], 'active': payload['active'],
@@ -318,8 +335,11 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
                                'wireless': getattr(transport, 'last_exchange', None),
                                'modelNavigation': {'routeReady': bool(model_navigation.points),
                                                    'reason': model_navigation.reason},
+                               'diagnostics': diagnostics.snapshot(),
                                'reason': ''})
         except (OSError, ValueError, subprocess.SubprocessError) as error:
+          diagnostics.failure(phase=phase, transport=transport_name, error=error, connected_at=connected_at,
+                              wireless=getattr(transport, 'last_exchange', None))
           if transport_name in ('bluetooth', 'jetson'):
             usb_probe.close()
             usb_probe = UsbProbe(AdbTransport)
@@ -335,6 +355,7 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
           atomic_json(status, {'updatedAt': time.monotonic(), 'connected': False, 'transport': transport_name,
                                'transportPolicy': 'bluetooth_only' if bluetooth_only else 'usb_first',
                                'retryInSeconds': retry_delay, 'wirelessConfigured': peer is not None,
+                               'diagnostics': diagnostics.snapshot(),
                                'reason': str(error)[:200]})
           next_attempt = time.monotonic() + retry_delay
         time.sleep(max(0, DISPLAY_INTERVAL - (time.monotonic() - tick)))
@@ -345,7 +366,9 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
         transport.close()
       feedback.unlink(missing_ok=True)
       model_route_path.unlink(missing_ok=True)
-      atomic_json(status, {'updatedAt': time.monotonic(), 'connected': False, 'reason': 'bridge_stopped'})
+      diagnostics.record('bridge_stopped')
+      atomic_json(status, {'updatedAt': time.monotonic(), 'connected': False, 'reason': 'bridge_stopped',
+                           'diagnostics': diagnostics.snapshot()})
 
 
 def main():
