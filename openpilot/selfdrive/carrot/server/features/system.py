@@ -21,6 +21,7 @@ from ..services.time_sync import TIME_SYNC_DEBUG_DEFAULT, sync_system_time_from_
 
 
 _LIVE_RUNTIME_SERVICE_NAMES = (
+  "carrotMan",
   "navInstructionCarrot",
   "navRoute",
 )

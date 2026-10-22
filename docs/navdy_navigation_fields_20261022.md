@@ -66,3 +66,22 @@ NAVI availability is not proof of model navigation readiness.
 
 Offroad parser/publication tests do not establish physical bump braking,
 onroad optical display correctness, or long-duration radio/ambient stability.
+
+## Installation
+
+Correction `a114c779` was published to WIP-FR, then fast-forward installed on the
+matching Comma after repeated fresh device/panda ignition-OFF/no-output checks.
+The old staged-update completion marker was backed up and invalidated. Files
+and the previous state were retained under
+`/data/navdy/backups/navigation-fields-20261022-gx3ye71v`.
+
+The reboot completed its native schema rebuild. Fresh manager/device/panda
+messages recovered; UI, carrot_man and navdy_bridge are running, while card,
+modeld and selfdrived remain stopped offroad. New CarrotMan fields report Navdy
+active, road limit 30, and 26 current traffic segments. The temporarily paused
+updater's SoftwareMenu setting was restored. Bluetooth configuration is unchanged.
+
+Final web inspection found that `/api/live_runtime` selects only an explicit
+service allowlist. The follow-up also includes CarrotMan in that allowlist;
+otherwise the new internal snapshot fields are unreachable through that API.
+Its focused schema/publication/API-selection suite passed 23 desktop tests.
