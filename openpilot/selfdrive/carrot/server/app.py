@@ -90,12 +90,12 @@ async def on_startup(app: web.Application) -> None:
   app["http"] = ClientSession()
   app["params"] = Params() if HAS_PARAMS and Params is not None else None
   app["hb_last"] = {"ok": None, "msg": "not yet", "ts": 0}
-  # Keep only route metadata plus the server-side engagement safety signal
+  # Keep only navigation metadata plus the server-side engagement safety signal
   # outside the compact HUD/overlay relay.
   try:
     broker = RealtimeBroker(
       repo_flavor="c3",
-      include_optional=("navInstructionCarrot", "navRoute"),
+      include_optional=("carrotMan", "navInstructionCarrot", "navRoute"),
       exclude_services=(
         "carState", "controlsState", "longitudinalPlan",
         "liveCalibration", "modelV2", "roadCameraState", "deviceState",

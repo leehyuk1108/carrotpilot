@@ -84,4 +84,7 @@ updater's SoftwareMenu setting was restored. Bluetooth configuration is unchange
 Final web inspection found that `/api/live_runtime` selects only an explicit
 service allowlist. The follow-up also includes CarrotMan in that allowlist;
 otherwise the new internal snapshot fields are unreachable through that API.
-Its focused schema/publication/API-selection suite passed 23 desktop tests.
+The web startup's explicit subscription list must include CarrotMan as well;
+the default broker list alone does not control this app. A startup-contract test
+now verifies every exposed navigation service is actually subscribed. Final
+HTTP verification, not internal snapshot construction alone, is required.

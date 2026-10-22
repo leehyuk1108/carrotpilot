@@ -31,3 +31,17 @@ def test_web_runtime_includes_navigation_status_and_traffic():
 def test_web_runtime_omits_dead_service():
   assert select_live_services({'services': {'carrotMan': None}}) == {}
   assert select_live_services({}) == {}
+
+
+def test_actual_web_startup_subscribes_to_exposed_navigation_services():
+  from openpilot.selfdrive.carrot.server.live_runtime.services import build_service_list
+
+  path = Path(__file__).resolve().parents[1] / 'app.py'
+  tree = ast.parse(path.read_text())
+  call = next(node for node in ast.walk(tree) if isinstance(node, ast.Call)
+              and isinstance(node.func, ast.Name) and node.func.id == 'RealtimeBroker')
+  config = {arg.arg: ast.literal_eval(arg.value) for arg in call.keywords
+            if arg.arg in ('include_optional', 'exclude_services')}
+  subscribed = build_service_list(include_optional=config['include_optional'], exclude=config['exclude_services'])
+  exposed = select_live_services({'services': {name: {} for name in ['carrotMan', 'navInstructionCarrot', 'navRoute']}})
+  assert set(exposed) <= set(subscribed)
