@@ -53,11 +53,51 @@ Navdy files later, not for automatic recording.
 
 ## Source Verification
 
-Focused diagnostics/bridge/reconnect tests: 144 passed. Navdy suite: 715 passed,
+Focused diagnostics/bridge/reconnect tests: 145 passed. Navdy suite: 716 passed,
 five DBC-dependent tests excluded on this Mac because native `params_pyx` is
 unavailable. Lint and whitespace checks pass. No control, model, Panda, transport
 or reconnect-policy source changes are included.
 
 Phone-connected navigation/reconnection and road endurance cannot be validated
-while the phone is unavailable. Installation and live persistence evidence will
-be appended after final pinned-source review and parked-device verification.
+while the phone is unavailable.
+
+## Device Verification
+
+Code through `47442dbe` was reviewed against `7e2739ea`, published to WIP-FR,
+then fast-forwarded on the parked, ignition-OFF, inactive Comma. Existing generated
+DBC changes were preserved. Only `navdy_bridge` was restarted; no manager,
+model, control, Panda or device reboot was performed. Native full pytest could
+not run because the device venv lacks pytest; no global packages were installed.
+
+The actual journal is owned by uid 1000 with mode 0600 under a 0700 directory.
+It records Bluetooth-only sessions, ACK sequences and source/ambient metadata.
+After a second targeted bridge restart, the first 124,041 bytes retained the
+same SHA256 and a new run identity appended. Storage errors and drops were zero.
+
+The Navdy companion is v169 candidate4, APK SHA256
+`d1268a7bebbecd34e4ca48f1abac2518138f5048ab14d912c9eda53758c26651`.
+Candidate3 was not installed: actual API21 ART exposed same-process overlapping
+FileLock behavior absent from the desktop JVM. Candidate4 adds writer-only
+in-process ownership before opening the OS lock. Actual candidate APK ART passed
+40 checks; host runtime passed 40 checks and tooling passed 49 tests.
+Existing classes, phone registration and Bluetooth configuration were preserved.
+
+Navdy's actual entry hook created an app-owned 0600 phone journal and 0700
+directory automatically. Force-stop/relaunch preserved the prior 3,829-byte
+prefix exactly and appended a new run. IDLE/LISTENING/SEARCHING and ten-second
+heartbeats were observed with zero storage errors/drops. Existing wireless and
+ambient journals remain app-owned and separate. Navdy had about 200 MiB free.
+
+Known limits: prior Bluetooth resets also occur during this diagnostic task;
+recording them is not a dropout fix. Cross-process lock exclusion and abrupt
+power-loss durability were not physically tested. Collect both sides promptly
+after an incident; Navdy retrieval later requires USB, not phone navigation.
+
+A final 91.46-second observation without a continuous logcat collector added
+35 Comma records and 15 Navdy phone records (nine heartbeats). Both writers had
+zero drops/errors and Navdy's previous prefix remained unchanged. All 180 status
+samples used Bluetooth-only; 155 were connected, sessions were 3/4/5, and USB
+updates stayed zero. Three transport failures, including a connection-attempt
+timeout, were recorded. The last sample was connected. The current phone-service
+PID had no fatal/verifier error in the bounded logcat snapshot. This confirms
+automatic evidence capture, not stable radio transport or phone-connected driving.
