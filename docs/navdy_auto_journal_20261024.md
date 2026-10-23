@@ -22,10 +22,20 @@ to 4 KiB with an 8/s rate and 16-record burst. Storage retries are 30 seconds
 apart and stop below 64 MiB or 5% available space. Shutdown waits at most 250 ms;
 a kernel-blocked writer can outlive that wait. Logging is best-effort: queue
 overflow, disk failure and abrupt power removal can lose recent records.
+Kernel-level filesystem stalls may also delay a subsequent process restart.
+Storage failure discards queued and incoming records during the 30-second
+cooldown; counters are best-effort. `diagnostics.journal` in
+`/dev/shm/navdy-status.json` exposes writer errors, drops and disabled state
+even when the disk journal itself cannot be written. This status is not durable.
 
 A representative full 1,394-byte heartbeat gives about 16.72 hours of quiet-link
 retention at five-second intervals. This is an estimate, not a guaranteed
 retention period: connection events reduce it. Collect logs soon after an issue.
+Repeated connection failures while parked can overwrite an evening incident
+before morning. At the artificial maximum of 8 full 4-KiB records per second,
+the ring holds only about 8.5 minutes. No minimum retention is promised.
+The production directory must be owned by the bridge user and contain no
+symlink path components; confirm actual growth and ownership after deployment.
 
 ## Navdy
 

@@ -163,17 +163,19 @@ class LinkDiagnostics:
     if now < self.next_status:
       return
     self.next_status = now + 5.
-    stats = {}
-    if self.journal is not None:
-      try:
-        stats = self.journal.stats()
-      except Exception:
-        pass
     self.record('periodic_status', connected=connected, transport=transport, bluetoothOnly=bluetooth_only,
                 retryInSeconds=max(0., retry_in), sourceState=copy.deepcopy(self.source_state), sourceAt=self.source_at,
                 receiver=copy.deepcopy(self.receiver), receiverAt=self.receiver_at, wireless=self.metrics(wireless),
-                timings=self.timings, exchanges=self.exchanges, replies=self.replies, journal=stats)
+                timings=self.timings, exchanges=self.exchanges, replies=self.replies, journal=self.journal_stats())
     self.timings, self.exchanges, self.replies = {}, 0, 0
+
+  def journal_stats(self):
+    if self.journal is not None:
+      try:
+        return self.journal.stats()
+      except Exception:
+        pass
+    return {}
 
   def close(self):
     if self.journal is not None:
@@ -184,4 +186,4 @@ class LinkDiagnostics:
 
   def snapshot(self):
     return copy.deepcopy({'runId': self.run_id, 'eventSeq': self.sequence,
-                          'lastFailure': self.last_failure, 'events': list(self.events)})
+                          'lastFailure': self.last_failure, 'events': list(self.events), 'journal': self.journal_stats()})

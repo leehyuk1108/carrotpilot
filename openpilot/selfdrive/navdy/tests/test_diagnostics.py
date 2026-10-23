@@ -184,3 +184,16 @@ def test_custom_exception_names_are_not_serialized():
   diagnostics, emitted = recorder()
   diagnostics.failure(phase='exchange', transport='bluetooth', error=error, connected_at=0, wireless=None)
   assert 'PRIVATE' not in json.dumps(emitted)
+
+
+def test_journal_errors_are_visible_outside_the_failed_disk_sink():
+  diagnostics, emitted = recorder()
+  stats = {'queued': 0, 'written': 4, 'dropped': 6, 'storageErrors': 2, 'disabled': False}
+  diagnostics.journal = NS(stats=lambda: stats)
+  snapshot = diagnostics.snapshot()
+  assert snapshot['journal'] == stats
+  stats['storageErrors'] = 3
+  assert snapshot['journal']['storageErrors'] == 2
+  diagnostics.journal = NS(stats=lambda: (_ for _ in ()).throw(OSError('private')))
+  assert diagnostics.snapshot()['journal'] == {}
+  assert not emitted
