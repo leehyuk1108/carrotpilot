@@ -20,12 +20,13 @@ from openpilot.selfdrive.navdy.connection import UsbProbe
 from openpilot.selfdrive.navdy.ambient import DoorMonitor, read_override, road_state
 from openpilot.selfdrive.navdy.model_navigation import ModelNavigationTracker, ModelRouteCache, age_model_feedback
 from openpilot.selfdrive.navdy.diagnostics import LinkDiagnostics
+from openpilot.selfdrive.navdy.vehicles import VehicleOverlay
 
 MAINTENANCE_STATE = Path('/data/hl-jetson')
 JETSON_PYTHON = '/opt/carrot-jetlink/venv/bin/python'
 JETSON_RELAY = '/opt/carrot-jetlink/current/openpilot/selfdrive/navdy/transport.py'
 SERVICES = ['deviceState', 'pandaStates', 'carState', 'selfdriveState', 'controlsState', 'carControl',
-            'carOutput', 'modelV2', 'radarState', 'longitudinalPlan', 'carrotMan']
+            'carOutput', 'modelV2', 'radarState', 'liveTracks', 'longitudinalPlan', 'carrotMan']
 DISPLAY_INTERVAL = 0.2
 DISPLAY_MAX_AGE = 0.5
 DEVICE_MAX_AGE = 1.5  # deviceState is published at 2 Hz.
@@ -122,7 +123,7 @@ def display_sources(sm):
   return sources
 
 
-def live_payload(sm, sequence, *, sources=None, door_open=False, ambient_override=None):
+def live_payload(sm, sequence, *, sources=None, door_open=False, ambient_override=None, vehicles=None):
   from openpilot.selfdrive.navdy.display import payload_from_messages, resolve_operating_state
   sources = display_sources(sm) if sources is None else sources
 
@@ -143,6 +144,9 @@ def live_payload(sm, sequence, *, sources=None, door_open=False, ambient_overrid
     model=recent('modelV2'), radar_state=recent('radarState'), longitudinal_plan=recent('longitudinalPlan'),
     carrot_man=recent('carrotMan'), door_open=door_open,
   )
+  if vehicles is not None:
+    vehicles.update(payload, recent('modelV2'), recent('liveTracks'),
+                    timestamp=sm.logMonoTime['liveTracks'] / 1e9, now=time.monotonic())
   # Offroad has no card/selfdrived messages. Ambient/power state instead comes
   # from fresh device/panda state; never grant active telemetry from this path.
   payload['displayPower'] = 'unknown' if known_road is None else 'onroad' if known_road else 'offroad'
@@ -189,6 +193,7 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
     model_route_path = feedback.with_name(feedback.stem + '-model-route.json')
     model_route_cache = ModelRouteCache(model_route_path, atomic_json)
     diagnostics = LinkDiagnostics(cloudlog.event)
+    vehicles = VehicleOverlay()
     doors = DoorMonitor()
     doors.start()
     try:
@@ -238,6 +243,7 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
         phase = 'connect'
         try:
           if transport is None:
+            vehicles.clear()
             transport_name = 'bluetooth' if bluetooth_only else 'usb'
             try:
               if bluetooth_only:
@@ -273,7 +279,8 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
           phase = 'payload'
           captured_ns = time.monotonic_ns()
           sources = display_sources(sm)
-          payload = live_payload(sm, sequence, sources=sources, door_open=doors.door_open, ambient_override=read_override())
+          payload = live_payload(sm, sequence, sources=sources, door_open=doors.door_open,
+                                 ambient_override=read_override(), vehicles=vehicles)
           payload['modelRoute'] = model_navigation.request(time.monotonic())
           car_state = sm['carState']
           diagnostics.sources(sources, payload,
@@ -326,7 +333,8 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
           atomic_json(status, {'updatedAt': received, 'connected': True, 'transport': transport_name,
                                'connectedAt': connected_at, 'extendedFeedback': extended_feedback,
                                'display': {'sequence': sequence, 'onroad': payload['onroad'], 'active': payload['active'],
-                                           'ambientState': payload['ambientState'], 'sources': sources},
+                                           'ambientState': payload['ambientState'], 'sources': sources,
+                                           'vehicleCount': len(payload['navVehicles'])},
                                'power': payload['displayPower'],
                                'ambient': {'doorOpen': payload['doorOpen'], 'gmDoorMonitor': doors.gm, 'error': doors.error},
                                'lastDisplayDropout': last_display_dropout,
