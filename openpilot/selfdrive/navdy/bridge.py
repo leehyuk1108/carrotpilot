@@ -30,6 +30,42 @@ SERVICES = ['deviceState', 'pandaStates', 'carState', 'selfdriveState', 'control
 DISPLAY_INTERVAL = 0.2
 DISPLAY_MAX_AGE = 0.5
 DEVICE_MAX_AGE = 1.5  # deviceState is published at 2 Hz.
+BLUETOOTH_FAST_RETRY = 0.2
+BLUETOOTH_FAST_RETRY_COOLDOWN = 30.0
+BLUETOOTH_HEALTHY_SECONDS = 2.0
+BLUETOOTH_ACK_MAX_GAP = 1.0
+BLUETOOTH_ACK_MAX_AGE = 2.0  # Covers the 1.5 s response deadline plus display polling.
+
+
+class BluetoothReconnect:
+  """One quick retry for a recently healthy radio, not just an open socket."""
+  def __init__(self):
+    self.next_fast_retry = 0.0
+    self.reset_session()
+
+  def reset_session(self):
+    self.first_ack = None
+    self.last_ack = None
+
+  def acknowledge(self, received_at, now):
+    if not math.isfinite(received_at) or not 0 <= now - received_at <= BLUETOOTH_ACK_MAX_AGE:
+      self.reset_session()
+      return
+    if self.last_ack is not None and received_at <= self.last_ack:
+      return
+    if self.last_ack is None or received_at - self.last_ack > BLUETOOTH_ACK_MAX_GAP:
+      self.first_ack = received_at
+    self.last_ack = received_at
+
+  def healthy(self, now):
+    return (self.first_ack is not None and self.last_ack - self.first_ack >= BLUETOOTH_HEALTHY_SECONDS
+            and 0 <= now - self.last_ack <= BLUETOOTH_ACK_MAX_AGE)
+
+  def take_fast_retry(self, now):
+    if not self.healthy(now) or now < self.next_fast_retry:
+      return False
+    self.next_fast_retry = now + BLUETOOTH_FAST_RETRY_COOLDOWN
+    return True
 
 
 def atomic_json(path, value):
@@ -179,6 +215,7 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
     next_attempt = 0.0
     candidate_index = 0
     failures = 0
+    bluetooth_reconnect = BluetoothReconnect()
     peer = None
     bluetooth_only = False
     config_error = ''
@@ -214,6 +251,7 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
             diagnostics.record('policy_changed', transport=transport_name, bluetoothOnly=bluetooth_only)
             transport.close()
             transport = None
+            bluetooth_reconnect.reset_session()
             usb_probe.close()
             usb_probe = UsbProbe(AdbTransport)
             feedback.unlink(missing_ok=True)
@@ -229,6 +267,7 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
             usb_probe.close()
             usb_probe = UsbProbe(AdbTransport)
             transport = ready
+            bluetooth_reconnect.reset_session()
             feedback.unlink(missing_ok=True)
             extended_feedback = False
             model_navigation.clear('model_link_changed')
@@ -244,6 +283,7 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
         try:
           if transport is None:
             vehicles.clear()
+            bluetooth_reconnect.reset_session()
             transport_name = 'bluetooth' if bluetooth_only else 'usb'
             try:
               if bluetooth_only:
@@ -301,6 +341,8 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
                                  wireless=getattr(transport, 'last_exchange', None))
             age_model_feedback(response, elapsed_ms)
             model_navigation.accept(response.get('modelNavigation'), reply_received, received)
+            if transport_name == 'bluetooth':
+              bluetooth_reconnect.acknowledge(reply_received, received)
           cache_token = model_route_cache.update(model_navigation)
           if transport_name == 'usb':
             # Every new cable loss starts with the configured wireless peer,
@@ -309,7 +351,8 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
           if last_connected_transport is not None and last_connected_transport != transport_name:
             last_handover = {'at': received, 'from': last_connected_transport, 'to': transport_name}
           last_connected_transport = transport_name
-          if received - connected_at >= 2:
+          healthy = bluetooth_reconnect.healthy(received) if transport_name == 'bluetooth' else received - connected_at >= 2
+          if healthy:
             failures = 0
             if transport_name == 'bluetooth':
               # Retry a proven wireless link first after a transient loss. A
@@ -346,6 +389,9 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
                                'diagnostics': diagnostics.snapshot(),
                                'reason': ''})
         except (OSError, ValueError, subprocess.SubprocessError) as error:
+          fast_retry = (transport_name == 'bluetooth' and phase == 'exchange' and isinstance(error, OSError)
+                        and bluetooth_reconnect.take_fast_retry(time.monotonic()))
+          bluetooth_reconnect.reset_session()
           diagnostics.failure(phase=phase, transport=transport_name, error=error, connected_at=connected_at,
                               wireless=getattr(transport, 'last_exchange', None))
           if transport_name in ('bluetooth', 'jetson'):
@@ -359,7 +405,7 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
           model_navigation.clear('model_disconnected')
           model_route_cache.update(model_navigation)
           failures += 1
-          retry_delay = min(10, 2 ** min(failures, 4))
+          retry_delay = BLUETOOTH_FAST_RETRY if fast_retry else min(10, 2 ** min(failures, 4))
           atomic_json(status, {'updatedAt': time.monotonic(), 'connected': False, 'transport': transport_name,
                                'transportPolicy': 'bluetooth_only' if bluetooth_only else 'usb_first',
                                'retryInSeconds': retry_delay, 'wirelessConfigured': peer is not None,
