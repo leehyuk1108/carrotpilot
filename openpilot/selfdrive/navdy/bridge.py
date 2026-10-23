@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack
 import fcntl
 import json
 import math
@@ -20,6 +21,7 @@ from openpilot.selfdrive.navdy.connection import UsbProbe
 from openpilot.selfdrive.navdy.ambient import DoorMonitor, read_override, road_state
 from openpilot.selfdrive.navdy.model_navigation import ModelNavigationTracker, ModelRouteCache, age_model_feedback
 from openpilot.selfdrive.navdy.diagnostics import LinkDiagnostics
+from openpilot.selfdrive.navdy.journal import LocalJournal
 from openpilot.selfdrive.navdy.vehicles import VehicleOverlay
 
 MAINTENANCE_STATE = Path('/data/hl-jetson')
@@ -229,11 +231,12 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
     model_navigation = ModelNavigationTracker()
     model_route_path = feedback.with_name(feedback.stem + '-model-route.json')
     model_route_cache = ModelRouteCache(model_route_path, atomic_json)
-    diagnostics = LinkDiagnostics(cloudlog.event)
     vehicles = VehicleOverlay()
     doors = DoorMonitor()
-    doors.start()
+    diagnostics = LinkDiagnostics(cloudlog.event, journal=LocalJournal())
     try:
+      diagnostics.record('bridge_started')
+      doors.start()
       while duration is None or time.monotonic() - start < duration:
         tick = time.monotonic()
         sm.update(0)
@@ -250,6 +253,7 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
                                         (transport_name == 'bluetooth' and peer != transport.peer)):
             diagnostics.record('policy_changed', transport=transport_name, bluetoothOnly=bluetooth_only)
             transport.close()
+            diagnostics.record('transport_closed', transport=transport_name)
             transport = None
             bluetooth_reconnect.reset_session()
             usb_probe.close()
@@ -264,6 +268,7 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
           if ready is not None:
             diagnostics.record('usb_handover', transport=transport_name)
             transport.close()
+            diagnostics.record('transport_closed', transport=transport_name)
             usb_probe.close()
             usb_probe = UsbProbe(AdbTransport)
             transport = ready
@@ -274,17 +279,22 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
             model_route_cache.update(model_navigation)
             if ready is not None:
               transport_name, connected_at = 'usb', time.monotonic()
+              diagnostics.record('transport_open', transport=transport_name, connectedAt=connected_at, local_only=True)
             next_attempt, failures = 0.0, 0
             sm.update(0)
+        diagnostics.periodic(connected=transport is not None, transport=transport_name, bluetooth_only=bluetooth_only,
+                             retry_in=next_attempt - tick, wireless=getattr(transport, 'last_exchange', None))
         if transport is None and tick < next_attempt:
           time.sleep(0.1)
           continue
         phase = 'connect'
+        diagnostics.begin_phase(phase)
         try:
           if transport is None:
             vehicles.clear()
             bluetooth_reconnect.reset_session()
             transport_name = 'bluetooth' if bluetooth_only else 'usb'
+            diagnostics.record('connect_attempt', transport=transport_name)
             try:
               if bluetooth_only:
                 if peer is None:
@@ -294,6 +304,8 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
                 transport = AdbTransport()
               transport.connect()
             except (OSError, ValueError, subprocess.SubprocessError):
+              diagnostics.record('connect_failed', transport=transport_name,
+                                  phaseMs=(time.monotonic() - diagnostics.phase_started) * 1000)
               if transport is not None:
                 transport.close()
               transport = None
@@ -306,6 +318,7 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
                 raise ConnectionError(config_error or 'Navdy USB not found; no paired Jetson or enabled Bluetooth peer') from None
               transport_name, target = options[candidate_index % len(options)]
               candidate_index += 1
+              diagnostics.record('connect_attempt', transport=transport_name)
               if transport_name == 'bluetooth':
                 transport = BluetoothTransport(target)
                 transport.connect()
@@ -317,6 +330,7 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
             # Discovery/service startup can block. Drain fresh messages before sending.
             sm.update(0)
           phase = 'payload'
+          diagnostics.begin_phase(phase)
           captured_ns = time.monotonic_ns()
           sources = display_sources(sm)
           payload = live_payload(sm, sequence, sources=sources, door_open=doors.door_open,
@@ -327,6 +341,7 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
                               can_valid=car_state.canValid if sources['carState']['usable'] else True,
                               can_timeout=car_state.canTimeout if sources['carState']['usable'] else False)
           phase = 'exchange'
+          diagnostics.begin_phase(phase)
           exchange_started = time.monotonic()
           if transport_name == 'bluetooth':
             replies = transport.exchange_batch(payload, captured_ns=captured_ns)
@@ -335,7 +350,9 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
             received = time.monotonic()
             replies = [(response, received, (received - exchange_started) * 1000.)]
           received = time.monotonic()
+          diagnostics.exchanged(len(replies))
           phase = 'feedback'
+          diagnostics.begin_phase(phase)
           for response, reply_received, elapsed_ms in replies:
             diagnostics.feedback(response, transport=transport_name, received_at=reply_received, elapsed_ms=elapsed_ms,
                                  wireless=getattr(transport, 'last_exchange', None))
@@ -373,6 +390,7 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
             extended_feedback = 'navigationFeedback' in response
             atomic_json(feedback, {'receivedAt': reply_received, 'feedback': response, 'modelRouteCacheToken': cache_token})
           phase = 'status'
+          diagnostics.begin_phase(phase)
           atomic_json(status, {'updatedAt': received, 'connected': True, 'transport': transport_name,
                                'connectedAt': connected_at, 'extendedFeedback': extended_feedback,
                                'display': {'sequence': sequence, 'onroad': payload['onroad'], 'active': payload['active'],
@@ -388,17 +406,20 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
                                                    'reason': model_navigation.reason},
                                'diagnostics': diagnostics.snapshot(),
                                'reason': ''})
+          diagnostics.end_phase()
         except (OSError, ValueError, subprocess.SubprocessError) as error:
           fast_retry = (transport_name == 'bluetooth' and phase == 'exchange' and isinstance(error, OSError)
                         and bluetooth_reconnect.take_fast_retry(time.monotonic()))
           bluetooth_reconnect.reset_session()
           diagnostics.failure(phase=phase, transport=transport_name, error=error, connected_at=connected_at,
                               wireless=getattr(transport, 'last_exchange', None))
+          diagnostics.end_phase()
           if transport_name in ('bluetooth', 'jetson'):
             usb_probe.close()
             usb_probe = UsbProbe(AdbTransport)
           if transport is not None:
             transport.close()
+            diagnostics.record('transport_closed', transport=transport_name)
             transport = None
           feedback.unlink(missing_ok=True)
           extended_feedback = False
@@ -406,6 +427,7 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
           model_route_cache.update(model_navigation)
           failures += 1
           retry_delay = BLUETOOTH_FAST_RETRY if fast_retry else min(10, 2 ** min(failures, 4))
+          diagnostics.record('retry_scheduled', transport=transport_name, retryInSeconds=retry_delay, fastRetry=fast_retry)
           atomic_json(status, {'updatedAt': time.monotonic(), 'connected': False, 'transport': transport_name,
                                'transportPolicy': 'bluetooth_only' if bluetooth_only else 'usb_first',
                                'retryInSeconds': retry_delay, 'wirelessConfigured': peer is not None,
@@ -414,15 +436,20 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
           next_attempt = time.monotonic() + retry_delay
         time.sleep(max(0, DISPLAY_INTERVAL - (time.monotonic() - tick)))
     finally:
-      doors.close()
-      usb_probe.close()
-      if transport is not None:
-        transport.close()
-      feedback.unlink(missing_ok=True)
-      model_route_path.unlink(missing_ok=True)
-      diagnostics.record('bridge_stopped')
-      atomic_json(status, {'updatedAt': time.monotonic(), 'connected': False, 'reason': 'bridge_stopped',
-                           'diagnostics': diagnostics.snapshot()})
+      # Every cleanup runs even if an earlier resource or status write fails.
+      # Journal close is last and only joins its daemon for a bounded interval.
+      with ExitStack() as cleanup:
+        cleanup.callback(diagnostics.close)
+        cleanup.callback(lambda: atomic_json(status, {'updatedAt': time.monotonic(), 'connected': False, 'reason': 'bridge_stopped',
+                                                      'diagnostics': diagnostics.snapshot()}))
+        cleanup.callback(diagnostics.record, 'bridge_stopped', timings=diagnostics.timings,
+                         exchanges=diagnostics.exchanges, replies=diagnostics.replies)
+        cleanup.callback(model_route_path.unlink, missing_ok=True)
+        cleanup.callback(feedback.unlink, missing_ok=True)
+        if transport is not None:
+          cleanup.callback(transport.close)
+        cleanup.callback(usb_probe.close)
+        cleanup.callback(doors.close)
 
 
 def main():

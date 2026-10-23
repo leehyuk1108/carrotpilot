@@ -1,5 +1,6 @@
 import json
 import subprocess
+from types import SimpleNamespace as NS
 
 from openpilot.selfdrive.navdy.diagnostics import LinkDiagnostics
 
@@ -53,6 +54,8 @@ def test_no_events_from_sequence_or_latency_alone_or_private_feedback():
   response['displayPower']['offroadMs'] = 999999
   feedback(diagnostics, response)
   assert len(emitted) == 1
+  assert diagnostics.receiver['wireless']['receivedSeq'] == 9000
+  assert diagnostics.receiver['wireless']['appliedSeq'] == 9000
   assert 'SECRET' not in json.dumps(diagnostics.snapshot())
   assert 'privateRoute' not in json.dumps(diagnostics.snapshot())
 
@@ -131,3 +134,53 @@ def test_source_state_changes_are_distinct_from_radio_failures():
   assert diagnostics.snapshot()['lastFailure'] is None
   diagnostics.sources(sources, payload, can_timeout=True)
   assert emitted[-1][1]['state']['missing']['carState'] == 'can_timeout'
+
+
+def test_periodic_status_has_bounded_phase_timings_and_receiver_sequences(monkeypatch):
+  from openpilot.selfdrive.navdy import diagnostics as module
+  now = [100.]
+  monkeypatch.setattr(module.time, 'monotonic', lambda: now[0])
+  diagnostics, emitted = recorder()
+  local = []
+  diagnostics.journal = NS(submit=lambda row: local.append(row), stats=dict)
+  response = receiver()
+  response['wireless'].update(receivedSeq=123, appliedSeq=122)
+  feedback(diagnostics, response)
+  diagnostics.begin_phase('exchange')
+  now[0] += .2
+  diagnostics.exchanged(2)
+  diagnostics.end_phase()
+  for _ in range(100):
+    diagnostics.periodic(connected=True, transport='bluetooth', bluetooth_only=True, retry_in=0, wireless={'sequence': 124})
+  statuses = [row for row in local if row['kind'] == 'periodic_status']
+  assert len(statuses) == 1
+  assert not any(row['kind'] == 'periodic_status' for _, row in emitted)
+  assert statuses[0]['receiver']['wireless']['receivedSeq'] == 123
+  assert statuses[0]['receiver']['wireless']['appliedSeq'] == 122
+  assert statuses[0]['exchanges'] == 1 and statuses[0]['replies'] == 2
+  assert abs(statuses[0]['timings']['exchange']['maxMs'] - 200) < 1e-6
+  assert diagnostics.timings == {}
+  now[0] += 5
+  diagnostics.periodic(connected=False, transport='bluetooth', bluetooth_only=True, retry_in=3, wireless=None)
+  assert local[-1]['kind'] == 'periodic_status'
+  assert local[-1]['timings'] == {}
+  assert local[-1]['receiverAt'] == 20
+
+
+def test_new_local_events_never_change_cloudlog_cadence_or_history():
+  diagnostics, emitted = recorder()
+  diagnostics.record('transport_open', transport='bluetooth')
+  original = diagnostics.snapshot()['events']
+  for _ in range(100):
+    for kind in ('bridge_started', 'connect_attempt', 'connect_failed', 'transport_closed', 'retry_scheduled', 'periodic_status'):
+      diagnostics.record(kind)
+    diagnostics.record('transport_open', local_only=True, transport='usb')
+  assert len(emitted) == 1
+  assert diagnostics.snapshot()['events'] == original
+
+
+def test_custom_exception_names_are_not_serialized():
+  error = type('PRIVATE', (ValueError,), {})('PRIVATE')
+  diagnostics, emitted = recorder()
+  diagnostics.failure(phase='exchange', transport='bluetooth', error=error, connected_at=0, wireless=None)
+  assert 'PRIVATE' not in json.dumps(emitted)
