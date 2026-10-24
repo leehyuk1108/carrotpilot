@@ -368,9 +368,10 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
               continue
             had_model_field = 'modelNavigation' in response
             age_model_feedback(response, elapsed_ms)
-            if not had_model_field:
-              # Invalid model timing may insert a null. Do not turn a legacy
-              # navigation clear into the exact two-null discard sentinel.
+            if not had_model_field or is_no_observation(response):
+              # Aging may insert or replace the model with null. This was a
+              # real observation, so preserve its navigation clear, not a
+              # synthetic two-null discard sentinel in the reader's file.
               response.pop('modelNavigation', None)
             model_navigation.accept(response.get('modelNavigation'), reply_received, received)
             latest_feedback = response, reply_received
