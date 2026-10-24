@@ -16,13 +16,13 @@ import time
 
 from openpilot.selfdrive.navdy.navigation import FEEDBACK_PATH, STATUS_PATH
 from openpilot.selfdrive.navdy.transport import AdbTransport, LineReader, encode_frame
-from openpilot.selfdrive.navdy.bluetooth import BluetoothTransport, CONFIG_PATH, ServiceChannelCache, configured_connection
+from openpilot.selfdrive.navdy.bluetooth import BluetoothTransport, CONFIG_PATH, configured_connection
 from openpilot.selfdrive.navdy.connection import UsbProbe
 from openpilot.selfdrive.navdy.ambient import DoorMonitor, read_override, road_state
 from openpilot.selfdrive.navdy.model_navigation import ModelNavigationTracker, ModelRouteCache, age_model_feedback
 from openpilot.selfdrive.navdy.diagnostics import LinkDiagnostics, public_error
 from openpilot.selfdrive.navdy.feedback import is_no_observation
-from openpilot.selfdrive.navdy.journal import LocalJournal
+from openpilot.selfdrive.navdy.journal import CONNECT_TIMINGS, LocalJournal, sanitize
 from openpilot.selfdrive.navdy.vehicles import VehicleOverlay
 
 MAINTENANCE_STATE = Path('/data/hl-jetson')
@@ -75,6 +75,14 @@ def atomic_json(path, value):
   temporary = path.with_suffix('.tmp')
   temporary.write_text(json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(',', ':')))
   temporary.replace(path)
+
+
+def connect_timings(connection):
+  if not isinstance(connection, dict) or not isinstance(connection.get('steps'), list):
+    return None
+  steps = {step['phase']: step for step in connection['steps']
+           if type(step) is dict and type(step.get('phase')) is str and step['phase'] in CONNECT_TIMINGS}
+  return sanitize(steps, CONNECT_TIMINGS)
 
 
 class SshTransport:
@@ -219,7 +227,6 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
     candidate_index = 0
     failures = 0
     bluetooth_reconnect = BluetoothReconnect()
-    bluetooth_channels = ServiceChannelCache()
     bluetooth_connect = None
     peer = None
     bluetooth_only = False
@@ -253,7 +260,6 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
             config_error = ''
           except (OSError, ValueError) as error:
             peer, config_error = None, str(error)[:160]
-          bluetooth_channels.configure(peer, bluetooth_only)
           if transport is not None and (old_policy != bluetooth_only or
                                         (transport_name == 'bluetooth' and peer != transport.peer)):
             diagnostics.record('policy_changed', transport=transport_name, bluetoothOnly=bluetooth_only)
@@ -305,7 +311,6 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
                 if peer is None:
                   raise ConnectionError(config_error or 'Bluetooth-only mode requires an enabled paired peer')
                 transport = BluetoothTransport(peer)
-                transport.channel_cache = bluetooth_channels
               else:
                 transport = AdbTransport()
               transport.connect()
@@ -313,7 +318,8 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
               if transport_name == 'bluetooth':
                 bluetooth_connect = getattr(transport, 'connect_diagnostics', None)
               diagnostics.record('connect_failed', transport=transport_name,
-                                  phaseMs=(time.monotonic() - diagnostics.phase_started) * 1000)
+                                  phaseMs=(time.monotonic() - diagnostics.phase_started) * 1000,
+                                  connectTimings=connect_timings(bluetooth_connect) if transport_name == 'bluetooth' else None)
               if transport is not None:
                 transport.close()
               transport = None
@@ -329,7 +335,6 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
               diagnostics.record('connect_attempt', transport=transport_name)
               if transport_name == 'bluetooth':
                 transport = BluetoothTransport(target)
-                transport.channel_cache = bluetooth_channels
                 transport.connect()
               else:
                 transport = SshTransport(target)
@@ -337,7 +342,8 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
             if transport_name == 'bluetooth':
               bluetooth_connect = getattr(transport, 'connect_diagnostics', None)
             connected_at = time.monotonic()
-            diagnostics.record('transport_open', transport=transport_name, connectedAt=connected_at)
+            diagnostics.record('transport_open', transport=transport_name, connectedAt=connected_at,
+                                connectTimings=connect_timings(bluetooth_connect) if transport_name == 'bluetooth' else None)
             # Discovery/service startup can block. Drain fresh messages before sending.
             sm.update(0)
           phase = 'payload'
@@ -437,6 +443,10 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
         except (OSError, ValueError, subprocess.SubprocessError) as error:
           if transport_name == 'bluetooth' and transport is not None and phase == 'connect':
             bluetooth_connect = getattr(transport, 'connect_diagnostics', None)
+            # The USB-first fallback bypasses the initial connect_failed handler.
+            diagnostics.record('connect_failed', transport=transport_name,
+                                phaseMs=(time.monotonic() - diagnostics.phase_started) * 1000,
+                                connectTimings=connect_timings(bluetooth_connect))
           fast_retry = (transport_name == 'bluetooth' and phase == 'exchange' and isinstance(error, OSError)
                         and bluetooth_reconnect.take_fast_retry(time.monotonic()))
           bluetooth_reconnect.reset_session()

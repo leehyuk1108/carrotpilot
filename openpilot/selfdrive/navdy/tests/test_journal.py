@@ -83,6 +83,47 @@ def test_transmit_metrics_survive_diagnostics_and_disk(tmp_path):
   assert records(tmp_path / 'logs')[0]['wireless'] == metrics
 
 
+@pytest.mark.parametrize('kind', ['connect_failed', 'transport_open', 'failure'])
+def test_fixed_connect_timings_survive_journal_without_private_or_unknown_keys(tmp_path, kind):
+  phases = ('bluetoothctl', 'sdp', 'socket_create', 'security_request', 'socket', 'security', 'hello', 'pipeline')
+  assert set(journal.CONNECT_TIMINGS) == set(phases)
+  expected = {phase: {'ok': phase != 'hello', 'elapsedMs': 12.5} for phase in phases}
+  private = 'PRIVATE 54:ED:A3:00:48:23 /data/private token'
+  dirty = {phase: {**value, 'reason': private, 'peer': private, 'command': [private]} for phase, value in expected.items()}
+  dirty.update({private: {'ok': True, 'elapsedMs': 10}, 'unknown': {'reason': private}, 'steps': [private]})
+  sink = journal.LocalJournal(tmp_path.resolve() / 'logs')
+  diagnostics = LinkDiagnostics(lambda *args, **kwargs: None, journal=sink)
+  diagnostics.record(kind, phase='connect', transport='bluetooth', connectTimings=dirty)
+  dirty['sdp']['elapsedMs'] = 999
+  diagnostics.close()
+  rows = records(sink.files.directory)
+  assert len(rows) == 1 and sink.dropped == 0
+  assert rows[0]['connectTimings'] == expected
+  assert private not in json.dumps(rows)
+
+
+@pytest.mark.parametrize('value', [[], [{'phase': 'sdp', 'ok': True, 'elapsedMs': 1}], 'PRIVATE', None])
+def test_connect_timings_schema_never_accepts_an_arbitrary_list_or_text(value):
+  assert 'connectTimings' not in journal.sanitize(event(connectTimings=value))
+
+
+def test_connect_timings_schema_rejects_invalid_values_and_bridge_uses_same_whitelist():
+  from openpilot.selfdrive.navdy.bridge import connect_timings
+
+  dirty = {'steps': [
+    {'phase': 'sdp', 'ok': 'PRIVATE', 'elapsedMs': float('inf'), 'peer': 'PRIVATE'},
+    {'phase': 'socket', 'ok': True, 'elapsedMs': 1.5, 'reason': 'PRIVATE'},
+    {'phase': 'hello', 'ok': False, 'elapsedMs': float('nan')},
+    {'phase': 'unknown', 'ok': True, 'elapsedMs': 99},
+    {'phase': ['PRIVATE'], 'ok': True, 'elapsedMs': 1},
+    'PRIVATE',
+  ]}
+  expected = {'sdp': {}, 'socket': {'ok': True, 'elapsedMs': 1.5}, 'hello': {'ok': False}}
+  assert connect_timings(dirty) == expected
+  assert journal.sanitize(event(connectTimings=connect_timings(dirty)))['connectTimings'] == expected
+  assert connect_timings(None) is None
+
+
 def test_rotation_bounds_disk_across_restarts_and_repairs_incomplete_tail(tmp_path):
   directory = tmp_path.resolve() / 'logs'
   for run in range(3):

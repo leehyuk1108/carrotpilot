@@ -45,6 +45,8 @@ RECEIVER = {'wireless': {'session': 'number', 'owner': TRANSPORT | {'none', 'unk
 SOURCE = {'missing': dict.fromkeys(('deviceState', 'pandaStates', 'carState', 'selfdriveState'),
                                   frozenset(('not_seen', 'invalid', 'invalid_timestamp', 'stale', 'can_invalid', 'can_timeout'))),
           'power': POWER, 'ambient': AMBIENT}
+CONNECT_TIMINGS = dict.fromkeys(('bluetoothctl', 'sdp', 'socket_create', 'security_request', 'socket', 'security', 'hello', 'pipeline'),
+                              {'ok': 'bool', 'elapsedMs': 'number'})
 SCHEMA = {
   'runId': 'uuid', 'eventSeq': 'number', 'at': 'number', 'wallTime': 'number',
   'kind': frozenset(('bridge_started', 'bridge_stopped', 'policy_changed', 'usb_handover', 'connect_attempt',
@@ -56,6 +58,7 @@ SCHEMA = {
   'errorType': frozenset(cls.__name__ for cls in ERROR_TYPES) | {'Exception'}, 'reason': REASONS,
   'state': SOURCE, 'sourceState': SOURCE, 'receiver': RECEIVER, 'previous': RECEIVER, 'current': RECEIVER,
   'wireless': METRICS, 'batchLatestWireless': METRICS,
+  'connectTimings': CONNECT_TIMINGS,
   'timings': dict.fromkeys(PHASES, dict.fromkeys(('count', 'totalMs', 'maxMs'), 'number')),
   'exchanges': 'number', 'replies': 'number',
   'feedback': {kind: dict.fromkeys(('count', 'lastReceivedAt'), 'number')
