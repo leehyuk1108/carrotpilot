@@ -10,6 +10,10 @@ or lane-change control policy. Documented color/type codes 0..38 are accepted
 except reserved type 9. Invalid, missing or low-confidence inputs are unknown.
 Raw code 0 remains dashed, including the schema's default zero. This is not a
 new independent claim that a camera positively classified that marking.
+Reserved/out-of-contract codes (9, 19, 29, 39, or 40+) intentionally become
+unknown here, unlike C4's broad nonzero-remainder solid fallback. The current
+producers and sampled drive use documented codes; this is not exact parity
+for malformed or future undocumented codes.
 
 The installed v169 APK already implements `navLaneLeftType` and
 `navLaneRightType` as **strings**: `solid`, `dashed`, `unknown`. No APK change
@@ -35,6 +39,7 @@ uses a null PathEffect only for solid types. Other lanes independently reset
 the shared Paint state. REA Android analysis was unavailable because the local
 JADX MCP provider was not configured; the exact APK was inspected with the
 existing pinned dexlib/baksmali tools instead.
+Both receiver and renderer class dumps came from that same pinned APK.
 
 Eight retained recent-drive qlogs contain 5,344 valid carState samples:
 4,440 pairs (0,0), 195 (0,1), 454 (1,0), and 255 (1,1). Both sides really
@@ -52,6 +57,44 @@ stalls in `navdy_radio_stall_20261024.md` are separate and remain unresolved.
 
 ## Validation status
 
-Native rendering, final source review and device application are recorded
-below after execution. Private APKs, recorded inputs and device logs are not
-included in Git.
+- Parent reran the complete Navdy suite: **1,130 passed, five deselected** on
+  macOS. The exclusions are the existing native DBC cases unsupported in that
+  desktop environment, not new failures. Nine local renderer-verifier/runner
+  self-tests also pass. Ruff and diff checks pass for the sender.
+- Claude reviewed the fixed sender, actual receiver/renderer, isolated replay
+  and deployment batch. Parent verified the findings against actual code and
+  device output. Add a pre-merge interpreter/import/origin check and target
+  blob hash verification; Android 5 needs echo markers and toolbox ls columns.
+- Actual installed v169 renderer: **38/38 frame checks and 38/38 decoded PNG
+  checks pass** in a separate shell-uid-2000 app_process, unattached 320x100
+  Canvas. This covers all left/right style pairs, independent risk tint,
+  missing/invalid fields, full/partial geometry, clearing and restoration.
+  All 13 bitmap resources load. Existing pixels outside the lanes match.
+- The initial pixel oracle incorrectly assumed opaque lanes. APK
+  `onSizeChanged` uses a vertical alpha 85-to-255 shader; the corrected oracle
+  checks that gradient (two alpha-unit rounding tolerance), continuous solid
+  coverage, transparent dash gaps and equal risk tint on shared painted pixels.
+  The fixture/JAR/APK did not change to obtain the pass.
+- HUD PID 2581 and phone connection service PID 2601 remained running. APK,
+  pairing, phone registry and Bluetooth-stack configuration hashes match.
+  Own helper process, files and ART cache were cleaned. Android 5's unsupported
+  `settings list` printed usage with exit zero: its hashes are **not** evidence
+  of settings-table preservation. The runner now uses four named `settings
+  get` queries, independently confirmed readable; this revised snapshot was
+  not used for a second native capture. Existing config/PID evidence is separate.
+- Runtime commit `c806b80c` was pushed to `traverse/WIP-FR` and fast-forwarded
+  on comma-db5ce68d after sustained fresh offroad/ignition-OFF/inactive guards.
+  Native Cap'n Proto lane-field smoke checks pass. Tracked bytes and original
+  generated/untracked files were preserved. Only the Navdy bridge restarted,
+  PID 912103 to 967871; carrot_man stayed 741567. Initial Bluetooth reconnection
+  took 7.488 seconds, with received/applied sequence 5 and zero USB updates.
+- Subsequent 60-second observation: 270/296 samples connected, sessions
+  663 to 664, one observed peer reset followed by reconnection. Final received
+  and applied sequence both 259; Bluetooth-only, zero USB updates. Offroad
+  traffic has no active lane-style payload. This is not a radio-stability pass
+  or evidence that the style bytes caused that pre-existing stall.
+
+No APK install, phone reconnect policy, TTL, display cadence, lane geometry,
+steering or braking change. Physical screen/road confirmation and the separate
+Bluetooth root-cause investigation remain outstanding. Private APKs, recorded
+inputs, PNGs and device logs are not included in Git.
