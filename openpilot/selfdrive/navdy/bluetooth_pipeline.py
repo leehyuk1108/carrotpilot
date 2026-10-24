@@ -11,6 +11,7 @@ from openpilot.selfdrive.navdy.bluetooth import MAX_BYTES, REQUEST, RESPONSE, TT
 from openpilot.selfdrive.navdy.transport import parse_response
 
 MAX_IN_FLIGHT = 2
+MAX_WRITE_ATTEMPTS = 16
 RESPONSE_TIMEOUT_NS = 1_500_000_000
 LEASE_HISTORY = 8
 
@@ -93,6 +94,9 @@ class SnapshotPipeline:
     self.last_ack = None
     self.last_received_ns = None
     self.skipped = 0
+    self.partial_writes = 0
+    self.blocked_writes = 0
+    self.last_tx_ms = None
 
   def _read(self):
     replies = []
@@ -118,7 +122,8 @@ class SnapshotPipeline:
       self.leases.append((lease, received_ns))
       self.last_received_ns = received_ns
       self.last_ack = {'sequence': sequence, 'rttMs': round(elapsed_ms, 2),
-                       'receiverAgeMs': round(age / 1000, 2), 'displayStatus': status}
+                       'receiverAgeMs': round(age / 1000, 2), 'displayStatus': status,
+                       'ackPollDelayMs': round((time.monotonic_ns() - received_ns) / 1e6, 2)}
       # A stale display rejection still carries a new lease and independently
       # timed phone feedback. It is not a reason to disconnect a working radio.
       replies.append((age_feedback(value, elapsed_ms), received_ns / 1e9, elapsed_ms))
@@ -127,18 +132,27 @@ class SnapshotPipeline:
     return replies
 
   def _flush(self):
-    if not self.tx:
-      return
-    if not 0 <= time.monotonic_ns() - self.tx_captured_ns < TTL_US * 1000:
-      # Never complete a partially transmitted old frame or keep a stale queue.
-      raise TimeoutError('Navdy wireless v2 transmit deadline')
-    try:
-      sent = self.conn.send(self.tx)
-    except BlockingIOError:
-      return
-    if sent <= 0:
-      raise ConnectionError('Navdy Bluetooth disconnected during write')
-    self.tx = self.tx[sent:]
+    # A short send can leave the socket writable. Finish it now instead of
+    # adding a full display tick per fragment, but never spin on backpressure.
+    for _ in range(MAX_WRITE_ATTEMPTS):
+      if not self.tx:
+        return
+      if not 0 <= time.monotonic_ns() - self.tx_captured_ns < TTL_US * 1000:
+        # Never complete a partially transmitted old frame or renew its age.
+        raise TimeoutError('Navdy wireless v2 transmit deadline')
+      try:
+        sent = self.conn.send(self.tx)
+      except BlockingIOError:
+        self.blocked_writes += 1
+        return
+      if sent <= 0:
+        raise ConnectionError('Navdy Bluetooth disconnected during write')
+      if sent < len(self.tx):
+        self.partial_writes += 1
+      self.tx = self.tx[sent:]
+      if not self.tx:
+        self.last_tx_ms = round((time.monotonic_ns() - self.tx_captured_ns) / 1e6, 2)
+        return
 
   def update(self, payload, *, captured_ns):
     if type(captured_ns) is not int:
@@ -184,6 +198,9 @@ class SnapshotPipeline:
     now = time.monotonic_ns()
     return {'protocol': 2, **(self.last_ack or {}), 'inFlight': len(self.pending),
             'skippedSnapshots': self.skipped,
+            'txPendingBytes': len(self.tx), 'lastTxMs': self.last_tx_ms,
+            'txAgeMs': round((now - self.tx_captured_ns) / 1e6, 2) if self.tx else None,
+            'partialWriteCount': self.partial_writes, 'blockedWriteCount': self.blocked_writes,
             'ackAgeMs': round((now - self.last_received_ns) / 1e6, 2) if self.last_received_ns is not None else None}
 
   def close(self):

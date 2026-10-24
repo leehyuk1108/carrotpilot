@@ -59,6 +59,30 @@ def test_boot_change_is_distinct_from_run_restart(tmp_path, monkeypatch):
   assert {row['bootId'] for row in records(directory)} == {'b' * 32, 'c' * 32}
 
 
+def test_feedback_counters_survive_sanitizer_and_disk_without_payloads(tmp_path):
+  sink = journal.LocalJournal(tmp_path.resolve() / 'logs')
+  diagnostics = LinkDiagnostics(lambda *a, **kw: None, journal=sink)
+  diagnostics.feedback({'navigationFeedback': None, 'modelNavigation': None},
+                       transport='bluetooth', received_at=100., elapsed_ms=1., wireless={})
+  sink.submit(event(feedback={**diagnostics.feedback_stats, 'privatePayload': 'secret'}))
+  sink.close()
+  assert records(tmp_path / 'logs')[0]['feedback'] == {
+    'noObservation': {'count': 1, 'lastReceivedAt': 100.},
+    'observation': {'count': 0}, 'incomplete': {'count': 0},
+  }
+
+
+def test_transmit_metrics_survive_diagnostics_and_disk(tmp_path):
+  metrics = dict.fromkeys(('ackPollDelayMs', 'txPendingBytes', 'txAgeMs', 'lastTxMs',
+                          'partialWriteCount', 'blockedWriteCount'), 12)
+  sink = journal.LocalJournal(tmp_path.resolve() / 'logs')
+  clean = LinkDiagnostics.metrics({**metrics, 'payload': 'secret', 'peer': 'secret'})
+  sink.submit(event(wireless=clean))
+  sink.close()
+  assert clean == metrics
+  assert records(tmp_path / 'logs')[0]['wireless'] == metrics
+
+
 def test_rotation_bounds_disk_across_restarts_and_repairs_incomplete_tail(tmp_path):
   directory = tmp_path.resolve() / 'logs'
   for run in range(3):

@@ -7,6 +7,8 @@ import subprocess
 import time
 import uuid
 
+from openpilot.selfdrive.navdy.feedback import feedback_shape
+
 PUBLIC_ERRORS = frozenset((
   'Navdy Bluetooth response deadline', 'Navdy Bluetooth disconnected',
   'Navdy Bluetooth disconnected during write', 'Navdy wireless v2 response deadline',
@@ -78,6 +80,8 @@ class LinkDiagnostics:
     self.timings = {}
     self.exchanges = 0
     self.replies = 0
+    self.feedback_stats = {key: {'count': 0, 'lastReceivedAt': None}
+                           for key in ('noObservation', 'observation', 'incomplete')}
 
   def record(self, kind, *, local_only=False, **fields):
     self.sequence = min(COUNTER_MAX, self.sequence + 1)
@@ -110,7 +114,8 @@ class LinkDiagnostics:
   @staticmethod
   def metrics(wireless):
     return selected(wireless, ('protocol', 'sequence', 'rttMs', 'receiverAgeMs', 'displayStatus',
-                               'inFlight', 'skippedSnapshots', 'ackAgeMs'))
+                               'inFlight', 'skippedSnapshots', 'ackAgeMs', 'ackPollDelayMs', 'txPendingBytes',
+                               'txAgeMs', 'lastTxMs', 'partialWriteCount', 'blockedWriteCount'))
 
   def sources(self, sources, payload, *, can_valid=True, can_timeout=False):
     missing = {key: value['reason'] for key, value in sources.items()
@@ -124,6 +129,12 @@ class LinkDiagnostics:
       self.source_state = state
 
   def feedback(self, response, *, transport, received_at, elapsed_ms, wireless):
+    sample = self.feedback_stats[feedback_shape(response)]
+    sample['count'] = min(COUNTER_MAX, sample['count'] + 1)
+    if type(received_at) in (int, float) and math.isfinite(received_at) and 0 <= received_at <= COUNTER_MAX:
+      sample['lastReceivedAt'] = max(sample['lastReceivedAt'] or 0, received_at)
+    if not isinstance(response, dict):
+      return
     current = {'wireless': selected(response.get('wireless'), ('session', 'owner', 'clears', 'usbUpdates', 'receivedSeq', 'appliedSeq')),
                'power': selected(response.get('displayPower'), ('state', 'fresh', 'generation', 'invalidations'))}
     if not any(current.values()):
@@ -166,7 +177,8 @@ class LinkDiagnostics:
     self.record('periodic_status', connected=connected, transport=transport, bluetoothOnly=bluetooth_only,
                 retryInSeconds=max(0., retry_in), sourceState=copy.deepcopy(self.source_state), sourceAt=self.source_at,
                 receiver=copy.deepcopy(self.receiver), receiverAt=self.receiver_at, wireless=self.metrics(wireless),
-                timings=self.timings, exchanges=self.exchanges, replies=self.replies, journal=self.journal_stats())
+                timings=self.timings, exchanges=self.exchanges, replies=self.replies, journal=self.journal_stats(),
+                feedback=copy.deepcopy(self.feedback_stats))
     self.timings, self.exchanges, self.replies = {}, 0, 0
 
   def journal_stats(self):
@@ -186,4 +198,5 @@ class LinkDiagnostics:
 
   def snapshot(self):
     return copy.deepcopy({'runId': self.run_id, 'eventSeq': self.sequence,
-                          'lastFailure': self.last_failure, 'events': list(self.events), 'journal': self.journal_stats()})
+                          'lastFailure': self.last_failure, 'events': list(self.events), 'journal': self.journal_stats(),
+                          'feedback': self.feedback_stats})

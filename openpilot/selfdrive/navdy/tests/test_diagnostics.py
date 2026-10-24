@@ -98,6 +98,45 @@ def test_missing_receiver_diagnostics_do_not_invent_reset():
   assert len(emitted) == 1
 
 
+def test_no_observation_has_bounded_counts_and_original_receipt_without_per_ack_events(monkeypatch):
+  from openpilot.selfdrive.navdy import diagnostics as module
+  from openpilot.selfdrive.navdy.tests.test_navigation import packet
+  monkeypatch.setattr(module.time, 'monotonic', lambda: 100.)
+  diagnostics, emitted = recorder()
+  local = []
+  diagnostics.journal = NS(submit=lambda row: local.append(row), stats=dict)
+  for now in range(10, 40):
+    diagnostics.feedback({'navigationFeedback': None, 'modelNavigation': None}, transport='bluetooth',
+                         received_at=now, elapsed_ms=123., wireless={'peer': 'PRIVATE'})
+  feedback(diagnostics, packet())
+  feedback(diagnostics, {'navigationFeedback': None, 'private': 'PRIVATE'})
+  snapshot = diagnostics.snapshot()
+  expected = {'noObservation': {'count': 30, 'lastReceivedAt': 39},
+              'observation': {'count': 1, 'lastReceivedAt': 20},
+              'incomplete': {'count': 1, 'lastReceivedAt': 20}}
+  assert snapshot['feedback'] == expected
+  assert snapshot['lastFailure'] is None and snapshot['events'] == []
+  assert not emitted and not local  # No new cloudlog or per-ACK disk cadence.
+  snapshot['feedback']['noObservation']['count'] = 0
+  assert diagnostics.snapshot()['feedback'] == expected
+  diagnostics.periodic(connected=True, transport='bluetooth', bluetooth_only=True, retry_in=0, wireless=None)
+  assert local[-1]['kind'] == 'periodic_status'
+  assert local[-1]['feedback'] == expected
+  assert 'PRIVATE' not in json.dumps(local)
+
+
+def test_feedback_stats_saturate_and_reject_invalid_diagnostic_timestamps():
+  from openpilot.selfdrive.navdy.diagnostics import COUNTER_MAX
+  diagnostics, _ = recorder()
+  diagnostics.feedback_stats['noObservation']['count'] = COUNTER_MAX - 1
+  values = [21., 20., -1., True, 'PRIVATE', float('nan'), float('inf')]
+  for value in values:
+    diagnostics.feedback({'navigationFeedback': None, 'modelNavigation': None}, transport='bluetooth',
+                         received_at=value, elapsed_ms=0., wireless=None)
+  assert diagnostics.snapshot()['feedback']['noObservation'] == {'count': COUNTER_MAX, 'lastReceivedAt': 21.}
+  json.dumps(diagnostics.snapshot(), allow_nan=False)
+
+
 def test_usb_heartbeat_counter_does_not_evict_failure_history():
   diagnostics, emitted = recorder()
   for count in range(100):

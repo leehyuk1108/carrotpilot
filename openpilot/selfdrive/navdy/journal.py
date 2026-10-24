@@ -37,7 +37,8 @@ AMBIENT = frozenset(('disconnected', 'reverse', 'onroad', 'onroad_door', 'offroa
 REASONS = PUBLIC_ERRORS | frozenset(('Exception', 'subprocess_timeout', 'subprocess_failed')) | frozenset(
   cls.__name__ for cls in ERROR_TYPES) | frozenset(os.strerror(n) for n in errno.errorcode)
 METRICS = dict.fromkeys(('protocol', 'sequence', 'rttMs', 'receiverAgeMs', 'displayStatus',
-                       'inFlight', 'skippedSnapshots', 'ackAgeMs'), 'number')
+                       'inFlight', 'skippedSnapshots', 'ackAgeMs', 'ackPollDelayMs', 'txPendingBytes',
+                       'txAgeMs', 'lastTxMs', 'partialWriteCount', 'blockedWriteCount'), 'number')
 RECEIVER = {'wireless': {'session': 'number', 'owner': TRANSPORT | {'none', 'unknown'}, 'clears': 'number', 'usbUpdates': 'number',
                          'receivedSeq': 'number', 'appliedSeq': 'number'},
             'power': {'state': POWER, 'fresh': 'bool', 'generation': 'number', 'invalidations': 'number'}}
@@ -57,6 +58,8 @@ SCHEMA = {
   'wireless': METRICS, 'batchLatestWireless': METRICS,
   'timings': dict.fromkeys(PHASES, dict.fromkeys(('count', 'totalMs', 'maxMs'), 'number')),
   'exchanges': 'number', 'replies': 'number',
+  'feedback': {kind: dict.fromkeys(('count', 'lastReceivedAt'), 'number')
+               for kind in ('noObservation', 'observation', 'incomplete')},
   'journal': dict.fromkeys(('queued', 'written', 'dropped', 'storageErrors', 'disabled'), 'number'),
 }
 

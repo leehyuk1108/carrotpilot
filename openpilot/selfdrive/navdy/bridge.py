@@ -21,6 +21,7 @@ from openpilot.selfdrive.navdy.connection import UsbProbe
 from openpilot.selfdrive.navdy.ambient import DoorMonitor, read_override, road_state
 from openpilot.selfdrive.navdy.model_navigation import ModelNavigationTracker, ModelRouteCache, age_model_feedback
 from openpilot.selfdrive.navdy.diagnostics import LinkDiagnostics
+from openpilot.selfdrive.navdy.feedback import is_no_observation
 from openpilot.selfdrive.navdy.journal import LocalJournal
 from openpilot.selfdrive.navdy.vehicles import VehicleOverlay
 
@@ -227,6 +228,7 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
     last_connected_transport = None
     previous_available = False
     extended_feedback = False
+    feedback_received_at = -math.inf
     last_display_dropout = None
     model_navigation = ModelNavigationTracker()
     model_route_path = feedback.with_name(feedback.stem + '-model-route.json')
@@ -353,13 +355,27 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
           diagnostics.exchanged(len(replies))
           phase = 'feedback'
           diagnostics.begin_phase(phase)
+          latest_feedback = None
           for response, reply_received, elapsed_ms in replies:
             diagnostics.feedback(response, transport=transport_name, received_at=reply_received, elapsed_ms=elapsed_ms,
                                  wireless=getattr(transport, 'last_exchange', None))
-            age_model_feedback(response, elapsed_ms)
-            model_navigation.accept(response.get('modelNavigation'), reply_received, received)
             if transport_name == 'bluetooth':
               bluetooth_reconnect.acknowledge(reply_received, received)
+            if is_no_observation(response):
+              continue
+            if (type(reply_received) not in (int, float) or not math.isfinite(reply_received)
+                or not 0 <= reply_received <= received or reply_received <= feedback_received_at):
+              continue
+            had_model_field = 'modelNavigation' in response
+            age_model_feedback(response, elapsed_ms)
+            if not had_model_field:
+              # Invalid model timing may insert a null. Do not turn a legacy
+              # navigation clear into the exact two-null discard sentinel.
+              response.pop('modelNavigation', None)
+            model_navigation.accept(response.get('modelNavigation'), reply_received, received)
+            latest_feedback = response, reply_received
+            feedback_received_at = reply_received
+          model_navigation._fresh(received)
           cache_token = model_route_cache.update(model_navigation)
           if transport_name == 'usb':
             # Every new cable loss starts with the configured wireless peer,
@@ -383,10 +399,10 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
           if previous_available and missing:
             last_display_dropout = {'at': received, 'sources': missing}
           previous_available = not missing
-          # No reply means no new phone observation. Leave its original receipt
-          # time intact so existing freshness rules expire it normally.
-          if replies:
-            response, reply_received, _ = replies[-1]
+          # No observation (including discard ACKs) must not refresh the old
+          # receipt or clear it. A later malformed/real-clear ACK still wins.
+          if latest_feedback is not None:
+            response, reply_received = latest_feedback
             extended_feedback = 'navigationFeedback' in response
             atomic_json(feedback, {'receivedAt': reply_received, 'feedback': response, 'modelRouteCacheToken': cache_token})
           phase = 'status'
@@ -443,7 +459,7 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
         cleanup.callback(lambda: atomic_json(status, {'updatedAt': time.monotonic(), 'connected': False, 'reason': 'bridge_stopped',
                                                       'diagnostics': diagnostics.snapshot()}))
         cleanup.callback(diagnostics.record, 'bridge_stopped', timings=diagnostics.timings,
-                         exchanges=diagnostics.exchanges, replies=diagnostics.replies)
+                         exchanges=diagnostics.exchanges, replies=diagnostics.replies, feedback=diagnostics.feedback_stats)
         cleanup.callback(model_route_path.unlink, missing_ok=True)
         cleanup.callback(feedback.unlink, missing_ok=True)
         if transport is not None:

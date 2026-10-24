@@ -13,6 +13,7 @@ from openpilot.selfdrive.carrot.carrot_navi_control import (
   NaviTrafficControl, NaviVehicleControl,
 )
 from openpilot.selfdrive.navdy.model_navigation import ModelNavigationTracker
+from openpilot.selfdrive.navdy.feedback import is_no_observation
 
 FEEDBACK_PATH = Path('/dev/shm/navdy-feedback.json')
 STATUS_PATH = Path('/dev/shm/navdy-status.json')
@@ -96,7 +97,7 @@ class FeedbackTracker:
     self.revisions[name] += 1
 
   def accept(self, packet, received_at, now):
-    if (not isinstance(packet, dict) or number(received_at, 0, now) is None
+    if (not isinstance(packet, dict) or is_no_observation(packet) or number(received_at, 0, now) is None
         or now - received_at > LINK_TTL or received_at <= self.received_at):
       return False
     self.received_at = received_at
@@ -229,18 +230,19 @@ class NavigationReader:
           if len(data) <= MAX_FRAME_BYTES + 1024:
             value = json.loads(data)
             now = time.monotonic() if realtime else now
-            self.tracker.accept(value.get('feedback'), value.get('receivedAt'), now)
-            token = value.get('modelRouteCacheToken')
-            token = token if isinstance(token, str) and re.fullmatch(r'[0-9a-f]{32}', token) else None
-            if token != self.model_route_token:
-              self.model_tracker.clear_geometry()
-              self.model_route_stat = None
-            self.model_route_token = token
             packet = value.get('feedback')
-            self.model_tracker.accept(packet.get('modelNavigation') if isinstance(packet, dict) else None,
-                                      value.get('receivedAt'), now)
-            if self.model_tracker.current is None:
-              self._invalidate_model(self.model_tracker.reason)
+            if not is_no_observation(packet):
+              self.tracker.accept(packet, value.get('receivedAt'), now)
+              token = value.get('modelRouteCacheToken')
+              token = token if isinstance(token, str) and re.fullmatch(r'[0-9a-f]{32}', token) else None
+              if token != self.model_route_token:
+                self.model_tracker.clear_geometry()
+                self.model_route_stat = None
+              self.model_route_token = token
+              self.model_tracker.accept(packet.get('modelNavigation') if isinstance(packet, dict) else None,
+                                        value.get('receivedAt'), now)
+              if self.model_tracker.current is None:
+                self._invalidate_model(self.model_tracker.reason)
           else:
             self._invalidate_model('model_feedback_oversized')
       except (OSError, ValueError, TypeError, AttributeError):
