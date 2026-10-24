@@ -133,6 +133,18 @@ def _probability(values: list, index: int) -> float:
   return max(0.0, min(1.0, finite_float(values[index]))) if index < len(values) else 0.0
 
 
+def _lane_type(code: Any, probability: Any) -> str:
+  # Hyundai publishes color (0..3) * 10 + type (0..8); Xiaoge replaces
+  # only the type with 0/1. Reject reserved codes instead of coercing them.
+  if isinstance(code, bool) or not isinstance(code, int) or not 0 <= code <= 38 or code % 10 > 8:
+    return "unknown"
+  if isinstance(probability, bool) or not isinstance(probability, (int, float)) or not 0.3 < probability <= 1.0:
+    return "unknown"
+  # Match C4, including double/inner markings. The existing Navdy renderer
+  # treats unknown as dashed; do not infer a style from geometry alone.
+  return "dashed" if code % 10 == 0 else "solid"
+
+
 def navdy_model_geometry(model: Any) -> dict[str, Any]:
   position = getattr(model, "position", None)
   lanes = _items(getattr(model, "laneLines", None), 4)
@@ -324,4 +336,8 @@ def payload_from_messages(*, car_state: Any = None, selfdrive_state: Any = None,
     payload.update(geometry)
     if geometry:
       payload.update(navdy_lead_geometry(model, radar_state, longitudinal_plan))
+      probs = _items(getattr(model, "laneLineProbs", None), 3)
+      for index, side in ((1, "Left"), (2, "Right")):
+        payload[f"navLane{side}Type"] = _lane_type(getattr(car_state, f"{side.lower()}LaneLine", None),
+                                                 probs[index] if index < len(probs) else None)
   return payload
