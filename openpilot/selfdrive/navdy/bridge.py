@@ -16,11 +16,11 @@ import time
 
 from openpilot.selfdrive.navdy.navigation import FEEDBACK_PATH, STATUS_PATH
 from openpilot.selfdrive.navdy.transport import AdbTransport, LineReader, encode_frame
-from openpilot.selfdrive.navdy.bluetooth import BluetoothTransport, CONFIG_PATH, configured_connection
+from openpilot.selfdrive.navdy.bluetooth import BluetoothTransport, CONFIG_PATH, ServiceChannelCache, configured_connection
 from openpilot.selfdrive.navdy.connection import UsbProbe
 from openpilot.selfdrive.navdy.ambient import DoorMonitor, read_override, road_state
 from openpilot.selfdrive.navdy.model_navigation import ModelNavigationTracker, ModelRouteCache, age_model_feedback
-from openpilot.selfdrive.navdy.diagnostics import LinkDiagnostics
+from openpilot.selfdrive.navdy.diagnostics import LinkDiagnostics, public_error
 from openpilot.selfdrive.navdy.feedback import is_no_observation
 from openpilot.selfdrive.navdy.journal import LocalJournal
 from openpilot.selfdrive.navdy.vehicles import VehicleOverlay
@@ -219,6 +219,8 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
     candidate_index = 0
     failures = 0
     bluetooth_reconnect = BluetoothReconnect()
+    bluetooth_channels = ServiceChannelCache()
+    bluetooth_connect = None
     peer = None
     bluetooth_only = False
     config_error = ''
@@ -251,6 +253,7 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
             config_error = ''
           except (OSError, ValueError) as error:
             peer, config_error = None, str(error)[:160]
+          bluetooth_channels.configure(peer, bluetooth_only)
           if transport is not None and (old_policy != bluetooth_only or
                                         (transport_name == 'bluetooth' and peer != transport.peer)):
             diagnostics.record('policy_changed', transport=transport_name, bluetoothOnly=bluetooth_only)
@@ -302,10 +305,13 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
                 if peer is None:
                   raise ConnectionError(config_error or 'Bluetooth-only mode requires an enabled paired peer')
                 transport = BluetoothTransport(peer)
+                transport.channel_cache = bluetooth_channels
               else:
                 transport = AdbTransport()
               transport.connect()
             except (OSError, ValueError, subprocess.SubprocessError):
+              if transport_name == 'bluetooth':
+                bluetooth_connect = getattr(transport, 'connect_diagnostics', None)
               diagnostics.record('connect_failed', transport=transport_name,
                                   phaseMs=(time.monotonic() - diagnostics.phase_started) * 1000)
               if transport is not None:
@@ -323,10 +329,13 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
               diagnostics.record('connect_attempt', transport=transport_name)
               if transport_name == 'bluetooth':
                 transport = BluetoothTransport(target)
+                transport.channel_cache = bluetooth_channels
                 transport.connect()
               else:
                 transport = SshTransport(target)
                 transport.connect()
+            if transport_name == 'bluetooth':
+              bluetooth_connect = getattr(transport, 'connect_diagnostics', None)
             connected_at = time.monotonic()
             diagnostics.record('transport_open', transport=transport_name, connectedAt=connected_at)
             # Discovery/service startup can block. Drain fresh messages before sending.
@@ -419,12 +428,15 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
                                'lastHandover': last_handover, 'wirelessConfigured': peer is not None,
                                'transportPolicy': 'bluetooth_only' if bluetooth_only else 'usb_first',
                                'wireless': getattr(transport, 'last_exchange', None),
+                               'bluetoothConnect': bluetooth_connect,
                                'modelNavigation': {'routeReady': bool(model_navigation.points),
                                                    'reason': model_navigation.reason},
                                'diagnostics': diagnostics.snapshot(),
                                'reason': ''})
           diagnostics.end_phase()
         except (OSError, ValueError, subprocess.SubprocessError) as error:
+          if transport_name == 'bluetooth' and transport is not None and phase == 'connect':
+            bluetooth_connect = getattr(transport, 'connect_diagnostics', None)
           fast_retry = (transport_name == 'bluetooth' and phase == 'exchange' and isinstance(error, OSError)
                         and bluetooth_reconnect.take_fast_retry(time.monotonic()))
           bluetooth_reconnect.reset_session()
@@ -448,8 +460,9 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
           atomic_json(status, {'updatedAt': time.monotonic(), 'connected': False, 'transport': transport_name,
                                'transportPolicy': 'bluetooth_only' if bluetooth_only else 'usb_first',
                                'retryInSeconds': retry_delay, 'wirelessConfigured': peer is not None,
+                               'bluetoothConnect': bluetooth_connect,
                                'diagnostics': diagnostics.snapshot(),
-                               'reason': str(error)[:200]})
+                               'reason': public_error(error) if transport_name == 'bluetooth' else str(error)[:200]})
           next_attempt = time.monotonic() + retry_delay
         time.sleep(max(0, DISPLAY_INTERVAL - (time.monotonic() - tick)))
     finally:
@@ -458,6 +471,7 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
       with ExitStack() as cleanup:
         cleanup.callback(diagnostics.close)
         cleanup.callback(lambda: atomic_json(status, {'updatedAt': time.monotonic(), 'connected': False, 'reason': 'bridge_stopped',
+                                                      'bluetoothConnect': bluetooth_connect,
                                                       'diagnostics': diagnostics.snapshot()}))
         cleanup.callback(diagnostics.record, 'bridge_stopped', timings=diagnostics.timings,
                          exchanges=diagnostics.exchanges, replies=diagnostics.replies, feedback=diagnostics.feedback_stats)

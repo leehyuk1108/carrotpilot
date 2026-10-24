@@ -1,6 +1,8 @@
 """Encrypted, explicitly paired Navdy full-state link. No pairing or radio resets."""
 from __future__ import annotations
 
+from contextlib import contextmanager
+import errno
 import json
 import math
 from pathlib import Path
@@ -21,6 +23,7 @@ RESPONSE = struct.Struct('!4sIIIqIIII')
 MAX_BYTES = 32768
 TTL_US = 500000
 EXCHANGE_TIMEOUT = 0.65
+CHANNEL_CACHE_SECONDS = 60.0
 MAC_PATTERN = re.compile(r'(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}')
 
 
@@ -114,8 +117,38 @@ def age_feedback(value, elapsed_ms):
   return value
 
 
+class ServiceChannelCache:
+  """One process-local SDP hint, never a pairing or authentication grant."""
+  def __init__(self):
+    self.configuration = None
+    self.entry = None
+
+  def clear(self):
+    self.entry = None
+
+  def configure(self, peer, bluetooth_only):
+    configuration = (peer, bluetooth_only)
+    if configuration != self.configuration or peer is None:
+      self.clear()
+    self.configuration = configuration
+
+  def get(self, peer):
+    if self.entry is not None:
+      cached_peer, channel, discovered_at = self.entry
+      if cached_peer == peer and 0 <= time.monotonic() - discovered_at < CHANNEL_CACHE_SECONDS:
+        return channel
+    self.clear()
+    return None
+
+  def remember(self, peer, channel, discovered_at):
+    # Called only after encrypted HELLO; reconnects must not slide the SDP age.
+    self.clear()
+    if 1 <= channel <= 30 and 0 <= time.monotonic() - discovered_at < CHANNEL_CACHE_SECONDS:
+      self.entry = (peer, channel, discovered_at)
+
+
 class BluetoothTransport:
-  def __init__(self, peer, *, command=subprocess.run, socket_factory=socket.socket):
+  def __init__(self, peer, *, command=subprocess.run, socket_factory=socket.socket, channel_cache=None):
     if not MAC_PATTERN.fullmatch(peer):
       raise ValueError('Invalid Navdy Bluetooth address')
     self.peer = peer.upper()
@@ -127,32 +160,88 @@ class BluetoothTransport:
     self.lease_received_ns = 0
     self.last_exchange = None
     self.pipeline = None
+    self.channel_cache = channel_cache if channel_cache is not None else ServiceChannelCache()
+    self.connect_diagnostics = None
+
+  @contextmanager
+  def _connect_phase(self, phase):
+    started = time.monotonic()
+    step = {'phase': phase, 'ok': False}
+    self.connect_diagnostics['steps'].append(step)
+    try:
+      yield
+      step['ok'] = True
+    finally:
+      step['elapsedMs'] = round(max(0., time.monotonic() - started) * 1000, 2)
+
+  def _check_pairing(self):
+    with self._connect_phase('bluetoothctl'):
+      info = self.command(['bluetoothctl', 'info', self.peer], capture_output=True, text=True, timeout=3, check=True).stdout
+      if not re.search(r'^\s*Paired: yes\s*$', info, re.MULTILINE):
+        raise ConnectionError('Configured Navdy is not paired; pairing is never automatic')
+
+  def _discover_channel(self):
+    with self._connect_phase('sdp'):
+      sdp = self.command(['sdptool', 'browse', self.peer], capture_output=True, text=True, timeout=5, check=True).stdout
+      channel = service_channel(sdp)
+    return channel, time.monotonic()
+
+  def _open_socket(self):
+    with self._connect_phase('socket_create'):
+      self.conn = self.socket_factory(socket.AF_BLUETOOTH, socket.SOCK_STREAM, socket.BTPROTO_RFCOMM)
+    with self._connect_phase('security_request'):
+      self.conn.setsockopt(274, 4, bytes([2, 0]))  # SOL_BLUETOOTH, BT_SECURITY_MEDIUM
+
+  def _connect_socket(self, channel):
+    with self._connect_phase('socket'):
+      self.conn.settimeout(5)
+      self.conn.connect((self.peer, channel))
 
   def connect(self):
     self.close()
-    if not hasattr(socket, 'AF_BLUETOOTH'):
-      raise OSError('Native Bluetooth RFCOMM is unavailable on this OS')
-    info = self.command(['bluetoothctl', 'info', self.peer], capture_output=True, text=True, timeout=3, check=True).stdout
-    if not re.search(r'^\s*Paired: yes\s*$', info, re.MULTILINE):
-      raise ConnectionError('Configured Navdy is not paired; pairing is never automatic')
-    sdp = self.command(['sdptool', 'browse', self.peer], capture_output=True, text=True, timeout=5, check=True).stdout
-    channel = service_channel(sdp)
-    self.conn = self.socket_factory(socket.AF_BLUETOOTH, socket.SOCK_STREAM, socket.BTPROTO_RFCOMM)
+    self.connect_diagnostics = {'cachedChannel': False, 'steps': []}
     try:
-      self.conn.setsockopt(274, 4, bytes([2, 0]))  # SOL_BLUETOOTH, BT_SECURITY_MEDIUM
-      self.conn.settimeout(5)
-      self.conn.connect((self.peer, channel))
-      if self.conn.getsockopt(274, 4, 2)[0] < 2:
-        raise ConnectionError('Navdy requires an encrypted paired link')
-      marker, lease, ttl, bound = HELLO.unpack(receive(self.conn, HELLO.size, time.monotonic() + 2))
-      if marker not in (b'NVH1', b'NVH2') or (lease, ttl, bound) != (0, TTL_US, MAX_BYTES):
-        raise ValueError('Unsupported Navdy wireless handshake')
+      if not hasattr(socket, 'AF_BLUETOOTH'):
+        raise OSError('Native Bluetooth RFCOMM is unavailable on this OS')
+      self._check_pairing()
+      channel = self.channel_cache.get(self.peer)
+      cached = channel is not None
+      self.connect_diagnostics['cachedChannel'] = cached
+      discovered_at = None
+      if not cached:
+        channel, discovered_at = self._discover_channel()
+      self._open_socket()
+      try:
+        self._connect_socket(channel)
+      except OSError as error:
+        # Retry discovery once only for a cached socket failure, never a
+        # security/HELLO failure. There is no radio reset or automatic pairing.
+        unavailable = (isinstance(error, (ConnectionRefusedError, TimeoutError, ConnectionResetError, ConnectionAbortedError))
+                       or error.errno in (errno.EHOSTDOWN, errno.EHOSTUNREACH))
+        if not cached or not unavailable:
+          raise
+        self.channel_cache.clear()
+        self.close()
+        self._check_pairing()
+        channel, discovered_at = self._discover_channel()
+        self._open_socket()
+        self._connect_socket(channel)
+      with self._connect_phase('security'):
+        if self.conn.getsockopt(274, 4, 2)[0] < 2:
+          raise ConnectionError('Navdy requires an encrypted paired link')
+      with self._connect_phase('hello'):
+        marker, lease, ttl, bound = HELLO.unpack(receive(self.conn, HELLO.size, time.monotonic() + 2))
+        if marker not in (b'NVH1', b'NVH2') or (lease, ttl, bound) != (0, TTL_US, MAX_BYTES):
+          raise ValueError('Unsupported Navdy wireless handshake')
       self.lease, self.sequence = lease, 0
       self.lease_received_ns = time.monotonic_ns()
       if marker == b'NVH2':
         from openpilot.selfdrive.navdy.bluetooth_pipeline import SnapshotPipeline
         self.pipeline = SnapshotPipeline(self.conn, self.lease_received_ns)
+      if discovered_at is not None:
+        self.channel_cache.remember(self.peer, channel, discovered_at)
     except Exception:
+      self.channel_cache.clear()
       self.close()
       raise
 
