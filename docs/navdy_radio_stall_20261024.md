@@ -113,3 +113,112 @@ that the remaining transport interruption is not fixed by the setup patch.
 The phone service remained alive with new state records and no diagnostic
 drops/I/O errors. No active snoop descriptor or temporary capture process
 remained; the trial tmux session exited. Phone connection itself is untested.
+
+## Follow-up: direction and completion accounting
+
+The October 24 late-evening investigation retains the installed upper-overlay
+fix `59625f304a` and Navdy APK SHA256
+`d1268a7bebbecd34e4ca48f1abac2518138f5048ab14d912c9eda53758c26651`.
+The new paired application-journal collection is private
+`output/journal-dropout-20261024/capture-232422/`. The exact older HCI traces
+remain in `output/radio-stall-20261024/{baseline-r2,policy-r1}/`.
+
+An independent integer-timestamp decoder reassembled both L2CAP directions,
+validated RFCOMM FCS and application zlib/CRC/length, and byte-matched eight
+delayed requests plus four preceding request/ACK clock-bound pairs. Sequence
+numbers alone are insufficient: one sequence is reused after a new handshake.
+Twelve offline decoder/regression tests pass. This is recorded-input analysis,
+not a new radio test or a claim that both device clocks are synchronized.
+
+| Delayed pair | Arrival relative to original phone page timeout | Transit bounds |
+| --- | --- | --- |
+| baseline 775 / 776 | +46 / +61 ms | 2.54-2.79 s |
+| baseline 213 / 214 | -1.13 / +1.90 s | 2.31-5.20 s |
+| baseline 258 / 259 | +43 / +58 ms | 1.59-1.84 s |
+| policy 735 / 736 | -2.48 / -2.10 s | 2.46-2.76 s |
+
+The assertion that delivery resumes *only* when phone paging ends is therefore
+false. One request arrives during the next page attempt. At least four of
+eight baseline pages and six of eight policy-trial pages have no intersecting
+request-reception gap of 1.5 seconds or longer. Paging remains correlated with
+the observed closures, but paging alone is not sufficient to cause one.
+
+During the gaps, Navdy sends RFCOMM DISC packets that reach Comma in a bounded
+0-104 ms. Separate ATT traffic and Navdy controller completion events also
+continue. These observations contradict a continuous whole-HCI/HAL freeze;
+they do not exclude selective processing, radio retries, controller scheduling
+or controller-host flow-control trouble. The delayed requests arrive 375-1391
+ms after the first local DISC transmission, not immediately on that host write.
+
+Comma completion events do not identify the individual transmitted request.
+The first subsequent same-handle completion report is already 1.59-2.75 seconds
+after the corresponding request transmission. Assuming an empty initial credit
+queue and FIFO reporting still does not establish reception-before-host-delivery
+as the cause. Those assumptions are not demonstrated by a mid-connection trace.
+Balanced total TX/completion counts do not establish an empty initial queue.
+
+Neither capture contains Host Number Of Completed Packets, Host Buffer Size or
+Set Controller To Host Flow Control commands. Initialization occurred before
+capture, so absence cannot establish the configured receive-flow-control mode.
+Likewise, a zero Failed Contact Counter is not an RF retry/stall exclusion: that
+counter concerns auto-flushed packets, not all retransmissions.
+
+The retained application-log closure while the phone state was CONNECTED
+(session 452) aligns with a recorded bridge stop during our earlier deployment.
+It is not evidence of a spontaneous phone-connected radio failure. Conversely,
+the user's driving symptoms cannot be dismissed: the retained onroad resets
+still lack paired HCI evidence. Historical session numbers must be joined with
+time/run identity, not counted across process restarts as unique incidents.
+
+No global page timeout, reconnect interval, role, QoS, stale TTL or socket
+deadline was changed in this follow-up. A second role trial and a QoS trial
+were considered but not run: the existing evidence does not distinguish their
+effects sufficiently, and real phone reconnection is currently unavailable.
+This follow-up narrows the evidence; it does **not** fix the remaining radio
+stall or establish which controller/component is responsible.
+
+## Separate phone connection ownership defect
+
+An isolated shell-UID ART process loaded the exact installed APK, without an
+application Context, Bluetooth adapter, actual socket, service lifecycle or
+running Looper. It invoked the production `RemoteDevice` and `SocketConnection`
+methods with two distinct connection objects and a counting listener. Five
+deterministic cases passed their **baseline-reproduction** assertions:
+
+| Injected terminal callback | Replacement still active | Forwarded terminal events |
+| --- | --- | --- |
+| stale A failure after B installed | yes | 1 failure |
+| stale A disconnect after B installed | yes | 1 disconnect |
+| current connection failure | no, active cleared | 1 failure |
+| current connection disconnect | no, active cleared | 1 disconnect |
+| explicit RemoteDevice disconnect | no, active cleared | 1 disconnect |
+
+The first two are defects, not fix passes. The real baseline only guards removal
+of the active connection; it still forwards the obsolete connection's terminal
+event. Static service inspection shows failure can request RECONNECTING and
+queued disconnect handling calls `device.stopLink()` without the original
+connection identity. The native probe did **not** execute those service actions,
+reproduce a real worker race or establish a connection to the HCI stalls.
+
+A correct fix must also distinguish a legitimate explicitly retiring connection
+(the baseline clears active before its callback), and protect the queued-event
+consumer if B replaces A after the event is enqueued. Adding only
+`source != active` rejection would break normal disconnect/reconnect. Extending
+locks into service/link callbacks without checking their lock ordering is not
+an acceptable substitute. No such incomplete patch was installed.
+
+The reviewed probe is retained in the local Navdy repository at
+`tools/connection-ownership-probe/`. Its test JAR SHA256 is
+`a7dcf439cc307b611cce84334b61c072d1824215d370913d6c95c82f9e67d320`;
+the runtime classes come from the APK, not replacement stubs. The parent checked
+the helper's synchronous dispatch and initialization paths in addition to the
+Claude static review. The fixture's synthetic status assignments are not
+real phone connection evidence.
+
+HUD PID 2581 and phone-service PID 2601, pairing/configuration hashes and the
+Bluetooth-only transport policy remained unchanged. The temporary test JAR,
+its own ART cache and any exact-name probe process were cleaned up. The final
+status was fresh and connected, session 603, received/applied sequence 1989,
+USB updates zero. Earlier real reset/setup-timeout records remain: instantaneous
+reconnection is not proof of stability. No runtime code or APK update occurred
+in this follow-up, and actual phone reconnection/driving remain unverified.
