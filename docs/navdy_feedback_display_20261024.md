@@ -106,6 +106,29 @@ route data and device logs are not committed here.
 
 ## Remaining acceptance criteria
 
+### Later observation supersedes any whole-session stability claim
+
+At 19:17 KST, after the user's phone had left and the Mac had changed networks,
+SSH through the verified Tailscale address still reached the same Comma and
+runtime commit. The saved 16:54:19-19:17:56 interval contains 55 exchange
+failures plus 11 failed connection attempts. All 66 failure records report
+offroad. Matching Navdy sessions show 55 `read_header` deadline closures.
+The nearest preceding phone-state sample (at most ten seconds old) was
+RECONNECTING for 54 and LISTENING for one; this is correlation, not proof of
+the controller/air-link/receiver root cause or an explanation of the earlier
+phone-connected driving incident.
+
+All captured failure snapshots have zero short-write and blocked-write counts.
+Thus the bounded-send correction did not resolve this later interruption path.
+The new live counter recorded 72 no-observation responses with zero incomplete
+responses. Journal drops/storage errors remained zero. The early three-minute
+pass must not be presented as proof that all flicker has been fixed.
+
+The user confirmed that phone/Navdy reconnection is not currently possible.
+No further radio-policy, phone-search or receiver-timeout experiment was
+deployed without that end-to-end validation. Bluetooth-only transport, phone
+automatic reconnection and existing expiration deadlines remain enabled.
+
 The reported engaged-drive display/ambient flicker and intermittent missing
 camera still require an actual occurrence with matching phone, Navdy and Comma
 logs. New counters separate no-observation ACKs, genuine clears, partial writes,
