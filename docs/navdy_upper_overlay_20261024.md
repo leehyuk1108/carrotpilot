@@ -71,8 +71,59 @@ duplicates, stale inputs and preserved scalar fields. Final source commit is
 
 ## Verification limits
 
+### Actual installed renderer
+
+The parent executed an isolated helper as Android shell uid 2000 on Navdy,
+using the unchanged installed APK and its 13 vehicle bitmap resources. Six
+recorded old/new payloads passed native synchronous visibility/count/pixel
+checks: folded-path GONE becomes VISIBLE, the surrounding-vehicle sample
+changes zero to one car, and the lead sample changes zero to two. Parent
+inspected PNGs and verified their hashes. HUD/phone service PIDs, APK and
+pairing/configuration were unchanged; no new HUD start appeared in the logcat
+diff. Bluetooth remained the data owner. Claude reviewed the exact production
+diff, helper, actual renderer references and guarded runner before execution.
+
+This is a separate unattached 320x100 software canvas with no Looper loop,
+not a production screen recording or animation-timing test. No live receiver
+or simulated vehicle publication is used. Printed isolation flags are contract
+constants; process/hash/log checks are the independent evidence. An initial
+argument-order error stopped before helper class loading. Moving `--nice-name`
+after `/system/bin` succeeded without source changes.
+
+### Runtime scope
+
 This fixes demonstrated current-input display rejection. It does not guarantee
 that every detected vehicle is visible: normal confidence/range/freshness gates
 remain. A completely unusable current model still clears geometry. No stale
 object retention is introduced to conceal radio loss. Physical onroad viewing
 and the separate phone-connected radio-stall investigation remain distinct.
+
+The existing projection can still shift laterally beyond approximately 51.4 m
+when changing path coverage toggles its path-aware formula. Lanes and cars
+remain aligned; this is not an empty-array clear. A synthetic 70 m comparison
+reproduces the shared shift, but this drive has no corresponding optical
+evidence. Do not broaden this fix into an unvalidated projection redesign.
+
+## Device application
+
+Pushed to `traverse/WIP-FR` and fast-forwarded the identified Comma after fresh
+offroad/ignition-OFF/inactive guards. All changed tracked files match the commit;
+existing generated DBC modifications and untracked build/model files remain.
+Only the bridge restarted (834976 to 912103); carrot_man remained 741567.
+The Navdy APK and both pairing/configuration hashes stayed unchanged.
+
+The device has no pytest. Rather than install packages into the running system,
+four native Python geometry smoke checks passed. The five Mac-excluded native
+DBC cases were also executed directly from their unchanged AST function bodies,
+omitting only pytest decorators and using the original three-row parameter
+matrix. All five passed with in-memory CAN packing/parsing, no CAN publication.
+This is distinct from a pytest run or real vehicle door/control validation.
+
+The first post-restart 60 seconds had 298/298 connected samples, session 579
+unchanged, no receiver-clear increase and fresh applied sequences. A later
+check reached session 581 after additional offroad exchange failures, then
+reconnected. Thus this display fix explicitly does NOT resolve radio stalls.
+Automatic persistent diagnostics remain enabled. The isolated native helper
+exited; its own temporary compiled/image files were collected and removed,
+restoring Navdy free storage to the pretest 196.2 MiB. No production app restart
+or phone policy change was made.
