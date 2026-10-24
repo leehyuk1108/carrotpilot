@@ -7,7 +7,7 @@ import zlib
 import pytest
 
 from openpilot.selfdrive.navdy import bridge
-from openpilot.selfdrive.navdy.display import navdy_lead_geometry
+from openpilot.selfdrive.navdy.display import navdy_lead_geometry, navdy_model_line
 from openpilot.selfdrive.navdy.tests.test_bridge import Messages
 from openpilot.selfdrive.navdy.tests.test_display import lead, model, payload, selfdrive
 from openpilot.selfdrive.navdy.transport import encode_frame
@@ -159,6 +159,98 @@ def test_path_fallback_and_known_outer_boundary():
   assert confirmed(radar=data([point(lateral=8.)]))['navVehicles'] == []
   m.position.x = []
   assert confirmed(m=m)['navVehicles'] == []
+
+
+@pytest.mark.parametrize('distance', [10., 30., 51., 52., 70., 80.])
+@pytest.mark.parametrize('offset,lane', [(-3.6, 'left'), (0., 'center'), (3.6, 'right')])
+def test_short_path_vehicles_match_lane_projection(distance, offset, lane):
+  m = model()
+  m.position.x, m.position.y = [0., 10., 20.], [0., .5, 1.]
+  for line in m.laneLines:
+    line.y = [y + x * .05 for x, y in zip(line.x, line.y, strict=True)]
+  lateral = distance * .05 + offset
+  radar = data([point(distance=distance, lateral=-lateral)])
+  before = copy.deepcopy(m)
+  result = confirmed(radar=radar, m=m)
+  assert len(result['navVehicles']) == 1
+  actual = result['navVehicles'][0]
+  expected = navdy_model_line([0., distance], [offset, lateral],
+                              path_x_values=m.position.x, path_y_values=m.position.y)[-2:]
+  assert [actual['screenX'], actual['screenY']] == [max(4., min(316., expected[0])), expected[1]]
+  assert actual['lane'] == lane
+  assert actual['lateralM'] == round(lateral, 2)
+  assert actual['distanceM'] == distance
+  assert m == before
+
+
+@pytest.mark.parametrize('mutation', [
+  'low_probability', 'nonfinite_probability', 'missing_probability', 'missing_lanes',
+  'short_left', 'short_right', 'before_lane_start', 'reversed_x', 'nonfinite_y',
+])
+def test_outside_path_requires_supported_current_lane(mutation):
+  m = model()
+  m.position.x, m.position.y = [0., 20.], [0., 0.]
+  if mutation == 'low_probability':
+    m.laneLineProbs[1] = .299
+  elif mutation == 'nonfinite_probability':
+    m.laneLineProbs[2] = math.nan
+  elif mutation == 'missing_probability':
+    m.laneLineProbs = m.laneLineProbs[:2]
+  elif mutation == 'missing_lanes':
+    m.laneLines = m.laneLines[:2]
+  elif mutation in ('short_left', 'short_right'):
+    line = m.laneLines[1 if mutation == 'short_left' else 2]
+    line.x, line.y = line.x[:3], line.y[:3]
+  elif mutation == 'before_lane_start':
+    for line in m.laneLines:
+      line.x, line.y = line.x[16:], line.y[16:]
+  elif mutation == 'reversed_x':
+    m.laneLines[1].x[1] = -1.
+    m.laneLines[1].x[2] = 0.
+  elif mutation == 'nonfinite_y':
+    m.laneLines[2].y = [math.nan] * len(m.laneLines[2].y)
+  assert confirmed(radar=data([point(lateral=0.)]), m=m)['navVehicles'] == []
+
+
+def test_no_lane_confidence_only_allows_existing_in_path_fallback():
+  m = model()
+  m.position.x, m.position.y = [0., 20.], [0., 0.]
+  m.laneLineProbs = [0.] * 4
+  assert confirmed(radar=data([point(distance=10.)]), m=m)['navVehicles']
+  assert confirmed(radar=data([point(distance=30.)]), m=m)['navVehicles'] == []
+
+
+@pytest.mark.parametrize('display_data', [False, True])
+def test_short_path_preserves_lead_dedup_and_non_vehicle_fields(display_data):
+  m = model()
+  m.position.x, m.position.y = [0., 20.], [0., 0.]
+  leads = NS(leadOne=lead(dRel=10.))
+  matching = point(99 if display_data else 42, 10., 0., -2.)
+  points = [matching, matching, point(2, 70., 3.6)]
+  radar = data(points)
+  radar.hasDisplayData, radar.displayPoints = display_data, points
+  kwargs = {'longitudinal_plan': NS(longitudinalPlanSource='lead0'),
+            'car_control': NS(latActive=True, longActive=True), 'car_output': NS(actuatorsOutput=NS(accel=-.5))}
+  baseline = payload(model=m, radar_state=leads, **kwargs)
+  result = confirmed(radar=radar, m=m, leads=leads, **kwargs)
+  assert len(result['navVehicles']) == 2
+  assert result['navVehicles'][-1] == baseline['navVehicles'][0]
+  assert result['navVehicles'][0]['trackId'] == 2
+  assert {k: v for k, v in result.items() if k != 'navVehicles'} == {k: v for k, v in baseline.items() if k != 'navVehicles'}
+
+
+def test_short_path_fallback_never_holds_old_lane_or_radar_data():
+  m = model()
+  m.position.x, m.position.y = [0., 20.], [0., 0.]
+  overlay = VehicleOverlay()
+  assert confirmed(overlay, m=m)['navVehicles']
+  m.laneLineProbs[1] = .1
+  assert render(overlay, timestamp=100.3, m=m)['navVehicles'] == []
+  m.laneLineProbs[1] = .9
+  assert render(overlay, data([]), timestamp=100.4, m=m)['navVehicles'] == []
+  assert render(overlay, timestamp=100.5, m=m)['navVehicles'] == []
+  assert render(overlay, timestamp=100.6, m=m)['navVehicles']
+  assert render(overlay, timestamp=100.6, now=100.951, m=m)['navVehicles'] == []
 
 
 def test_track_reuse_jump_and_clock_rollback_require_new_confirmation():

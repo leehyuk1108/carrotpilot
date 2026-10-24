@@ -134,7 +134,7 @@ class VehicleOverlay:
       distance, lateral = track['dRel'], track['yRel']
       lane = vehicle_lane(model, distance, lateral)
       path_y = model_line_y_at(getattr(model, 'position', None), distance)
-      if not lane or path_y is None:
+      if not lane:
         continue
       # Preserve actual lead positions/highlights; raw points only fill in
       # additional vehicles. Display streams may assign independent IDs; use

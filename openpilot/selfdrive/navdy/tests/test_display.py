@@ -192,6 +192,73 @@ class TestDisplay:
     assert "navRoadEdgeLeft" not in navdy_model_geometry(broken)
     assert "navRoadEdgeRight" not in navdy_model_geometry(broken)
 
+  @pytest.mark.parametrize("tail", [21.8, 22.0])
+  def test_folded_or_stopped_path_keeps_only_current_forward_prefix(self, tail):
+    m = model()
+    m.position = NS(x=[0., 5., 15., 22., tail, 30.], y=[0., 0.1, 0.3, 0.5, 9., 12.])
+    expected = copy.deepcopy(m)
+    expected.position.x = expected.position.x[:4]
+    expected.position.y = expected.position.y[:4]
+    geometry = navdy_model_geometry(m)
+    assert geometry and geometry == navdy_model_geometry(expected)
+    assert model_line_y_at_values(m.position.x, m.position.y, 10.) == pytest.approx(.2)
+    assert model_line_y_at_values(m.position.x, m.position.y, 25.) is None
+    assert m.position.x == [0., 5., 15., 22., tail, 30.]
+    assert m.position.y[-2:] == [9., 12.]
+
+  def test_degenerate_prefix_does_not_rejoin_later_forward_points(self):
+    for xs in ([0., 0., 20.], [20., 10., 30.], [0.]):
+      assert navdy_model_line(xs, [0.] * len(xs)) == []
+      assert model_line_y_at_values(xs, [0.] * len(xs), 15.) is None
+
+  @pytest.mark.parametrize("origin", [0., .00005])
+  def test_negative_submillimeter_origin_jitter_preserves_current_forward_path(self, origin):
+    xs, ys = [0., origin, -.00055, .002, 10.], [0., 0., -.000007, .00001, .2]
+    if origin == 0.:
+      xs, ys = xs[1:], ys[1:]
+    kept = [(x, y) for x, y in zip(xs, ys, strict=True) if x >= 0.]
+    assert navdy_model_line(xs, ys) == navdy_model_line([p[0] for p in kept], [p[1] for p in kept])
+    assert model_line_y_at_values(xs, ys, 5.) is not None
+
+  @pytest.mark.parametrize("xs,ys", [
+    ([0., -.002, 10.], [0., 0., 0.]),
+    ([0., -.0005, 10.], [0., .002, 0.]),
+    ([0., -.0005, 10.], [0., math.nan, 0.]),
+    ([0., 1., -.0005, 10.], [0.] * 4),
+  ])
+  def test_origin_jitter_exception_never_bridges_a_real_gap(self, xs, ys):
+    assert model_line_y_at_values(xs, ys, 5.) is None
+
+  @pytest.mark.parametrize("bad", [math.nan, math.inf, -math.inf, 101., -101.])
+  def test_invalid_sample_never_joins_disconnected_valid_segments(self, bad):
+    xs, ys = [0., 5., 10., 15.], [0., 1., bad, 3.]
+    assert navdy_model_line(xs, ys) == navdy_model_line(xs[:2], ys[:2])
+    assert model_line_y_at_values(xs, ys, 2.5) == .5
+    assert model_line_y_at_values(xs, ys, 12.) is None
+    assert model_line_y_at_values([0., 5., math.nan, 15.], [0.] * 4, 12.) is None
+
+  @pytest.mark.parametrize("distance", [10., 30., 51., 52., 70., 80.])
+  def test_lead_beyond_stopping_path_uses_same_projection_as_current_lanes(self, distance):
+    m = model()
+    m.position = NS(x=[0., 2., 5.], y=[0., 0., .1])
+    for lane_line in m.laneLines:
+      lane_line.y = [y + 1. for y in lane_line.y]
+    cars = payload(model=m, radar_state=NS(leadOne=lead(dRel=distance, yRel=-1.)))['navVehicles']
+    assert len(cars) == 1 and cars[0]['lane'] == 'center'
+    assert [cars[0]['screenX'], cars[0]['screenY']] == navdy_project_point(distance, 1.)
+    assert cars[0]['screenX'] == navdy_model_line([0., distance], [1., 1.],
+                                               path_x_values=m.position.x, path_y_values=m.position.y)[-2]
+    m.laneLineProbs = [0.] * 4
+    assert not payload(model=m, radar_state=NS(leadOne=lead(dRel=distance)))['navVehicles']
+
+  def test_short_path_does_not_grant_leads_beyond_measured_lanes(self):
+    m = model()
+    m.position = NS(x=[0., 5.], y=[0., 0.])
+    for lane_line in m.laneLines:
+      lane_line.x = [0., 10.]
+      lane_line.y = lane_line.y[:2]
+    assert not payload(model=m, radar_state=NS(leadOne=lead(dRel=30.)))['navVehicles']
+
   def test_leads_only_visible_one_and_two_no_tracks_or_warnings(self):
     radar = NS(leadOne=lead(), leadTwo=lead(dRel=20, yRel=3.6, radarTrackId=43),
                leadsLeft=[lead()] * 100, leadCutInRisk=lead())

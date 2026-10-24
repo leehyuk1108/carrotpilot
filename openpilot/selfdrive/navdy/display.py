@@ -72,11 +72,18 @@ def _model_points(x_values: Any, y_values: Any) -> list[tuple[float, float]]:
   points = []
   for raw_x, raw_y in zip(_items(x_values, MAX_MODEL_SAMPLES), _items(y_values, MAX_MODEL_SAMPLES), strict=False):
     x, y = finite_float(raw_x, math.nan), finite_float(raw_y, math.nan)
-    if math.isfinite(x) and math.isfinite(y) and 0.0 <= x <= 10000.0 and abs(y) <= 100.0:
-      if points and x <= points[-1][0]:
-        return []
-      points.append((x, y))
-  return points
+    # Preserve sub-millimeter negative origin jitter at standstill, not gaps
+    # in an established forward trajectory or invalid/nonfinite samples.
+    if points and -0.001 <= x < 0.0 and points[-1][0] <= 0.001 and abs(y - points[-1][1]) <= 0.001:
+      continue
+    if not (math.isfinite(x) and math.isfinite(y) and 0.0 <= x <= 10000.0 and abs(y) <= 100.0):
+      break
+    if points and x <= points[-1][0]:
+      # A stopping/turning trajectory can fold back at its far end. Keep
+      # only this frame's unambiguous forward prefix, never sort the tail.
+      break
+    points.append((x, y))
+  return points if len(points) >= 2 else []
 
 
 def model_line_y_at_values(x_values: Any, y_values: Any, distance_m: float) -> float | None:
@@ -192,8 +199,10 @@ def navdy_lead_geometry(model: Any, radar_state: Any, longitudinal_plan: Any = N
       continue
     path_y = model_line_y_at(getattr(model, "position", None), distance)
     lane = _lead_lane(model, distance, lateral)
-    if path_y is None or not lane:
+    if not lane:
       continue
+    # Lanes can extend beyond the time-based stopping trajectory. Match their
+    # existing projection there, using the measured lateral coordinate directly.
     screen = navdy_project_point(distance, lateral, path_y)
     if not screen:
       continue
