@@ -39,6 +39,8 @@ On a fresh install, `Tools > Web Settings > Layout` starts with **Area 1 full sc
 
 ### C4 display selection: new ui
 
+In new ui, lane lines and road edges are continuous white outlines without lane-type, engagement or steering-torque color changes. Confidence-based opacity and lane geometry remain; the central driving path and lead-bar colors are unchanged. Navdy still receives the original lane types and solid/dashed markings. OFF restores the legacy C4 presentation.
+
 ON uses the full 536×240 display. The right-hand confidence ball and traffic-light indicator are hidden and their reserved 60px column is removed. Camera projection, lanes, front-vehicle markers, BSM and the HUD share the full width. OFF restores the original 476px camera area and right-hand status column. This is a display change only; signal detection, alerts and control behavior remain unchanged.
 
 **Display → On-screen Info → new ui** (`NewUi`) defaults to OFF. ON selects the Wayon/sunnypilot-style C4 onroad layout: a bottom steering wheel and torque bar, plus MAX set speed for about 2.5 seconds after a change. The persistent large speed/gear/debug panel and VISION status card are hidden. Camera, lanes, surrounding vehicles, radar/vision lead markers, blind-spot warnings, parking/hold timers and primary alerts remain. DM moves to the top left and yields to MAX, timers and alerts. Lateral-only engagement retains a green steering wheel. Cruise gap, driving mode, NAVI connection text, slowdown target speed and the old reason panel are hidden; select OFF when those details are needed.

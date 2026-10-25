@@ -476,6 +476,18 @@ class ModelRenderer(Widget):
 
   def _draw_lane_lines(self):
     """Draw lane lines and road edges"""
+    if getattr(ui_state, "new_ui", False):
+      # C4 keeps a neutral, continuous outline; Navdy still uses lane types.
+      for i, lane_line in enumerate(self._lane_lines):
+        if lane_line.projected_points.size:
+          alpha = int(np.clip(self._lane_line_probs[i], 0.0, 0.7) * 255)
+          draw_polygon(self._rect, lane_line.projected_points, rl.Color(255, 255, 255, alpha))
+      for i, road_edge in enumerate(self._road_edges):
+        if road_edge.projected_points.size:
+          alpha = int(np.clip(1.0 - self._road_edge_stds[i], 0.0, 0.7) * 255)
+          draw_polygon(self._rect, road_edge.projected_points, rl.Color(255, 255, 255, alpha))
+      return
+
     """Two closest lines should be green (lane line or road edges)"""
     for i, lane_line in enumerate(self._lane_lines):
       code = self._lane_marking_codes[i]
