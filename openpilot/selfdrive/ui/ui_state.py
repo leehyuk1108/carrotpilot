@@ -273,6 +273,8 @@ class Device:
     self._interactive_timeout_callbacks: list[Callable] = []
     self._prev_timed_out = False
     self._awake: bool = True
+    from openpilot.selfdrive.ui.offroad_presentation import DoorWake
+    self._door_wake = DoorWake()
 
     self._offroad_brightness: int = BACKLIGHT_OFFROAD
     self._last_brightness: int = 0
@@ -308,8 +310,8 @@ class Device:
     if self._interaction_time <= 0:
       self._reset_interactive_timeout()
 
-    self._update_brightness()
     self._update_wakefulness()
+    self._update_brightness()
 
   def set_offroad_brightness(self, brightness: int | None):
     if brightness is None:
@@ -360,7 +362,8 @@ class Device:
     ignition_just_turned_off = not ui_state.ignition and self._ignition
     self._ignition = ui_state.ignition
 
-    if ignition_just_turned_off or any(ev.left_down for ev in gui_app.mouse_events):
+    door_opened = self._door_wake.poll(offroad=not ui_state.started and not ui_state.ignition)
+    if ignition_just_turned_off or door_opened or any(ev.left_down or ev.left_pressed for ev in gui_app.mouse_events):
       self._reset_interactive_timeout()
       self._brightness_timer = 20
 
