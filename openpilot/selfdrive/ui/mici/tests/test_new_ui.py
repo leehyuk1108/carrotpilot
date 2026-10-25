@@ -291,23 +291,25 @@ def test_badge_hides_missing_expired_and_neutral_navigation(scene, condition):
   assert s.badge.selected_deceleration(s.sm, 100) is None
 
 
-def test_badge_blinks_at_one_hz_keeps_text_and_does_not_move(scene):
+@pytest.mark.parametrize('source,label', [('cam', 'CAM'), ('atc', 'TURN')])
+def test_badge_blinks_white_green_at_one_hz_keeps_dark_text_and_does_not_move(scene, source, label):
   s = scene
   s.hud._set_speed_changed_time = -10
-  s.sm['carrotMan'] = NS(desiredSpeed=60, desiredSource='cam')
+  s.sm['carrotMan'] = NS(desiredSpeed=60, desiredSource=source)
   s.sm['longitudinalPlan'].cruiseTarget = 60
   boxes, colors = [], []
   for now in (10, 10.59, 10.7, 11.01):
     s.now[0] = now
     s.calls.clear()
     s.renderer.draw(s.rect, s.hud)
-    assert texts(s) == ['CAM']
+    assert texts(s) == [label]
+    assert tuple(next(call for call in s.calls if call[0] == 'draw_text_ex')[-1]) == (8, 24, 14, 255)
     _, box, roundness, segments, color = next(call for call in s.calls if call[0] == 'draw_rectangle_rounded')
     assert roundness == .3 and segments == 6
     boxes.append(box)
     colors.append(tuple(color))
   assert boxes == [s.module.rl.Rectangle(136, 162, 76, 26)] * 4
-  assert colors == [s.badge.DecelerationBadge.GREEN] * 2 + [s.badge.DecelerationBadge.IDLE, s.badge.DecelerationBadge.GREEN]
+  assert colors == [(32, 216, 106, 255)] * 2 + [(255, 255, 255, 255), (32, 216, 106, 255)]
   s.sm['carControl'].longActive = False
   s.calls.clear()
   s.renderer.draw(s.rect, s.hud)
@@ -322,7 +324,7 @@ def test_badge_blinks_at_one_hz_keeps_text_and_does_not_move(scene):
 
 
 @pytest.mark.parametrize('state', [None, ('ROUTE', False), ('CAM', False)])
-def test_badge_clears_during_dark_phase_and_restarts_green(scene, state):
+def test_badge_clears_during_white_phase_and_restarts_green(scene, state):
   s = scene
   badge = s.renderer._deceleration_badge
   badge.draw(s.rect, s.hud._font_semi_bold, ('ROUTE', True), 10.)

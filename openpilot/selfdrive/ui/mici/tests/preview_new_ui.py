@@ -1,5 +1,6 @@
 """Offline native Wayon HUD preview. Synthetic inputs, no device or publishers."""
 import argparse
+import importlib.util
 from pathlib import Path
 import sys
 import time
@@ -13,24 +14,36 @@ def main():
            'cam-active', 'cam-dim', 'cam-idle', 'route-active', 'route-idle',
            'turn-active', 'section-active', 'cap-max', 'cap-warning', 'cap-timer',
            'bsm-left', 'bsm-right', 'bsm-both', 'bsm-max', 'bsm-critical', 'bsm-timer',
-           'bsm-fade-in', 'bsm-fade-out', 'bsm-cleared', 'bsm-stale')
+           'bsm-fade-in', 'bsm-fade-out', 'bsm-cleared', 'bsm-stale',
+           'dm-face', 'dm-yaw', 'dm-warning', 'dm-phone', 'dm-stale')
   parser = argparse.ArgumentParser()
   parser.add_argument('--output', type=Path, required=True)
   parser.add_argument('--case', choices=cases, action='append', help='Render only these cases (repeatable).')
+  parser.add_argument('--wayon-dm-reference', type=Path, help='Compare using an original Wayon driver_state.py (DM cases only).')
   args = parser.parse_args()
   args.output.mkdir(parents=True, exist_ok=True)
 
   class SM(dict):
-    valid = dict.fromkeys(('carState', 'selfdriveState', 'carControl', 'carrotMan', 'longitudinalPlan'), True)
+    valid = dict.fromkeys(('carState', 'selfdriveState', 'carControl', 'carrotMan', 'longitudinalPlan',
+                          'driverMonitoringState', 'driverStateV2'), True)
     alive = valid.copy()
     recv_frame = dict.fromkeys(valid, 101)
     seen = valid.copy()
     recv_time = dict.fromkeys(valid, time.monotonic())
+    logMonoTime = dict.fromkeys(valid, int(time.monotonic() * 1e9))
+    def all_checks(self, services):
+      return all(self.valid[s] and self.alive[s] for s in services)
+  from openpilot.cereal import log
+  dm = log.DriverMonitoringState.new_message(activePolicy='vision')
+  dm.visionPolicyState.faceDetected = True
+  dm.visionPolicyState.awarenessPercent = 100
   car = NS(leftBlindspot=False, rightBlindspot=False, steeringAngleDeg=4, vCruise=100, gasPressed=False, brakePressed=False)
-  sm = SM(carState=car, carControl=NS(latActive=False, longActive=True), selfdriveState=NS(enabled=True),
+  sm = SM(carState=car, carControl=NS(latActive=False, longActive=True), selfdriveState=NS(enabled=True, alertSize=log.SelfdriveState.AlertSize.none),
           controlsState=NS(lateralControlState=NS(which=lambda: 'torqueState')), carOutput=NS(actuatorsOutput=NS(torque=-.45)),
-          carrotMan=NS(desiredSpeed=250, desiredSource='none'), longitudinalPlan=NS(cruiseTarget=100))
-  ui = NS(started=True, started_frame=100, status='engaged', is_metric=True, sm=sm, new_ui=True, share_data=False)
+          carrotMan=NS(desiredSpeed=250, desiredSource='none'), longitudinalPlan=NS(cruiseTarget=100),
+          driverMonitoringState=dm, driverStateV2=log.DriverStateV2.new_message(frameId=100))
+  ui = NS(started=True, started_frame=100, status='engaged', is_metric=True, sm=sm, new_ui=True, share_data=False,
+          always_on_dm=False, is_onroad=lambda: True)
   # Inject only UI inputs; keep real widgets, fonts, textures, filters and GPU draw calls.
   state_module = ModuleType('openpilot.selfdrive.ui.ui_state')
   state_module.ui_state = ui
@@ -41,6 +54,14 @@ def main():
   from openpilot.selfdrive.ui.mici.onroad.status_timer_renderer import StatusTimerRenderer
   from openpilot.selfdrive.ui.mici.onroad.status_timers import TimerDisplay
   from openpilot.selfdrive.ui.mici.onroad.vision_renderer import VisionRenderer
+  from openpilot.selfdrive.ui.mici.onroad.wayon_driver_preview import WayonDriverPreview
+
+  reference = None
+  if args.wayon_dm_reference:
+    assert args.case and all(c.startswith('dm-') and c != 'dm-stale' for c in args.case)
+    spec = importlib.util.spec_from_file_location('_wayon_original_dm', args.wayon_dm_reference)
+    reference = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(reference)
 
   gui_app.init_window('C4 new ui native preview', font_weights=[FontWeight.DISPLAY, FontWeight.SEMI_BOLD])
   real_clock = rl.get_time
@@ -57,6 +78,10 @@ def main():
     rect = rl.Rectangle(0, 0, 536, 240)
     selected_cases = args.case or cases
     for case in selected_cases:
+      driver = (reference.DriverStateRenderer() if reference else WayonDriverPreview()) if case.startswith('dm-') else None
+      dm.visionPolicyState.distractedTypes.phone = case == 'dm-phone'
+      dm.visionPolicyState.awarenessPercent = 90 if case == 'dm-warning' else 100
+      dm.visionPolicyState.pose.yaw = .25 if case == 'dm-yaw' else 0
       preview_time[0] = 10.
       renderer.reset()
       sm.alive['carState'] = True
@@ -89,11 +114,20 @@ def main():
           elif case == 'bsm-stale':
             sm.alive['carState'] = False
         sm.recv_time['carrotMan'] = time.monotonic()
+        sm.logMonoTime = dict.fromkeys(sm.logMonoTime, 0 if case == 'dm-stale' else int(time.monotonic() * 1e9))
+        sm['driverStateV2'].frameId += 1
         preview_time[0] = 10.7 if case == 'cam-dim' and frame > 0 else 10.
         rl.begin_drawing()
         rl.clear_background(rl.Color(22, 24, 26, 255))
         renderer.draw(rect, hud)
         vision.render(rect)
+        if driver is not None:
+          if reference:
+            driver.set_should_draw(True)
+            driver.set_position(16, 10)
+            driver.render()
+          else:
+            driver.draw_onroad(rect, False)
         if hud._status_timer_visible:
           timer.draw(rect, TimerDisplay('parking' if case in ('cap-timer', 'bsm-timer') else case, 83), 1.)
         if frame == frames - 1:

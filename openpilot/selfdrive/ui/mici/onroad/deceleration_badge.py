@@ -43,7 +43,7 @@ class DecelerationBadge:
   HEIGHT = 26
   PERIOD = 1.0
   GREEN = (32, 216, 106, 255)
-  IDLE = (48, 52, 58, 255)
+  WHITE = (255, 255, 255, 255)
 
   def __init__(self):
     self.reset()
@@ -63,11 +63,11 @@ class DecelerationBadge:
       self._active_since = now
     bright = active and (now - self._active_since) % self.PERIOD < 0.6
     box = rl.Rectangle(rect.x + 136, rect.y + rect.height - 78, self.WIDTH, self.HEIGHT)
-    rl.draw_rectangle_rounded(box, 0.3, 6, rl.Color(*(self.GREEN if bright else self.IDLE)))
+    rl.draw_rectangle_rounded(box, 0.3, 6, rl.Color(*(self.GREEN if bright else self.WHITE)))
     size = 18
     measured = measure_text_cached(font, label, size)
     size *= min(1, (self.WIDTH - 16) / max(1, measured.x))
     measured = measure_text_cached(font, label, size)
-    color = rl.Color(8, 24, 14, 255) if bright else rl.WHITE
+    color = rl.Color(8, 24, 14, 255)
     rl.draw_text_ex(font, label, rl.Vector2(box.x + (box.width - measured.x) / 2,
                                           box.y + (box.height - measured.y) / 2), size, 0, color)

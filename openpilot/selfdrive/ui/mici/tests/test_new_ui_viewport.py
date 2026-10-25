@@ -69,6 +69,7 @@ def view():
   obj._alert_renderer.timer_visible = False
   obj._alert_renderer.will_render = lambda: (None, True)
   obj._driver_state_renderer = NS(draw_onroad=lambda rect, alert, **kw: calls.append(('dm', rect, alert, kw)))
+  obj._wayon_driver_renderer = NS(draw_onroad=lambda rect, alert: calls.append(('wayon_dm', rect, alert)))
   obj._traffic_light = widget('signal')
   obj._traffic_light.is_visible = lambda: False
   obj._confidence_ball = widget('confidence')
@@ -97,7 +98,8 @@ def test_full_width_composition_and_legacy_restore(view, new_ui, mode, suppress)
     assert next(c[1] for c in v.calls if c[0] == name) == expected
   assert ('overlay', (suppress, mode, new_ui)) in v.calls
   assert {'dm', 'bookmark', 'uiDebug'} <= set(names)
-  assert next(c[-1] for c in v.calls if c[0] == 'dm') == {'top_left': new_ui}
+  assert next(c[2] for c in v.calls if c[0] == 'dm') == new_ui
+  assert next(c[2] for c in v.calls if c[0] == 'wayon_dm') == (not new_ui)
   if not suppress:
     fade = next(c for c in v.calls if c[0] == ('draw_texture_pro' if new_ui else 'draw_texture_ex'))
     if new_ui:
@@ -111,6 +113,19 @@ def test_legacy_signal_still_hides_confidence_ball(view):
   view.obj._render(None)
   names = [c[0] for c in view.calls]
   assert 'signal' in names and 'confidence' not in names
+
+
+@pytest.mark.parametrize('blocked_by', ['alert', 'timer', 'max'])
+def test_wayon_dm_yields_to_alert_timer_and_max(view, blocked_by):
+  view.ui.new_ui = True
+  if blocked_by == 'alert':
+    view.obj._alert_renderer.will_render = lambda: (NS(), True)
+  elif blocked_by == 'timer':
+    view.obj._alert_renderer.timer_visible = True
+  else:
+    view.obj._hud_renderer.drawing_top_icons = lambda: True
+  view.obj._render(None)
+  assert next(c[2] for c in view.calls if c[0] == 'wayon_dm') is True
 
 
 @pytest.mark.parametrize('mode', [0, 2])

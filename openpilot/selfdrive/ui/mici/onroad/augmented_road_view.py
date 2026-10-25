@@ -10,6 +10,7 @@ from openpilot.system.ui.lib import native_draw, native_geometry, native_text
 from openpilot.selfdrive.ui.mici.onroad import SIDE_PANEL_WIDTH
 from openpilot.selfdrive.ui.mici.onroad.alert_renderer import AlertRenderer
 from openpilot.selfdrive.ui.onroad.driver_preview import DriverPreview
+from openpilot.selfdrive.ui.mici.onroad.wayon_driver_preview import WayonDriverPreview
 from openpilot.selfdrive.ui.mici.onroad.hud_renderer import HudRenderer
 from openpilot.selfdrive.ui.mici.onroad.model_renderer import ModelRenderer
 from openpilot.selfdrive.ui.mici.onroad.vision_renderer import VisionRenderer
@@ -171,6 +172,7 @@ class AugmentedRoadView(CameraView):
     self._vision_renderer = VisionRenderer()
     self._alert_renderer = AlertRenderer()
     self._driver_state_renderer = DriverPreview(compact=True)
+    self._wayon_driver_renderer = WayonDriverPreview()
     self._confidence_ball = ConfidenceBall()
     self._traffic_light = TrafficLight()
     self._offroad_label = UnifiedLabel("start the car to\nuse openpilot", 54, FontWeight.DISPLAY,
@@ -316,9 +318,9 @@ class AugmentedRoadView(CameraView):
     # Custom UI extension point - add custom overlays here
     # Use self._content_rect for positioning within camera bounds
     _t = time.monotonic()
-    self._driver_state_renderer.draw_onroad(
-      self.rect, alert_to_render is not None or (new_ui and (self._alert_renderer.timer_visible or self._hud_renderer.drawing_top_icons())),
-      top_left=new_ui,
+    self._driver_state_renderer.draw_onroad(self.rect, alert_to_render is not None or new_ui)
+    self._wayon_driver_renderer.draw_onroad(
+      self.rect, not new_ui or alert_to_render is not None or self._alert_renderer.timer_visible or self._hud_renderer.drawing_top_icons(),
     )
     ds_ms = (time.monotonic() - _t) * 1000.0
     _t = time.monotonic()
@@ -362,6 +364,8 @@ class AugmentedRoadView(CameraView):
     self._model_renderer._overlay.close()
     self._hud_renderer._overlay.close()
     if preview := getattr(self, '_driver_state_renderer', None):
+      preview.close()
+    if preview := getattr(self, '_wayon_driver_renderer', None):
       preview.close()
     super().close()
 

@@ -1,9 +1,16 @@
-# Wayon/sunnypilot BSM Attribution
+# Wayon/sunnypilot BSM and DM Attribution
 
 The C4 `new ui` blind-spot presentation in
 `openpilot/selfdrive/ui/mici/onroad/blind_spot_indicators.py` is adapted from
 `selfdrive/ui/sunnypilot/onroad/blind_spot_indicators.py` in Wayon/sunnypilot.
 The following upstream repository license is retained verbatim.
+
+The NewUi DM presentation also reuses the already ported
+`openpilot/selfdrive/ui/mici/onroad/driver_state.py` renderer and the four
+`icons_mici/onroad/driver_monitoring/` person, cone, background and phone assets.
+Their drawing routines and asset bytes match the Wayon source at
+`da8cda353ec2a16bcc6d3d870f54137b809af3ff`; the NewUi adapter adds display-only
+freshness and overlap guards without changing monitoring decisions.
 
 This project uses software from Haibin Wen and SUNNYPILOT LLC and is licensed under a custom license requiring permission for use.
 
