@@ -197,6 +197,7 @@ class HudRenderer(Widget):
     self._engaged: bool = False
 
     self._can_draw_top_icons = True
+    self._status_timer_visible = False
     self._show_wheel_critical = False
 
     self._font_bold: rl.Font = gui_app.font(FontWeight.BOLD)
@@ -307,17 +308,23 @@ class HudRenderer(Widget):
   def _render(self, rect: rl.Rectangle) -> None:
     """Render HUD elements to the screen."""
     state = self._overlay_state
-    key = (state.key if state else None, self._traffic_light_info, self._can_draw_top_icons, self._show_wheel_critical)
+    key = (state.key if state else None, self._traffic_light_info, self._can_draw_top_icons, self._show_wheel_critical,
+           self._status_timer_visible)
     self._overlay.draw(rect, self._paint, key, enabled=state is not None and state.enabled,
                        urgent=state is not None and state.urgent)
-    self._draw_cruise_speed_animation(rect)
+    if not self._status_timer_visible:
+      self._draw_cruise_speed_animation(rect)
+
+  def set_status_timer_visible(self, visible: bool):
+    self._status_timer_visible = visible
 
   def _paint(self, rect: rl.Rectangle) -> None:
 
     # self._torque_bar.render(rect) # 아이콘에 토크 적용: 토크바 미사용
 
     # bottom-left panel (speed_bg)
-    self._draw_set_speed(rect)
+    if not self._status_timer_visible:
+      self._draw_set_speed(rect)
 
     self._draw_steering_wheel(rect)
 
@@ -465,7 +472,10 @@ class HudRenderer(Widget):
     pos_y = int(rect.y + margin_y + wheel_txt.height / 2 + self._wheel_y_filter.x)
 
     self._draw_steering_wheel_icon(wheel_txt, pos_x, pos_y)
-    self._draw_wheel_side_info(wheel_txt, pos_x, pos_y)
+    if self._status_timer_visible:
+      self._draw_traffic_light_info(int(rect.x + 95), pos_y)
+    else:
+      self._draw_wheel_side_info(wheel_txt, pos_x, pos_y)
 
 
   def _draw_steering_wheel_icon(self, wheel_txt, pos_x: int, pos_y: int) -> None:

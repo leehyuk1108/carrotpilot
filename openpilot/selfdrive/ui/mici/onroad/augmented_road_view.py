@@ -275,6 +275,8 @@ class AugmentedRoadView(CameraView):
 
     _t = time.monotonic()
     alert_to_render, not_animating_out = self._alert_renderer.will_render()
+    self._hud_renderer.set_status_timer_visible(self._alert_renderer.timer_visible)
+    self._vision_renderer.set_status_timer_visible(self._alert_renderer.timer_visible)
     alert_ms += (time.monotonic() - _t) * 1000.0
 
     self._hud_renderer.set_can_draw_top_icons(alert_to_render is None)

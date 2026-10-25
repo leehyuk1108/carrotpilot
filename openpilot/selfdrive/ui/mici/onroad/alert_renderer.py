@@ -13,6 +13,8 @@ from openpilot.system.ui.lib.application import gui_app, FontWeight, TextAlignme
 from openpilot.system.ui.widgets import Widget
 from openpilot.system.ui.widgets.label import UnifiedLabel
 from openpilot.selfdrive.selfdrived.alert_presentation import font_sizes
+from openpilot.selfdrive.ui.mici.onroad.status_timers import StatusTimers, TimerDisplay
+from openpilot.selfdrive.ui.mici.onroad.status_timer_renderer import StatusTimerRenderer
 
 AlertSize = log.SelfdriveState.AlertSize
 AlertStatus = log.SelfdriveState.AlertStatus
@@ -109,7 +111,47 @@ class AlertRenderer(Widget):
     self._turn_signal_alpha_filter = FirstOrderFilter(0.0, 0.3, 1 / gui_app.target_fps)
     self._last_icon_side: IconSide | None = None
 
+    self._status_timers = StatusTimers()
+    self._status_timer_renderer = StatusTimerRenderer()
+    self._last_started_frame = -1
+    self.timer_visible = False
+    self._pending_presentation = None
+    ui_state.add_offroad_transition_callback(self._reset_timers)
+
     self._load_icons()
+
+  def _reset_timers(self):
+    self._status_timers.reset()
+    self._prev_alert = None
+    self._alpha_filter.x = 0.
+    self.timer_visible = False
+    self._pending_presentation = None
+
+  def _presentation(self):
+    if self._last_started_frame != ui_state.started_frame or not ui_state.started:
+      self._last_started_frame = ui_state.started_frame
+      self._reset_timers()
+    alert = self.get_alert(ui_state.sm)
+    timer = self._timer_display(alert)
+    self.timer_visible = timer is not None
+    if self.timer_visible:
+      self._prev_alert = None
+    return alert, timer
+
+  def _timer_display(self, alert: Alert | None) -> TimerDisplay | None:
+    sm = ui_state.sm
+    now = time.monotonic()
+    fresh = all(sm.valid[name] and sm.alive[name] and sm.recv_frame[name] >= ui_state.started_frame and
+                0 <= now - sm.recv_time[name] <= 1. for name in ('carState', 'selfdriveState'))
+    cs = sm['carState']
+    return self._status_timers.update(
+      now=now, started=ui_state.started, session=ui_state.started_frame, fresh=fresh,
+      standstill=cs.standstill, parking_brake=cs.parkingBrake,
+      hold_active=cs.brakeHoldActive or cs.softHoldActive == 2 or cs.cruiseState.standstill,
+      hold_without_alert=cs.brakeHoldActive or cs.softHoldActive == 2,
+      alert_type=alert.alert_type if alert is not None else None,
+      critical=alert is not None and alert.status == AlertStatus.critical,
+    )
 
   def _load_icons(self):
     self._txt_turn_signal_left = gui_app.texture('icons_mici/onroad/turn_signal_left.png', 104, 96)
@@ -150,7 +192,8 @@ class AlertRenderer(Widget):
     return ret
 
   def will_render(self) -> tuple[Alert | None, bool]:
-    alert = self.get_alert(ui_state.sm)
+    self._pending_presentation = self._presentation()
+    alert, _ = self._pending_presentation
     return alert or self._prev_alert, alert is None
 
   def _icon_helper(self, alert: Alert) -> AlertLayout:
@@ -223,11 +266,21 @@ class AlertRenderer(Widget):
     return AlertLayout(text_rect, icon_layout)
 
   def _render(self, rect: rl.Rectangle) -> bool:
-    alert = self.get_alert(ui_state.sm)
+    if not ui_state.started:
+      self._reset_timers()
+      return False
+    alert, timer = self._pending_presentation if self._pending_presentation is not None else self._presentation()
+    self._pending_presentation = None
+    has_indicator = alert is not None or timer is not None
 
     # Animate fade and slide in/out
-    self._alert_y_filter.update(self._rect.y - 50 if alert is None else self._rect.y)
-    self._alpha_filter.update(0 if alert is None else 1)
+    self._alert_y_filter.update(self._rect.y if has_indicator else self._rect.y - 50)
+    self._alpha_filter.update(1 if has_indicator else 0)
+
+    if timer is not None:
+      self._prev_alert = None
+      self._status_timer_renderer.draw(rect, timer, self._alpha_filter.x, self._alert_y_filter.x - rect.y)
+      return True
 
     if alert is None:
       # If still animating out, keep the previous alert
