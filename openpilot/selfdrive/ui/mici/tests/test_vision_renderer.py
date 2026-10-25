@@ -159,7 +159,7 @@ def test_mici_status_card_clears_speed_and_gear(mici_modules, monkeypatch):
   assert card.y + card.height <= 240 - 18
 
 
-def test_new_ui_hides_only_status_card_and_labels_not_bsd_strips(mici_modules, monkeypatch):
+def test_new_ui_uses_wayon_bsm_instead_of_legacy_strips(mici_modules, monkeypatch):
   module, vision = mici_modules
   renderer = vision.VisionRenderer()
   rectangles, texts = [], []
@@ -172,5 +172,21 @@ def test_new_ui_hides_only_status_card_and_labels_not_bsd_strips(mici_modules, m
   monkeypatch.setattr(vision, 'ui_state', SimpleNamespace(started=True, started_frame=1, share_data=True, new_ui=True,
     sm=SM(carState=SimpleNamespace(leftBlindspot=True, rightBlindspot=True))))
   renderer._render(module.rl.Rectangle(0, 0, 476, 240))
-  assert [(r.x, r.y, r.width, r.height) for r in rectangles] == [(6, 78, 6, 56), (464, 78, 6, 56)]
-  assert not texts
+  assert not rectangles and not texts
+
+
+@pytest.mark.parametrize('new_ui', [False, True])
+def test_bsm_wall_replaced_only_in_new_ui(mici_modules, monkeypatch, new_ui):
+  module, _ = mici_modules
+  monkeypatch.setattr(module.ui_state, 'new_ui', new_ui, raising=False)
+  renderer = object.__new__(module.ModelRenderer)
+  renderer._path = module.ModelPoints(raw_points=np.array([[0, 0, 0], [20, 0, 0]], dtype=np.float32))
+  renderer._car_space_transform = np.eye(3)
+  renderer._clip_region = None
+  calls = []
+  monkeypatch.setattr(module, 'project_blindspot_barrier', lambda *args: calls.append(args) or np.empty((0, 2)))
+  class SM(dict):
+    valid = {'carState': True, 'modelV2': True}
+    alive = valid.copy()
+  renderer._draw_blindspots(SM(carState=SimpleNamespace(leftBlindspot=True, rightBlindspot=True)))
+  assert len(calls) == (0 if new_ui else 2)

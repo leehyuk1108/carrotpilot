@@ -460,6 +460,8 @@ class ModelRenderer(Widget):
       draw_polygon(self._rect, road_edge.projected_points, color)
 
   def _draw_blindspots(self, sm):
+    if getattr(ui_state, "new_ui", False):
+      return  # The Wayon HUD owns BSM presentation in this layout.
     if not (sm.valid['carState'] and sm.alive['carState'] and sm.valid['modelV2'] and sm.alive['modelV2']):
       return
     car_state = sm['carState']

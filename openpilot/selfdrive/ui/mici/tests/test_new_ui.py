@@ -1,6 +1,7 @@
 import ast
 import importlib.util
 import sys
+import time
 from collections import namedtuple
 from pathlib import Path
 from types import SimpleNamespace as NS
@@ -28,26 +29,39 @@ def scene(monkeypatch):
       calls.append(('torque', rect))
   rl = NS(Rectangle=namedtuple('Rectangle', 'x y width height'), Vector2=namedtuple('Vector2', 'x y'),
           Color=namedtuple('Color', 'r g b a'), WHITE='white', BLANK='blank', get_time=lambda: now[0])
-  for name in ('draw_texture_pro', 'draw_texture_ex', 'draw_text_ex', 'draw_circle_gradient'):
+  for name in ('draw_texture_pro', 'draw_texture_ex', 'draw_text_ex', 'draw_circle_gradient', 'draw_rectangle_rounded'):
     setattr(rl, name, lambda *args, name=name: calls.append((name, *args)))
   class SM(dict):
-    valid = dict.fromkeys(('carState', 'selfdriveState', 'carControl'), True)
+    valid = dict.fromkeys(('carState', 'selfdriveState', 'carControl', 'carrotMan', 'longitudinalPlan'), True)
     alive = valid.copy()
     recv_frame = dict.fromkeys(valid, 101)
-  cs = NS(leftBlindspot=False, rightBlindspot=False, steeringAngleDeg=5)
-  sm = SM(carState=cs, carControl=NS(latActive=False))
+    seen = valid.copy()
+    recv_time = dict.fromkeys(valid, time.monotonic())
+  cs = NS(leftBlindspot=False, rightBlindspot=False, steeringAngleDeg=5, vCruise=100, gasPressed=False, brakePressed=False)
+  sm = SM(carState=cs, carControl=NS(latActive=False, longActive=True), selfdriveState=NS(enabled=True),
+          carrotMan=NS(desiredSpeed=250, desiredSource='none'), longitudinalPlan=NS(cruiseTarget=100))
   ui = NS(started=True, started_frame=100, status='engaged', is_metric=True, sm=sm, new_ui=True)
-  gui = NS(target_fps=20, texture=lambda name, w, h: NS(name=name, width=w, height=h))
+  gui = NS(target_fps=20, texture=lambda name, w, h, **kw: NS(name=name, width=w, height=h, flip_x=kw.get('flip_x', False)))
   for name, value in {
     'pyray': rl,
     'openpilot.common.filter_simple': NS(FirstOrderFilter=Filter),
     'openpilot.selfdrive.ui.ui_state': NS(ui_state=ui, UIStatus=NS(DISENGAGED='disengaged')),
     'openpilot.system.ui.lib.application': NS(gui_app=gui),
     'openpilot.system.ui.lib.multilang': NS(tr=lambda text: text),
-    'openpilot.system.ui.lib.text_measure': NS(measure_text_cached=lambda _, text, size: NS(x=len(text) * size * .6)),
+    'openpilot.system.ui.lib.text_measure': NS(measure_text_cached=lambda _, text, size: NS(x=len(text) * size * .6, y=size)),
     'openpilot.selfdrive.ui.mici.onroad.torque_bar': NS(TorqueBar=Torque),
   }.items():
     monkeypatch.setitem(sys.modules, name, value)
+  badge_name = 'openpilot.selfdrive.ui.mici.onroad.deceleration_badge'
+  badge_spec = importlib.util.spec_from_file_location(badge_name, ONROAD / 'deceleration_badge.py')
+  badge_module = importlib.util.module_from_spec(badge_spec)
+  monkeypatch.setitem(sys.modules, badge_name, badge_module)
+  badge_spec.loader.exec_module(badge_module)
+  bsm_name = 'openpilot.selfdrive.ui.mici.onroad.blind_spot_indicators'
+  bsm_spec = importlib.util.spec_from_file_location(bsm_name, ONROAD / 'blind_spot_indicators.py')
+  bsm_module = importlib.util.module_from_spec(bsm_spec)
+  monkeypatch.setitem(sys.modules, bsm_name, bsm_module)
+  bsm_spec.loader.exec_module(bsm_module)
   spec = importlib.util.spec_from_file_location('_new_ui_test', ONROAD / 'wayon_hud.py')
   module = importlib.util.module_from_spec(spec)
   spec.loader.exec_module(module)
@@ -55,7 +69,7 @@ def scene(monkeypatch):
            is_cruise_set=True, _engaged=True, set_speed=100, _set_speed_changed_time=10,
            _font_display='display', _font_semi_bold='semi', _turn_intent=NS(render=lambda rect: calls.append(('turn', rect))))
   return NS(renderer=module.WayonHud(), module=module, ui=ui, sm=sm, cs=cs, hud=hud, calls=calls, now=now,
-            rect=rl.Rectangle(0, 0, 476, 240))
+            rect=rl.Rectangle(0, 0, 476, 240), badge=badge_module)
 
 
 def texts(scene):
@@ -126,7 +140,7 @@ def test_disengaged_and_reset_remove_old_presentation(scene):
 
 
 @pytest.mark.parametrize('blindspot', [False, True])
-def test_lateral_only_keeps_green_wheel_and_torque_even_with_bsd(scene, blindspot):
+def test_lateral_only_keeps_torque_and_yields_wheel_to_wayon_bsm(scene, blindspot):
   s = scene
   s.ui.status = 'disengaged'
   s.hud._engaged = False
@@ -134,8 +148,10 @@ def test_lateral_only_keeps_green_wheel_and_torque_even_with_bsd(scene, blindspo
   s.cs.leftBlindspot = blindspot
   s.renderer.draw(s.rect, s.hud)
   color = next(call for call in s.calls if call[0] == 'draw_texture_pro')[-1]
-  assert color.r == 0 and color.g == 255 and color.a > 0
+  assert color.r == 0 and color.g == 255
+  assert (color.a > 0) == (not blindspot)
   assert s.renderer._torque_bar.lateral_active
+  assert bool(bsm_icons(s)) == blindspot
   assert not texts(s)
   s.sm.alive = dict(s.sm.alive, carControl=False)
   s.calls.clear()
@@ -190,3 +206,222 @@ def test_new_ui_is_display_only_and_existing_overlay_owners_remain():
     assert fragment in text
   source = (ONROAD / 'wayon_hud.py').read_text()
   assert all(forbidden not in source for forbidden in ('PubMaster', 'Params(', 'put_bool', 'controls_allowed'))
+
+
+@pytest.mark.parametrize('source,label', [('atc', 'TURN'), ('atc2', 'TURN'), ('cam', 'CAM'), ('hda', 'CAM'),
+                                        ('cam:v', 'CAM'), ('bump:n', 'BUMP'), ('hda_section', 'SECTION'),
+                                        ('vturn', 'VTURN'), ('route', 'ROUTE'), ('school', 'SCHOOL')])
+def test_selected_deceleration_source_labels(scene, source, label):
+  s = scene
+  s.sm['carrotMan'] = NS(desiredSpeed=60, desiredSource=source)
+  s.sm['longitudinalPlan'].cruiseTarget = 60
+  assert s.badge.selected_deceleration(s.sm, 100) == (label, True)
+
+
+@pytest.mark.parametrize('condition', ['disengaged', 'lateral_only', 'gas', 'brake', 'no_cap', 'other_target',
+                                      'stale_plan', 'invalid_control', 'old_plan', 'nan_plan', 'invalid_set'])
+def test_deceleration_does_not_blink_without_applied_cap(scene, condition):
+  s = scene
+  s.sm['carrotMan'] = NS(desiredSpeed=60, desiredSource='cam')
+  s.sm['longitudinalPlan'].cruiseTarget = 60
+  if condition == 'disengaged':
+    s.sm['selfdriveState'].enabled = False
+  elif condition == 'lateral_only':
+    s.sm['carControl'].longActive = False
+  elif condition in ('gas', 'brake'):
+    setattr(s.cs, condition + 'Pressed', True)
+  elif condition == 'no_cap':
+    s.cs.vCruise = 60
+  elif condition == 'other_target':
+    s.sm['longitudinalPlan'].cruiseTarget = 40
+  elif condition == 'stale_plan':
+    s.sm.alive['longitudinalPlan'] = False
+  elif condition == 'invalid_control':
+    s.sm.valid['carControl'] = False
+  elif condition == 'old_plan':
+    s.sm.recv_frame['longitudinalPlan'] = 99
+  elif condition == 'nan_plan':
+    s.sm['longitudinalPlan'].cruiseTarget = float('nan')
+  else:
+    s.cs.vCruise = 255
+  assert s.badge.selected_deceleration(s.sm, 100) == ('CAM', False)
+
+
+@pytest.mark.parametrize('condition', ['unseen', 'expired', 'future', 'invalid', 'dead', 'old_session',
+                                      'zero', 'neutral_200', 'neutral_250', 'unknown', 'gas', 'empty'])
+def test_badge_hides_missing_expired_and_neutral_navigation(scene, condition):
+  s = scene
+  s.sm['carrotMan'] = NS(desiredSpeed=60, desiredSource='cam')
+  if condition == 'unseen':
+    s.sm.seen['carrotMan'] = False
+  elif condition == 'expired':
+    s.sm.recv_time['carrotMan'] -= 1.01
+  elif condition == 'future':
+    s.sm.recv_time['carrotMan'] += 5
+  elif condition == 'invalid':
+    s.sm.valid['carrotMan'] = False
+  elif condition == 'dead':
+    s.sm.alive['carrotMan'] = False
+  elif condition == 'old_session':
+    s.sm.recv_frame['carrotMan'] = 99
+  elif condition in ('zero', 'neutral_200', 'neutral_250'):
+    s.sm['carrotMan'].desiredSpeed = {'zero': 0, 'neutral_200': 200, 'neutral_250': 250}[condition]
+  else:
+    s.sm['carrotMan'].desiredSource = '' if condition == 'empty' else condition
+  assert s.badge.selected_deceleration(s.sm, 100) is None
+
+
+def test_badge_blinks_at_one_hz_keeps_text_and_does_not_move(scene):
+  s = scene
+  s.hud._set_speed_changed_time = -10
+  s.sm['carrotMan'] = NS(desiredSpeed=60, desiredSource='cam')
+  s.sm['longitudinalPlan'].cruiseTarget = 60
+  boxes, colors = [], []
+  for now in (10, 10.59, 10.7, 11.01):
+    s.now[0] = now
+    s.calls.clear()
+    s.renderer.draw(s.rect, s.hud)
+    assert texts(s) == ['CAM']
+    _, box, roundness, segments, color = next(call for call in s.calls if call[0] == 'draw_rectangle_rounded')
+    assert roundness == .3 and segments == 6
+    boxes.append(box)
+    colors.append(tuple(color))
+  assert boxes == [s.module.rl.Rectangle(136, 162, 76, 26)] * 4
+  assert colors == [s.badge.DecelerationBadge.GREEN] * 2 + [s.badge.DecelerationBadge.IDLE, s.badge.DecelerationBadge.GREEN]
+  s.sm['carControl'].longActive = False
+  s.calls.clear()
+  s.renderer.draw(s.rect, s.hud)
+  assert tuple(next(call for call in s.calls if call[0] == 'draw_rectangle_rounded')[-1]) == s.badge.DecelerationBadge.IDLE
+  s.sm['carControl'].longActive = True
+  s.now[0] = 11.7
+  s.calls.clear()
+  s.renderer.draw(s.rect, s.hud)
+  assert tuple(next(call for call in s.calls if call[0] == 'draw_rectangle_rounded')[-1]) == s.badge.DecelerationBadge.GREEN
+
+
+def test_compact_badge_clears_wheel_and_fits_long_label_at_offset(scene):
+  s = scene
+  rect = s.module.rl.Rectangle(60, 10, 476, 240)
+  s.renderer._deceleration_badge.draw(rect, s.hud._font_semi_bold, ('SECTION', True), 10.)
+  _, box, *_ = next(call for call in s.calls if call[0] == 'draw_rectangle_rounded')
+  _, _, label, position, size, spacing, _ = next(call for call in s.calls if call[0] == 'draw_text_ex')
+  assert box.x == rect.x + 136 and box.y == rect.y + 162
+  assert box.x > rect.x + 46 + 25 * 2 ** .5 + 15  # Rotated 50px wheel, plus a gap.
+  assert box.x >= rect.x + 20 + 108 + 8  # Wayon BSM texture, plus a gap.
+  assert box.y + box.height < rect.y + 200  # Above the bottom torque bar.
+  assert label == 'SECTION' and spacing == 0
+  assert box.x + 8 <= position.x and position.x + len(label) * size * .6 <= box.x + box.width - 8
+  assert box.y <= position.y and position.y + size <= box.y + box.height
+
+
+@pytest.mark.parametrize('condition', ['warning', 'timer', 'critical', 'offroad'])
+def test_deceleration_yields_to_warnings_and_timers(scene, condition):
+  s = scene
+  s.sm['carrotMan'] = NS(desiredSpeed=60, desiredSource='cam')
+  s.sm['longitudinalPlan'].cruiseTarget = 60
+  s.renderer.draw(s.rect, s.hud)
+  assert 'CAM' in texts(s)
+  if condition == 'warning':
+    s.hud._can_draw_top_icons = False
+  elif condition == 'timer':
+    s.hud._status_timer_visible = True
+  elif condition == 'critical':
+    s.hud._show_wheel_critical = True
+  else:
+    s.ui.started = False
+  s.calls.clear()
+  s.renderer.draw(s.rect, s.hud)
+  assert 'CAM' not in texts(s)
+  assert s.renderer._deceleration_badge._active_label is None
+
+
+def bsm_icons(scene):
+  return [call for call in scene.calls if call[0] == 'draw_texture_ex' and call[1].name.endswith('blind_spot_left.png')]
+
+
+@pytest.mark.parametrize('left,right', [(True, False), (False, True), (True, True), (False, False)])
+def test_wayon_bsm_original_asset_position_and_side(scene, left, right):
+  s = scene
+  s.cs.leftBlindspot, s.cs.rightBlindspot = left, right
+  s.renderer.draw(s.rect, s.hud)
+  icons = bsm_icons(s)
+  assert [call[2].x for call in icons] == ([20] if left else []) + ([348] if right else [])
+  assert [call[1].flip_x for call in icons] == ([False] if left else []) + ([True] if right else [])
+  assert all((call[1].width, call[1].height, call[2].y) == (108, 128, 100) for call in icons)
+  assert all(tuple(call[-1]) == (255, 255, 255, 255) for call in icons)
+  assert ('MAX' in texts(s)) == (not left)
+
+
+@pytest.mark.parametrize('condition', ['offroad', 'invalid', 'dead', 'unseen', 'old_session'])
+def test_wayon_bsm_clears_immediately_without_current_carstate(scene, condition):
+  s = scene
+  s.cs.leftBlindspot = s.cs.rightBlindspot = True
+  s.renderer.draw(s.rect, s.hud)
+  assert len(bsm_icons(s)) == 2
+  if condition == 'offroad':
+    s.ui.started = False
+  elif condition == 'invalid':
+    s.sm.valid['carState'] = False
+  elif condition == 'dead':
+    s.sm.alive['carState'] = False
+  elif condition == 'unseen':
+    s.sm.recv_frame['carState'] = 0
+  else:
+    s.ui.started_frame = 102
+  s.calls.clear()
+  s.renderer.draw(s.rect, s.hud)
+  assert not bsm_icons(s) and not s.renderer._blind_spots.detected
+
+
+@pytest.mark.parametrize('service', ['selfdriveState', 'carControl', 'longitudinalPlan'])
+def test_bsm_does_not_depend_on_controls_or_model(scene, service):
+  s = scene
+  s.cs.rightBlindspot = True
+  s.sm.alive[service] = False
+  s.renderer.draw(s.rect, s.hud)
+  assert len(bsm_icons(s)) == 1
+
+
+@pytest.mark.parametrize('condition', ['critical', 'timer'])
+def test_bsm_yields_to_primary_warning_or_centered_timer(scene, condition):
+  s = scene
+  s.cs.leftBlindspot = s.cs.rightBlindspot = True
+  setattr(s.hud, '_show_wheel_critical' if condition == 'critical' else '_status_timer_visible', True)
+  s.renderer.draw(s.rect, s.hud)
+  assert not bsm_icons(s)
+  assert s.renderer._blind_spots.detected
+  if condition == 'critical':
+    wheel = next(call for call in s.calls if call[0] == 'draw_texture_pro')
+    assert wheel[1].name.endswith('wheel_critical.png') and wheel[-1].a == 255
+
+
+def test_bsm_session_and_ui_reset_discard_fade_memory(scene):
+  s = scene
+  s.cs.leftBlindspot = True
+  s.renderer.draw(s.rect, s.hud)
+  assert s.renderer._blind_spots.detected
+  s.cs.leftBlindspot = False
+  s.renderer.reset()
+  assert not s.renderer._blind_spots.detected
+
+
+def test_bsm_uses_original_fade_in_and_out(scene, monkeypatch):
+  # Exercise the real filter, not the instantaneous HUD fixture above.
+  spec = importlib.util.spec_from_file_location('_real_bsm_filter', ONROAD.parents[3] / 'common/filter_simple.py')
+  filters = importlib.util.module_from_spec(spec)
+  spec.loader.exec_module(filters)
+  module = sys.modules['openpilot.selfdrive.ui.mici.onroad.blind_spot_indicators']
+  monkeypatch.setattr(module, 'FirstOrderFilter', filters.FirstOrderFilter)
+  bsm = module.BlindSpotIndicators()
+  scene.cs.leftBlindspot = True
+  bsm.update()
+  assert bsm._left_alpha.x == pytest.approx(.25)
+  for _ in range(19):
+    bsm.update()
+  assert bsm._left_alpha.x > .99
+  scene.cs.leftBlindspot = False
+  bsm.update()
+  assert .7 < bsm._left_alpha.x < .75 and bsm.detected
+  for _ in range(19):
+    bsm.update()
+  assert not bsm.detected

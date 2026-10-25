@@ -54,7 +54,7 @@ class VisionRenderer(Widget):
         rl.draw_line_ex(rl.Vector2(x + offset * 0.85, y + 14 - offset), rl.Vector2(x + (offset + 3) * 0.85, y + 11 - offset), 2, rl.WHITE)
 
   def _render(self, rect: rl.Rectangle):
-    if not ui_state.started:
+    if not ui_state.started or getattr(ui_state, "new_ui", False):
       return
     sm = ui_state.sm
     car_fresh = (sm.valid['carState'] and sm.alive['carState'] and sm.recv_frame['carState'] >= ui_state.started_frame)
@@ -71,10 +71,9 @@ class VisionRenderer(Widget):
         source_colors[side] = source_color
         x = rect.x + 6 if is_left else rect.x + rect.width - 12
         rl.draw_rectangle_rounded(rl.Rectangle(x, rect.y + 78, 6, 56), 0.8, 6, source_color)
-        if not getattr(ui_state, "new_ui", False):
-          self._text("BSD", rect.x + 16 if is_left else rect.x + rect.width - 45, rect.y + 84, source_color, 12)
+        self._text("BSD", rect.x + 16 if is_left else rect.x + rect.width - 45, rect.y + 84, source_color, 12)
 
-    if not ui_state.share_data or self._status_timer_visible or getattr(ui_state, "new_ui", False):
+    if not ui_state.share_data or self._status_timer_visible:
       return
     state = vision_display_state(self._packet, time.monotonic_ns())
     # Above the DM inset, below eGPU, beside the relocated right BSD label/bar.

@@ -233,11 +233,12 @@ class AugmentedRoadView(CameraView):
       self._switch_stream_if_needed(ui_state.sm)
       self._update_calibration()
 
-    # Create inner content area with border padding
+    # The minimal layout uses the entire display, without the legacy status rail.
+    new_ui = ui_state.new_ui
     self._content_rect = rl.Rectangle(
       self.rect.x,
       self.rect.y,
-      self.rect.width - SIDE_PANEL_WIDTH,
+      self.rect.width - (0 if new_ui else SIDE_PANEL_WIDTH),
       self.rect.height,
     )
 
@@ -251,6 +252,10 @@ class AugmentedRoadView(CameraView):
     )
 
     road_view_mode = self._road_view_mode()
+    if (not self._suppress_camera_for_cluster and road_view_mode in (0, 2) and
+        self._last_rect_dims != (self._content_rect.width, self._content_rect.height)):
+      # Model-only mode also needs the new viewport, without waiting for a camera draw.
+      self._calc_frame_matrix(self._content_rect)
     _t = time.monotonic()
     if self._suppress_camera_for_cluster or road_view_mode in (2, 3):
       rl.draw_rectangle_rec(self._content_rect, rl.BLACK)
@@ -259,7 +264,7 @@ class AugmentedRoadView(CameraView):
       super()._render(self._content_rect)
     cam_ms = (time.monotonic() - _t) * 1000.0
 
-    self._overlay_state.update(ui_state, self.client, self.stream_type, (self._suppress_camera_for_cluster, road_view_mode))
+    self._overlay_state.update(ui_state, self.client, self.stream_type, (self._suppress_camera_for_cluster, road_view_mode, new_ui))
 
     if not self._suppress_camera_for_cluster and road_view_mode in (0, 2):
       # Draw all UI overlays
@@ -270,7 +275,11 @@ class AugmentedRoadView(CameraView):
     if not self._suppress_camera_for_cluster:
       # Fade out bottom of overlays for looks
       _t = time.monotonic()
-      rl.draw_texture_ex(self._fade_texture, rl.Vector2(self._content_rect.x, self._content_rect.y), 0.0, 1.0, rl.WHITE)
+      if new_ui:
+        rl.draw_texture_pro(self._fade_texture, rl.Rectangle(0, 0, self._fade_texture.width, self._fade_texture.height),
+                            self._content_rect, rl.Vector2(0, 0), 0., rl.WHITE)
+      else:
+        rl.draw_texture_ex(self._fade_texture, rl.Vector2(self._content_rect.x, self._content_rect.y), 0.0, 1.0, rl.WHITE)
       extras_ms += (time.monotonic() - _t) * 1000.0
 
     _t = time.monotonic()
@@ -307,16 +316,16 @@ class AugmentedRoadView(CameraView):
     # Custom UI extension point - add custom overlays here
     # Use self._content_rect for positioning within camera bounds
     _t = time.monotonic()
-    new_ui = ui_state.new_ui
     self._driver_state_renderer.draw_onroad(
       self.rect, alert_to_render is not None or (new_ui and (self._alert_renderer.timer_visible or self._hud_renderer.drawing_top_icons())),
       top_left=new_ui,
     )
     ds_ms = (time.monotonic() - _t) * 1000.0
     _t = time.monotonic()
-    self._traffic_light.render(self.rect)
-    if not self._traffic_light.is_visible():
-      self._confidence_ball.render(self.rect)
+    if not new_ui:
+      self._traffic_light.render(self.rect)
+      if not self._traffic_light.is_visible():
+        self._confidence_ball.render(self.rect)
 
     self._bookmark_icon.render(self.rect)
 

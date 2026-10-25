@@ -2,6 +2,8 @@
 import pyray as rl
 
 from openpilot.common.filter_simple import FirstOrderFilter
+from openpilot.selfdrive.ui.mici.onroad.blind_spot_indicators import BlindSpotIndicators
+from openpilot.selfdrive.ui.mici.onroad.deceleration_badge import DecelerationBadge, selected_deceleration
 from openpilot.selfdrive.ui.mici.onroad.torque_bar import TorqueBar
 from openpilot.selfdrive.ui.ui_state import UIStatus, ui_state
 from openpilot.system.ui.lib.application import gui_app
@@ -12,6 +14,8 @@ from openpilot.system.ui.lib.text_measure import measure_text_cached
 class WayonHud:
   def __init__(self):
     self._torque_bar = TorqueBar()
+    self._deceleration_badge = DecelerationBadge()
+    self._blind_spots = BlindSpotIndicators()
     self._wheel = gui_app.texture("icons_mici/wheel.png", 50, 50)
     self._critical_wheel = gui_app.texture("icons_mici/wheel_critical.png", 50, 50)
     self._exclamation = gui_app.texture("icons_mici/exclamation_point.png", 9, 44)
@@ -21,6 +25,8 @@ class WayonHud:
     self.reset()
 
   def reset(self):
+    self._deceleration_badge.reset()
+    self._blind_spots.reset()
     self._speed_alpha.x = self._wheel_alpha.x = self._wheel_y.x = 0
     self._torque_bar._torque_filter.x = self._torque_bar._torque_line_alpha_filter.x = 0
     self._torque_bar.lateral_active = False
@@ -37,8 +43,9 @@ class WayonHud:
       sm.valid[s] and sm.alive[s] and sm.recv_frame[s] >= ui_state.started_frame
       for s in ("carState", "selfdriveState")
     )
-    if not fresh:
-      self.reset()
+    # BSM only needs fresh carState; loss of the model/control stream must not hide it.
+    self._blind_spots.update()
+    bsm_visible = self._blind_spots.detected
 
     # Carrot can steer with ACC disabled; preserve its active-steering indication.
     lateral_active = fresh and sm.valid['carControl'] and sm.alive['carControl'] and \
@@ -52,7 +59,7 @@ class WayonHud:
 
     # Warnings/timers take this space immediately, not after a fade-out.
     clear = hud._can_draw_top_icons and not hud._status_timer_visible
-    if fresh and clear:
+    if fresh and clear and not self._blind_spots.left_visible:
       show_speed = hud.is_cruise_set and hud._engaged and 0 <= rl.get_time() - hud._set_speed_changed_time < 2.5
       self._speed_alpha.update(show_speed)
     else:
@@ -60,17 +67,22 @@ class WayonHud:
     if self.drawing_top_icons():
       self._draw_set_speed(rect, hud)
 
+    deceleration = selected_deceleration(sm, ui_state.started_frame) if fresh and clear and not hud._show_wheel_critical else None
+    self._deceleration_badge.draw(rect, hud._font_semi_bold, deceleration, rl.get_time())
+
     car_state = sm["carState"]
     critical = hud._show_wheel_critical
-    show_wheel = lateral_active or (fresh and ui_state.status != UIStatus.DISENGAGED and
-                                    not (car_state.leftBlindspot or car_state.rightBlindspot))
+    if not critical and not hud._status_timer_visible:
+      self._blind_spots.render(rect)
+    # The original Wayon icons replace the ordinary wheel; critical warnings win.
+    show_wheel = not bsm_visible and (lateral_active or (fresh and ui_state.status != UIStatus.DISENGAGED))
     self._wheel_alpha.update(255 if critical else 230 if show_wheel else 0)
     self._wheel_y.update(0 if critical or show_wheel else 25)
     if not fresh and not critical:
       return
     wheel = self._critical_wheel if critical else self._wheel
     cx, cy = rect.x + 46, rect.y + rect.height - 39 + self._wheel_y.x
-    if bottom_clear:
+    if bottom_clear and not bsm_visible:
       hud._turn_intent.render(rl.Rectangle(cx - 50, cy - 50, 100, 100))
     color = rl.Color(0, 255, 0, int(self._wheel_alpha.x)) if lateral_active and not critical else \
       rl.Color(255, 255, 255, int(self._wheel_alpha.x))
