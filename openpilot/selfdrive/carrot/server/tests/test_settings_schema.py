@@ -43,6 +43,19 @@ def test_the_catalogue_is_readable_and_populated(params):
   assert all(isinstance(p.get("name"), str) and p["name"] for p in params)
 
 
+def test_new_ui_is_default_off_live_toggle_first_in_display(settings):
+  _, by_name, _ = group_index(settings)
+  toggle = by_name["NewUi"]
+  assert (toggle["control"], toggle["min"], toggle["max"], toggle["default"]) == ("toggle", 0, 1, 0)
+  assert all(toggle[key] == "new ui" for key in ("title", "etitle", "ctitle"))
+  assert "C4" in toggle["descr"] and "재부팅 없이" in toggle["descr"]
+  assert '{"NewUi", {PERSISTENT, BOOL, "0"}}' in PARAMS_KEYS_PATH.read_text(encoding="utf-8")
+  categories = build_menu_categories(settings, by_name)
+  section = next(section for category in categories for group in category["groups"] for section in group["sections"]
+                 if "ShowDebugUI" in section["items"])
+  assert section["items"][0] == "NewUi"
+
+
 def test_navigation_set_speed_is_default_off_live_toggle_next_to_cruise_button_mode(settings):
   _, by_name, _ = group_index(settings)
   toggle = by_name['NavigationSetSpeed']

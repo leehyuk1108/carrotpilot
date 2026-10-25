@@ -167,6 +167,8 @@ def test_both_huds_draw_current_badge(ui, monkeypatch, kind, detail):
   module = getattr(ui, kind)
   renderer = object.__new__(module.HudRenderer)
   renderer._can_draw_top_icons = True
+  renderer._new_ui_active = False
+  renderer._status_timer_visible = False
   renderer.is_cruise_available = False
   renderer._font_display = None
   renderer._exp_button = SimpleNamespace(render=Mock())
@@ -369,7 +371,7 @@ def test_compact_badge_keeps_host_and_status_on_separate_lines(ui, monkeypatch):
   rect = drawing.draw_jetlink_badge(('jetSON READY', 'ready'), rl.Rectangle(386, 164, 80, 58), 18, stacked=True)
   assert rect is not None
   assert label.call_args.args[1] == 'jetSON\nREADY'
-  assert label.call_args.kwargs['alignment'] == rl.GuiTextAlignment.TEXT_ALIGN_CENTER
+  assert label.call_args.kwargs['alignment'] == drawing.TextAlignment.CENTER
 
 
 @pytest.mark.parametrize(('status', 'bounds'), [(None, (0, 0, 180, 38)), (('', 'ready'), (0, 0, 180, 38)),

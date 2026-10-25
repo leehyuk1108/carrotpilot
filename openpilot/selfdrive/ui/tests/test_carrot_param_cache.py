@@ -105,6 +105,7 @@ def main_layout_module(monkeypatch):
     "openpilot.system.ui.lib.application": SimpleNamespace(gui_app=gui_app),
     "openpilot.system.ui.widgets": SimpleNamespace(Widget=Widget),
     "openpilot.selfdrive.ui.layouts.onboarding": SimpleNamespace(OnboardingWindow=Placeholder),
+    "openpilot.selfdrive.ui.widgets.carrot_web_dialog": SimpleNamespace(CarrotWebDialog=Placeholder),
   }
   for name, stub in stubs.items():
     monkeypatch.setitem(sys.modules, name, stub)
@@ -227,6 +228,30 @@ def test_realtime_ui_snapshot_reads_all_values_once():
     always_on_dm=False,
   )
   assert params.calls == ["RecordAudio", "IsMetric", "AlwaysOnDM"]
+
+
+def test_new_ui_switch_is_live_bounded_and_does_not_change_dm():
+  params = FakeParams({"RecordAudio": 0, "IsMetric": 1, "AlwaysOnDM": 1, "NewUi": 0})
+  cache = TimedSnapshotCache(False, lambda: params.get_bool("NewUi"))
+  assert cache.refresh(0) is False
+  params.values["NewUi"] = 1
+  assert cache.refresh(0.49) is False
+  assert cache.refresh(0.5) is True
+  assert read_realtime_ui_params(params).always_on_dm is True
+  params.values["NewUi"] = 0
+  assert cache.refresh(1) is False
+  assert params.calls.count("NewUi") == 3
+
+
+def test_new_ui_unknown_native_key_does_not_block_existing_ui_preferences():
+  params = FakeParams({"RecordAudio": 0, "IsMetric": 1, "AlwaysOnDM": 1})
+  cache = TimedSnapshotCache(False, lambda: params.get_bool("NewUi"))
+  assert cache.refresh(0) is False
+  assert cache.refresh(.05) is False
+  snapshot = read_realtime_ui_params(params)
+  assert snapshot.is_metric and snapshot.always_on_dm
+  params.values["NewUi"] = 1
+  assert cache.refresh(.5) is True
 
 
 def test_pending_store_rejects_stale_screen_record_until_acknowledged():

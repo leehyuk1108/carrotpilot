@@ -225,13 +225,13 @@ def ui_method(filename, class_name, name, ns):
 def test_hud_timer_hides_only_overlapping_panel_and_repaints_cache_immediately():
   calls, keys = [], []
   obj = SimpleNamespace(_status_timer_visible=False, _overlay_state=None, _traffic_light_info=None,
-                        _can_draw_top_icons=True, _show_wheel_critical=False)
+                        _can_draw_top_icons=True, _show_wheel_critical=False, _new_ui_active=False)
   for name in ('_draw_set_speed', '_draw_steering_wheel', '_draw_egpu_badge', '_draw_cruise_speed_animation'):
     setattr(obj, name, lambda _, name=name: calls.append(name))
   paint = ui_method('hud_renderer.py', 'HudRenderer', '_paint', {})
   obj._paint = lambda rect: paint(obj, rect)
   obj._overlay = SimpleNamespace(draw=lambda rect, callback, key, **_: (keys.append(key), callback(rect)))
-  render = ui_method('hud_renderer.py', 'HudRenderer', '_render', {})
+  render = ui_method('hud_renderer.py', 'HudRenderer', '_render', {'ui_state': SimpleNamespace(new_ui=False)})
   for visible in (False, True, False):
     obj._status_timer_visible = visible
     calls.clear()

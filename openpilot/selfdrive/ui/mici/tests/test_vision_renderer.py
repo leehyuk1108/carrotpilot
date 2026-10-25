@@ -47,6 +47,7 @@ def test_mici_draws_classified_dashes_and_double_yellow(mici_modules):
   renderer._map_line_to_polygon = lambda points, *_args, **_kwargs: points[:, :2]
   renderer._acceleration_x = []
   renderer._acceleration_x_filter = renderer._acceleration_x_filter2 = SimpleNamespace(update=lambda *_args: None)
+  renderer._display_clock = SimpleNamespace(update_filter=lambda filt, value: filt.update(value))
   renderer._experimental_mode = False
   renderer._path_offset_z = 0
   renderer._update_model(None, line[:, 0], SimpleNamespace(leftLaneLine=24, rightLaneLine=0))
@@ -156,3 +157,20 @@ def test_mici_status_card_clears_speed_and_gear(mici_modules, monkeypatch):
   # Match the approved DM/vision column at x=382 with a 10px right margin.
   assert card.x + card.width <= 476 - 10
   assert card.y + card.height <= 240 - 18
+
+
+def test_new_ui_hides_only_status_card_and_labels_not_bsd_strips(mici_modules, monkeypatch):
+  module, vision = mici_modules
+  renderer = vision.VisionRenderer()
+  rectangles, texts = [], []
+  renderer._text = lambda text, *_args: texts.append(text)
+  monkeypatch.setattr(vision.rl, 'draw_rectangle_rounded', lambda rect, *_args: rectangles.append(rect))
+  class SM(dict):
+    valid = {'carState': True}
+    alive = {'carState': True}
+    recv_frame = {'carState': 10}
+  monkeypatch.setattr(vision, 'ui_state', SimpleNamespace(started=True, started_frame=1, share_data=True, new_ui=True,
+    sm=SM(carState=SimpleNamespace(leftBlindspot=True, rightBlindspot=True))))
+  renderer._render(module.rl.Rectangle(0, 0, 476, 240))
+  assert [(r.x, r.y, r.width, r.height) for r in rectangles] == [(6, 78, 6, 56), (464, 78, 6, 56)]
+  assert not texts

@@ -71,9 +71,10 @@ class VisionRenderer(Widget):
         source_colors[side] = source_color
         x = rect.x + 6 if is_left else rect.x + rect.width - 12
         rl.draw_rectangle_rounded(rl.Rectangle(x, rect.y + 78, 6, 56), 0.8, 6, source_color)
-        self._text("BSD", rect.x + 16 if is_left else rect.x + rect.width - 45, rect.y + 84, source_color, 12)
+        if not getattr(ui_state, "new_ui", False):
+          self._text("BSD", rect.x + 16 if is_left else rect.x + rect.width - 45, rect.y + 84, source_color, 12)
 
-    if not ui_state.share_data or self._status_timer_visible:
+    if not ui_state.share_data or self._status_timer_visible or getattr(ui_state, "new_ui", False):
       return
     state = vision_display_state(self._packet, time.monotonic_ns())
     # Above the DM inset, below eGPU, beside the relocated right BSD label/bar.

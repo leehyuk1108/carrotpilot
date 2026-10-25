@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pyray as rl
 
-from openpilot.system.ui.lib.application import gui_app, FontWeight
+from openpilot.system.ui.lib.application import gui_app, FontWeight, TextAlignment
 from openpilot.system.ui.lib.text_measure import measure_text_cached
 from openpilot.system.ui.lib.wrap_text import wrap_text
 from openpilot.system.ui.widgets.label import gui_label
@@ -37,7 +37,7 @@ def draw_jetlink_badge(status: tuple[str, str] | None, bounds: rl.Rectangle, fon
   roundness = min(1., 16. / min(rect.width, rect.height))
   rl.draw_rectangle_rounded(rect, roundness, 8, rl.Color(0, 0, 0, 170))
   rl.draw_rectangle_rounded_lines_ex(rect, roundness, 8, 2, color)
-  alignment = rl.GuiTextAlignment.TEXT_ALIGN_CENTER if stacked else rl.GuiTextAlignment.TEXT_ALIGN_LEFT
+  alignment = TextAlignment.CENTER if stacked else TextAlignment.LEFT
   gui_label(rl.Rectangle(rect.x + pad_x, rect.y, rect.width - 2 * pad_x, rect.height),
             text, font_size, color, weight, alignment=alignment, elide_right=True)
   return rect

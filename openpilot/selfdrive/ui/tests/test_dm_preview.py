@@ -181,6 +181,21 @@ def test_stalled_model_frame_drops_pose_even_with_fresh_publications(preview):
   assert p.inset._expression is not None and p.labels[-1] == 'DM FACE'
 
 
+def test_new_ui_position_does_not_change_dm_gating(preview):
+  p = preview
+  rects = []
+  p.inset.render = lambda rect: rects.append(rect)
+  assert p.inset.draw_onroad(p.rect, False, top_left=True)
+  assert (rects[-1].x, rects[-1].y) == (p.rect.x + 16, p.rect.y + 10)
+  if p.inset.compact:
+    assert rects[-1].x + rects[-1].width < 380  # Jetlink column.
+    assert rects[-1].x > 12  # Left BSD strip.
+  assert not p.inset.draw_onroad(p.rect, True, top_left=True)
+  p.ui.started = False
+  assert not p.inset.draw_onroad(p.rect, False, top_left=True)
+  assert len(rects) == 1
+
+
 def test_camera_failure_wheel_policy_and_recovery(preview):
   p = preview
   p.dm.cameraUnavailable = True

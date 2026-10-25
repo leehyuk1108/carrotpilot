@@ -93,6 +93,9 @@ class UIState:
     self.is_metric: bool = realtime_params.is_metric
     self.is_release = self.params.get_bool("IsReleaseBranch")
     self.always_on_dm: bool = realtime_params.always_on_dm
+    # A stale native Params build must not block metric/DM setting refreshes.
+    self._new_ui_param = TimedSnapshotCache(False, lambda: self.params.get_bool("NewUi"))
+    self.new_ui: bool = self._new_ui_param.refresh(time.monotonic())
     self._record_audio_param: bool = realtime_params.record_audio
     self.started: bool = False
     self.ignition: bool = False
@@ -199,6 +202,7 @@ class UIState:
     self.recording_audio = self._record_audio_param and self.started
     self.is_metric = realtime_params.is_metric
     self.always_on_dm = realtime_params.always_on_dm
+    self.new_ui = self._new_ui_param.refresh(time.monotonic())
 
   def _update_status(self) -> None:
     if self.started and self.sm.updated["selfdriveState"]:

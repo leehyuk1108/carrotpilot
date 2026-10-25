@@ -152,6 +152,7 @@ class TorqueBar(Widget):
   def __init__(self, demo: bool = False):
     super().__init__()
     self._demo = demo
+    self.lateral_active = False
     self._torque_filter = FirstOrderFilter(0, 0.1, 1 / gui_app.target_fps)
     self._torque_line_alpha_filter = FirstOrderFilter(0.0, 0.1, 1 / gui_app.target_fps)
 
@@ -195,13 +196,13 @@ class TorqueBar(Widget):
 
     # animate alpha and angle span
     if not self._demo:
-      self._torque_line_alpha_filter.update(ui_state.status != UIStatus.DISENGAGED)
+      self._torque_line_alpha_filter.update(ui_state.status != UIStatus.DISENGAGED or self.lateral_active)
     else:
       self._torque_line_alpha_filter.update(1.0)
 
     torque_line_bg_alpha = np.interp(abs(self._torque_filter.x), [0.5, 1.0], [0.25, 0.5])
     torque_line_bg_color = rl.Color(255, 255, 255, int(255 * torque_line_bg_alpha * self._torque_line_alpha_filter.x))
-    if ui_state.status != UIStatus.ENGAGED and not self._demo:
+    if ui_state.status != UIStatus.ENGAGED and not self.lateral_active and not self._demo:
       torque_line_bg_color = rl.Color(255, 255, 255, int(255 * 0.15 * self._torque_line_alpha_filter.x))
 
     # draw curved line polygon torque bar

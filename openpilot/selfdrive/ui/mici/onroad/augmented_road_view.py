@@ -307,7 +307,11 @@ class AugmentedRoadView(CameraView):
     # Custom UI extension point - add custom overlays here
     # Use self._content_rect for positioning within camera bounds
     _t = time.monotonic()
-    self._driver_state_renderer.draw_onroad(self.rect, alert_to_render is not None)
+    new_ui = ui_state.new_ui
+    self._driver_state_renderer.draw_onroad(
+      self.rect, alert_to_render is not None or (new_ui and (self._alert_renderer.timer_visible or self._hud_renderer.drawing_top_icons())),
+      top_left=new_ui,
+    )
     ds_ms = (time.monotonic() - _t) * 1000.0
     _t = time.monotonic()
     self._traffic_light.render(self.rect)

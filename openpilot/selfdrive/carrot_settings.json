@@ -490,6 +490,7 @@
           "en": "On-screen Info",
           "zh": "信息显示",
           "params": [
+            "NewUi",
             "ShowDebugUI",
             "ShowTpms",
             "ShowDateTime",
@@ -2187,6 +2188,23 @@
       "unit": 1,
       "display_unit": "percent",
       "risk": "high"
+    },
+    {
+      "group": "화면",
+      "name": "NewUi",
+      "title": "new ui",
+      "descr": "C4 온로드 화면을 Wayon/sunnypilot 스타일로 표시합니다. OFF는 기존 당근 UI입니다. 재부팅 없이 적용되며 주행 제어·운전자 감시 판단은 바뀌지 않습니다.",
+      "egroup": "DISP",
+      "etitle": "new ui",
+      "edescr": "Use the Wayon/sunnypilot-style C4 onroad display. OFF restores the Carrot UI. Applies without rebooting; driving control and driver monitoring are unchanged.",
+      "cgroup": "显示设置",
+      "ctitle": "new ui",
+      "cdescr": "启用 Wayon/sunnypilot 风格的 C4 行车界面。关闭时恢复原界面。无需重启，不改变车辆控制或驾驶员监控。",
+      "control": "toggle",
+      "min": 0,
+      "max": 1,
+      "default": 0,
+      "unit": 1
     },
     {
       "group": "화면",

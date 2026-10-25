@@ -198,6 +198,8 @@ class HudRenderer(Widget):
 
     self._can_draw_top_icons = True
     self._status_timer_visible = False
+    self._new_ui_active = False
+    self._wayon_hud = None
     self._show_wheel_critical = False
 
     self._font_bold: rl.Font = gui_app.font(FontWeight.BOLD)
@@ -242,6 +244,8 @@ class HudRenderer(Widget):
 
   def drawing_top_icons(self) -> bool:
     # whether we're drawing any top icons currently
+    if self._new_ui_active and self._wayon_hud is not None:
+      return self._wayon_hud.drawing_top_icons()
     return bool(self._set_speed_alpha_filter.x > 1e-2)
 
   def _update_state(self) -> None:
@@ -307,6 +311,25 @@ class HudRenderer(Widget):
 
   def _render(self, rect: rl.Rectangle) -> None:
     """Render HUD elements to the screen."""
+    new_ui = getattr(ui_state, "new_ui", False)
+    if new_ui != self._new_ui_active:
+      self._overlay.invalidate()
+      self._cruise_speed_animation_time = -1
+      if new_ui:
+        if self._wayon_hud is None:
+          from openpilot.selfdrive.ui.mici.onroad.wayon_hud import WayonHud
+          self._wayon_hud = WayonHud()
+        self._wayon_hud.reset()
+        if self._engaged:
+          self._set_speed_changed_time = rl.get_time()
+      self._new_ui_active = new_ui
+    if new_ui:
+      self._wayon_hud.draw(rect, self)
+      if self._can_draw_top_icons or self._status_timer_visible:
+        self._draw_traffic_light_info(int(rect.x + 212), int(rect.y + 40))
+      if self._can_draw_top_icons and not self._status_timer_visible:
+        self._draw_egpu_badge(rect)
+      return
     state = self._overlay_state
     key = (state.key if state else None, self._traffic_light_info, self._can_draw_top_icons, self._show_wheel_critical,
            self._status_timer_visible)
@@ -356,6 +379,9 @@ class HudRenderer(Widget):
     font = gui_app.font(FontWeight.DISPLAY) if not text.isascii() else self._font_semi_bold
     font_size = 22
     text_size = measure_text_cached(font, text, font_size)
+    if getattr(self, "_new_ui_active", False) and text_size.x > 108:
+      font_size *= 108 / text_size.x
+      text_size = measure_text_cached(font, text, font_size)
     pad_x, pad_y = 10, 5
     badge_w = text_size.x + pad_x * 2
     badge = rl.Rectangle(
@@ -384,7 +410,16 @@ class HudRenderer(Widget):
     )
 
   def draw_jetlink_status(self, rect: rl.Rectangle, alert=None) -> None:
+    if getattr(self, "_new_ui_active", False) and (alert is not None or self._status_timer_visible):
+      return  # Leave the full alert/timer region clear in the minimal layout.
     if ui_state.usbgpu_active or getattr(ui_state, 'usbgpu_recovery_badge', None):
+      return
+    if getattr(self, "_new_ui_active", False):
+      draw_jetlink_badge(ui_state.jetlink_badge, rl.Rectangle(rect.x + rect.width - 106, rect.y + 24, 80, 42),
+                        13, stacked=True)
+      if ui_state.jetlink_detail:
+        draw_jetlink_detail(ui_state.jetlink_detail, rl.Rectangle(rect.x + rect.width - 106, rect.y + 66, 80, 52),
+                           10, time.monotonic() - ui_state.jetlink_detail_since)
       return
     if alert is not None:
       if alert.status != log.SelfdriveState.AlertStatus.normal or alert.size == log.SelfdriveState.AlertSize.full:

@@ -39,7 +39,7 @@ class DriverPreview(Widget):
     self._closed = True
     self._reset_expression()
 
-  def draw_onroad(self, parent: rl.Rectangle, alert_visible: bool) -> bool:
+  def draw_onroad(self, parent: rl.Rectangle, alert_visible: bool, *, top_left: bool = False) -> bool:
     sm = ui_state.sm
     # Parent views may not call us at all while offroad.
     if self._started_frame != ui_state.started_frame:
@@ -49,7 +49,10 @@ class DriverPreview(Widget):
     if not visible:
       self._reset_expression()
       return False
-    self.render(rl.Rectangle(*preview_rect(parent.x, parent.y, parent.width, parent.height, self.compact)))
+    rect = rl.Rectangle(*preview_rect(parent.x, parent.y, parent.width, parent.height, self.compact))
+    if top_left:
+      rect = rl.Rectangle(parent.x + 16, parent.y + 10, rect.width, rect.height)
+    self.render(rect)
     return True
 
   @staticmethod

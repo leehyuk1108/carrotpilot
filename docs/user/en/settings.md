@@ -37,6 +37,12 @@ On a fresh install, `Tools > Web Settings > Layout` starts with **Area 1 full sc
 
 ## Using the Settings screen
 
+### C4 display selection: new ui
+
+**Display → On-screen Info → new ui** (`NewUi`) defaults to OFF. ON selects the Wayon/sunnypilot-style C4 onroad layout: a bottom steering wheel and torque bar, plus MAX set speed for about 2.5 seconds after a change. The persistent large speed/gear/debug panel and VISION status card are hidden. Camera, lanes, surrounding vehicles, blind-spot warnings, parking/hold timers and primary alerts remain. DM moves to the top left and yields to MAX, timers and alerts. Lateral-only engagement retains a green steering wheel. Cruise gap, driving mode, NAVI connection text and the slowdown target/reason panel are hidden in this minimal layout; select OFF when those details are needed.
+
+The selection refreshes about every 0.5 seconds without a reboot; OFF restores the existing Carrot UI. It does not change C3, the external cluster, offroad greetings/summary, steering, braking or driver-monitoring decisions. The initial software update must complete its normal build to register the new parameter.
+
 Carrot Web provides:
 
 - **Category navigation** through category, group, and section
