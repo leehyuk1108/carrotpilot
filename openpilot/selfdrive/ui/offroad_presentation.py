@@ -105,18 +105,24 @@ class DoorWake:
   """Consume only new closed-to-open edges from the existing offroad CAN reader."""
   def __init__(self, path: Path = DOOR_PATH):
     self.path = path
-    self.last_open = None
+    # Existing files are a baseline. A first file created after UI startup is
+    # a new observation, including the first door opening after a reboot.
+    self.last_open = self._read() or False
 
-  def poll(self, *, offroad: bool) -> bool:
+  def _read(self) -> bool | None:
     try:
       with self.path.open('rb') as stream:
         raw = stream.read(8).strip()
     except OSError:
-      return False
+      return None
     if raw not in (b'0', b'1'):
+      return None
+    return raw == b'1'
+
+  def poll(self, *, offroad: bool) -> bool:
+    opened = self._read()
+    if opened is None:
       return False
-    opened = raw == b'1'
     wake = offroad and self.last_open is False and opened
-    # Establish a baseline on startup; cached open doors must not replay wakes.
     self.last_open = opened
     return wake

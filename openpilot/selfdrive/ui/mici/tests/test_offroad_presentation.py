@@ -84,9 +84,8 @@ def test_easing_is_bounded(t, expected):
 
 def test_door_wakes_once_per_new_open_without_replaying_cached_value(tmp_path):
   path = tmp_path / 'door'
-  wake = DoorWake(path)
-  assert not wake.poll(offroad=True)
   path.write_bytes(b'1')
+  wake = DoorWake(path)
   assert not wake.poll(offroad=True)
   path.write_bytes(b'0')
   assert not wake.poll(offroad=True)
@@ -103,6 +102,15 @@ def test_door_wakes_once_per_new_open_without_replaying_cached_value(tmp_path):
   wake.poll(offroad=False)
   path.write_bytes(b'1')
   assert not wake.poll(offroad=False)
+  assert not wake.poll(offroad=True)
+
+
+def test_first_door_event_after_reboot_is_not_lost(tmp_path):
+  path = tmp_path / 'door'
+  wake = DoorWake(path)
+  assert not wake.poll(offroad=True)
+  path.write_bytes(b'1')
+  assert wake.poll(offroad=True)
   assert not wake.poll(offroad=True)
 
 
@@ -131,7 +139,7 @@ def layout():
 
   ui = NS(started=False, ignition=False, engaged=False, sm=Messages(sm), started_frame=100,
           params=NS(get_int=lambda _: 0, get_bool=lambda _: False), show_camera_with_cluster=False)
-  device = NS(awake=True, _interaction_time=130)
+  device = NS(awake=True, _interaction_time=130, add_interactive_timeout_callback=lambda _: None)
   gui = NS(widget_in_stack=lambda _: False, pop_widgets_to=lambda obj, callback=None, **kw: callback() if callback else None)
   cls = main_class({'time': NS(monotonic=lambda: clock.now), 'rl': NS(get_time=lambda: clock.now),
                     'gui_app': gui, 'ui_state': ui, 'device': device, 'PC': False})
@@ -147,12 +155,13 @@ def layout():
   obj._in_plot_mode = False
   obj._show_plot_mode = 0
   obj._onboarding_window = object()
-  obj._home_layout = NS(rect=NS(x=0))
+  obj._home_layout = NS(rect=NS(x=0), set_callbacks=lambda **kw: None)
+  obj._info_layout = NS(set_callbacks=lambda **kw: None)
   obj._onroad_layout = NS(set_cluster_hud_connected=lambda *args: None)
   obj._debug_layout = object()
   obj._alerts_layout = NS(active_alerts=lambda: 0)
   obj._scroller = NS(scroll_to=lambda *args, **kw: None)
-  obj._sync_offroad_scroll = lambda: None
+  obj._sync_offroad_scroll = lambda **kw: None
   return obj, ui, clock
 
 
@@ -191,6 +200,28 @@ def test_movement_cancels_onroad_blackout(layout):
   assert obj._surface.start_time is not None
   ui.sm['carState'].standstill = False
   obj._handle_transitions()
+  assert obj._surface.state(clock.now) == ('onroad', 0)
+
+
+@pytest.mark.parametrize('standstill', [False, True])
+def test_no_onroad_tap_callback_that_hides_alerts(layout, standstill):
+  obj, ui, _ = layout
+  ui.started = ui.engaged = True
+  ui.sm['carState'].standstill = standstill
+  taps = []
+  obj._onroad_layout.set_click_callback = taps.append
+  obj._setup_callbacks()
+  assert taps == []
+
+
+def test_moving_plot_switch_never_blacks_out(layout):
+  obj, ui, clock = layout
+  ui.started = True
+  ui.sm['carState'].standstill = False
+  obj._scroll_to(obj._debug_layout)
+  assert obj._surface.state(clock.now) == ('plot', 0)
+  obj._in_plot_mode = False
+  obj._scroll_to(obj._onroad_layout)
   assert obj._surface.state(clock.now) == ('onroad', 0)
 
 

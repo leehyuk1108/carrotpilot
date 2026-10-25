@@ -20,13 +20,17 @@ Target: carrotpilot WIP-FR, based on `55b8d251e7`.
   experimental-mode long press) remains the next offroad swipe page, unchanged.
   Active offroad alerts and onboarding retain precedence. Plot, HUD-camera
   preference, recording commands and bookmark callback are retained.
+  As in Wayon, tapping the road view no longer opens the welcome page. Plot
+  selection remains available through ShowPlotMode; onroad/debug are no longer
+  manual offroad-swipe pages. Moving/engaged plot changes also skip the blackout.
 
 ## Door and trip inputs
 
 Device wakefulness polls the existing DoorMonitor's atomic
 `/dev/shm/params/d/OffroadDoorOpen` output. Only a new closed-to-open edge while
-both ignition and started are false resets the display timeout. The first
-sample is a baseline; missing/malformed files never replay a cached open door.
+both ignition and started are false resets the display timeout. A file already
+present when the UI starts is a baseline; a first file created afterward can
+wake it. Missing/malformed samples never reset a previously observed door edge.
 An open door does not keep the screen awake forever. This uses the existing GM
 offroad CAN support, not an inference that every vehicle supports door wake.
 No CAN sender, new subscriber, process, Params key or BT behavior was added.

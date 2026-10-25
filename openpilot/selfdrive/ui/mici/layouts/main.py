@@ -132,7 +132,7 @@ class MiciMainLayout(Scroller):
       on_settings=lambda: gui_app.push_widget(self._settings_layout),
       on_carrot_web=lambda: gui_app.push_widget(CarrotWebDialog()),
     )
-    self._onroad_layout.set_click_callback(lambda: self._scroll_to(self._home_layout))
+    # Like Wayon, road-view taps never navigate to the welcome surface.
     device.add_interactive_timeout_callback(self._on_interactive_timeout)
 
   def _scroll_to(self, layout: Widget):
@@ -141,12 +141,16 @@ class MiciMainLayout(Scroller):
       return
     self._in_plot_mode = target_is_plot
     surface = 'plot' if target_is_plot else 'onroad' if layout is self._onroad_layout else 'offroad'
-    immediate = surface == 'onroad' and (ui_state.engaged or not ui_state.sm['carState'].standstill)
+    immediate = surface in ('onroad', 'plot') and (ui_state.engaged or not ui_state.sm['carState'].standstill)
     self._surface.change(surface, time.monotonic(), instant=immediate)
     if surface == 'offroad':
       self._scroller.scroll_to(layout.rect.x, smooth=True)
 
-  def _sync_offroad_scroll(self):
+  def _sync_offroad_scroll(self, smooth: bool = False):
+    if smooth:
+      layout = self._alerts_layout if self._alerts_layout.active_alerts() else self._home_layout
+      self._scroller.scroll_to(layout.rect.x, smooth=True)
+      return
     # Reset ongoing swipe/filter state before selecting the home or an alert.
     self._scroller.show_event()
     offset = 0.0 if self._alerts_layout.active_alerts() else -self._rect.width
@@ -217,7 +221,7 @@ class MiciMainLayout(Scroller):
       active_alerts = self._alerts_layout.active_alerts()
       if active_alerts != self._prev_active_alerts:
         self._prev_active_alerts = active_alerts
-        self._sync_offroad_scroll()
+        self._sync_offroad_scroll(smooth=True)
 
     # FIXME: these two pops can interrupt user interacting in the settings
     if self._onroad_time_delay is not None and rl.get_time() - self._onroad_time_delay >= ONROAD_DELAY:
@@ -242,8 +246,8 @@ class MiciMainLayout(Scroller):
 
     # When car leaves standstill, pop nav stack and scroll to onroad
     CS = ui_state.sm["carState"]
-    if ui_state.started and self._surface.target == 'onroad' and (ui_state.engaged or not CS.standstill):
-      self._surface.change('onroad', now, instant=True)
+    if ui_state.started and self._surface.target in ('onroad', 'plot') and (ui_state.engaged or not CS.standstill):
+      self._surface.change(self._surface.target, now, instant=True)
     if ui_state.started and not CS.standstill and self._prev_standstill:
       gui_app.pop_widgets_to(self, lambda: self._scroll_to(self._onroad_layout))
     self._prev_standstill = CS.standstill
