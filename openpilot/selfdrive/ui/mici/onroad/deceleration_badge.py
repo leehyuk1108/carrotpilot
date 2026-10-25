@@ -1,4 +1,4 @@
-"""Display the selected speed cap, not a claim that the brake is actuating."""
+"""Display only an applied speed cap, not a claim that the brake is actuating."""
 import math
 
 import pyray as rl
@@ -53,7 +53,7 @@ class DecelerationBadge:
     self._active_since = 0.0
 
   def draw(self, rect: rl.Rectangle, font, state: tuple[str, bool] | None, now: float):
-    if state is None:
+    if state is None or not state[1]:
       self.reset()
       return
     label, active = state

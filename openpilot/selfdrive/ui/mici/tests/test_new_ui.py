@@ -220,7 +220,7 @@ def test_selected_deceleration_source_labels(scene, source, label):
 
 @pytest.mark.parametrize('condition', ['disengaged', 'lateral_only', 'gas', 'brake', 'no_cap', 'other_target',
                                       'stale_plan', 'invalid_control', 'old_plan', 'nan_plan', 'invalid_set'])
-def test_deceleration_does_not_blink_without_applied_cap(scene, condition):
+def test_deceleration_is_hidden_without_applied_cap(scene, condition):
   s = scene
   s.sm['carrotMan'] = NS(desiredSpeed=60, desiredSource='cam')
   s.sm['longitudinalPlan'].cruiseTarget = 60
@@ -245,6 +245,26 @@ def test_deceleration_does_not_blink_without_applied_cap(scene, condition):
   else:
     s.cs.vCruise = 255
   assert s.badge.selected_deceleration(s.sm, 100) == ('CAM', False)
+  s.hud._set_speed_changed_time = -10
+  s.renderer.draw(s.rect, s.hud)
+  assert not texts(s)
+  assert not any(call[0] == 'draw_rectangle_rounded' for call in s.calls)
+
+
+@pytest.mark.parametrize('source', (
+  'atc', 'atc2', 'cam', 'hda', 'cam:v', 'bump:n', 'hda_section', 'vturn', 'route', 'school',
+))
+def test_candidate_above_set_speed_has_no_badge(scene, source):
+  s = scene
+  s.hud._set_speed_changed_time = -10
+  s.cs.vCruise = 35
+  s.sm['carrotMan'] = NS(desiredSpeed=180, desiredSource=source)
+  s.sm['longitudinalPlan'].cruiseTarget = 35
+  state = s.badge.selected_deceleration(s.sm, 100)
+  assert state is not None and not state[1]
+  s.renderer.draw(s.rect, s.hud)
+  assert not texts(s)
+  assert not any(call[0] == 'draw_rectangle_rounded' for call in s.calls)
 
 
 @pytest.mark.parametrize('condition', ['unseen', 'expired', 'future', 'invalid', 'dead', 'old_session',
@@ -291,12 +311,28 @@ def test_badge_blinks_at_one_hz_keeps_text_and_does_not_move(scene):
   s.sm['carControl'].longActive = False
   s.calls.clear()
   s.renderer.draw(s.rect, s.hud)
-  assert tuple(next(call for call in s.calls if call[0] == 'draw_rectangle_rounded')[-1]) == s.badge.DecelerationBadge.IDLE
+  assert not texts(s)
+  assert not any(call[0] == 'draw_rectangle_rounded' for call in s.calls)
+  assert s.renderer._deceleration_badge._active_label is None
   s.sm['carControl'].longActive = True
   s.now[0] = 11.7
   s.calls.clear()
   s.renderer.draw(s.rect, s.hud)
   assert tuple(next(call for call in s.calls if call[0] == 'draw_rectangle_rounded')[-1]) == s.badge.DecelerationBadge.GREEN
+
+
+@pytest.mark.parametrize('state', [None, ('ROUTE', False), ('CAM', False)])
+def test_badge_clears_during_dark_phase_and_restarts_green(scene, state):
+  s = scene
+  badge = s.renderer._deceleration_badge
+  badge.draw(s.rect, s.hud._font_semi_bold, ('ROUTE', True), 10.)
+  s.calls.clear()
+  badge.draw(s.rect, s.hud._font_semi_bold, state, 10.7)
+  assert s.calls == []
+  assert badge._active_label is None and badge._active_since == 0
+  badge.draw(s.rect, s.hud._font_semi_bold, ('ROUTE', True), 10.8)
+  assert texts(s) == ['ROUTE']
+  assert tuple(next(call for call in s.calls if call[0] == 'draw_rectangle_rounded')[-1]) == badge.GREEN
 
 
 def test_compact_badge_clears_wheel_and_fits_long_label_at_offset(scene):

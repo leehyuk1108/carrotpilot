@@ -11,6 +11,7 @@ from openpilot.selfdrive.ui.ui_state import ui_state, UIStatus
 from openpilot.selfdrive.ui.vision_status import blindspot_source_packet, blindspot_sources
 from openpilot.selfdrive.ui.road_markings import lane_dash_segments, project_blindspot_barrier, blindspot_barrier_quads
 from openpilot.selfdrive.ui.mici.onroad import blend_colors
+from openpilot.selfdrive.ui.mici.onroad.lead_bar import LeadBar, LeadBarTarget
 from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.lib.text_draw import draw_text_ui_style
 from openpilot.system.ui.lib.shader_polygon import draw_polygon, Gradient
@@ -82,6 +83,8 @@ class ModelRenderer(Widget):
     self._lane_line_probs = np.zeros(4, dtype=np.float32)
     self._road_edge_stds = np.zeros(2, dtype=np.float32)
     self._lead_vehicles = [LeadVehicle(), LeadVehicle()]
+    self._lead_bar = LeadBar()
+    self._lead_bar_context = None
     self._path_offset_z = HEIGHT_INIT[0]
 
     # Initialize ModelPoints objects
@@ -123,9 +126,45 @@ class ModelRenderer(Widget):
     self._transform_dirty = True
 
   def _render(self, rect: rl.Rectangle):
+    if self._lead_bar_context is not None and self._lead_bar_context[1] != ui_state.new_ui:
+      self._transform_dirty = True
     state = self._overlay_state
     self._overlay.draw(rect, self._paint, state.key if state else None,
                        enabled=state is not None and state.enabled, urgent=state is not None and state.urgent)
+    # Animate the small marker every display frame, outside the cached road layer.
+    self._draw_lead_bar(rect)
+
+  def _draw_lead_bar(self, rect: rl.Rectangle):
+    context = (ui_state.started_frame, ui_state.new_ui, rect.x, rect.y, rect.width, rect.height)
+    if context != self._lead_bar_context:
+      self._lead_bar.reset()
+      self._lead_bar_context = context
+    if not ui_state.new_ui or not ui_state.started or not self._longitudinal_control:
+      self._lead_bar.reset()
+      return
+
+    sm = ui_state.sm
+    now = time.monotonic()
+
+    def fresh(service, max_age=None):
+      return (sm.valid[service] and sm.alive[service] and sm.recv_frame[service] > 0 and
+              sm.recv_frame[service] >= ui_state.started_frame and
+              (max_age is None or 0 <= now - sm.recv_time[service] <= max_age))
+
+    target = None
+    if (fresh('radarState', 0.35) and fresh('modelV2', 0.35) and fresh('liveCalibration') and
+        self._model_frame >= ui_state.started_frame and self._clip_region is not None and self._path.raw_points.size):
+      lead = sm['radarState'].leadOne
+      if lead.status and np.isfinite(lead.dRel) and np.isfinite(lead.yRel) and lead.dRel > 0:
+        idx = self._get_path_length_idx(self._path.raw_points[:, 0], lead.dRel)
+        z = float(self._path.raw_points[idx, 2]) + self._path_offset_z
+        left = self._map_to_screen(lead.dRel, -lead.yRel - 1.2, z)
+        right = self._map_to_screen(lead.dRel, -lead.yRel + 1.2, z)
+        if left is not None and right is not None:
+          x, y = (left[0] + right[0]) / 2, (left[1] + right[1]) / 2
+          if rect.x <= x <= rect.x + rect.width and rect.y <= y <= rect.y + rect.height - LeadBar.HEIGHT:
+            target = LeadBarTarget(x, y, abs(right[0] - left[0]) * 0.8, bool(lead.radar), int(lead.radarTrackId))
+    self._lead_bar.draw(target, now)
 
   def _paint(self, rect: rl.Rectangle):
     self._display_clock.tick()
@@ -171,7 +210,7 @@ class ModelRenderer(Widget):
 
       car_state = sm['carState'] if sm.valid['carState'] and sm.alive['carState'] else None
       self._update_model(lead_one, path_x_array, car_state)
-      if render_lead_indicator:
+      if render_lead_indicator and not ui_state.new_ui:
         self._update_leads_carrot(radar_state, path_x_array)
         
       if ui_state.show_radar_info > 0 and radar_state is not None:
@@ -189,7 +228,7 @@ class ModelRenderer(Widget):
 
     self._draw_blindspots(sm)
 
-    if render_lead_indicator and radar_state:
+    if render_lead_indicator and radar_state and not ui_state.new_ui:
       self._draw_lead_indicator()
     if ui_state.show_radar_info > 0:
       self._draw_radar_info()

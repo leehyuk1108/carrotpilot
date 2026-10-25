@@ -10,7 +10,8 @@ import pyray as rl
 
 def main():
   cases = ('set-speed', 'steady', 'disengaged', 'bsd', 'critical', 'parking', 'hold', 'three-digits', 'lateral-only',
-           'cam-active', 'cam-dim', 'cam-idle', 'turn-active', 'section-active', 'cap-max', 'cap-warning', 'cap-timer',
+           'cam-active', 'cam-dim', 'cam-idle', 'route-active', 'route-idle',
+           'turn-active', 'section-active', 'cap-max', 'cap-warning', 'cap-timer',
            'bsm-left', 'bsm-right', 'bsm-both', 'bsm-max', 'bsm-critical', 'bsm-timer',
            'bsm-fade-in', 'bsm-fade-out', 'bsm-cleared', 'bsm-stale')
   parser = argparse.ArgumentParser()
@@ -75,6 +76,11 @@ def main():
       sm['carrotMan'].desiredSpeed = 60 if cap else 250
       sm['carrotMan'].desiredSource = 'atc' if case == 'turn-active' else 'section' if case == 'section-active' else 'cam'
       sm['longitudinalPlan'].cruiseTarget = 60 if cap else 100
+      car.vCruise = 35 if case == 'route-idle' else 100
+      if case.startswith('route-'):
+        sm['carrotMan'].desiredSource = 'route'
+        sm['carrotMan'].desiredSpeed = 180 if case == 'route-idle' else 60
+        sm['longitudinalPlan'].cruiseTarget = 35 if case == 'route-idle' else 60
       frames = 1 if case == 'bsm-fade-in' else 41 if case in ('bsm-fade-out', 'bsm-stale') else 60 if case == 'bsm-cleared' else 40
       for frame in range(frames):
         if frame >= 40:
