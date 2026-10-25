@@ -39,7 +39,8 @@ navigation announcements, and phone/Bluetooth policies stay unchanged.
 
 The waveform and clip duration do change. prompt.wav is now 0.750 seconds
 (previously about 1.506 seconds), including its shared radarCutin/systemReady
-one-shot uses. critical and dm_critical clips are about 0.536 seconds and keep
+one-shot uses. The reboot chime also shares this clip and retains its 0.150-second
+silent lead-in (0.900 seconds total). critical and dm_critical clips are about 0.536 seconds and keep
 the existing indefinite-repeat policy. Tizi now uses the same latest engage
 and disengage recordings as the official player.
 
@@ -48,8 +49,12 @@ and disengage recordings as the official player.
 - Asset-only tests check all 27 copies against upstream hashes, valid nonempty
   mono 16-bit 48 kHz PCM, all existing sound routes, and both tizi aliases.
 - The import inventory confirms all 87 non-target WAV hashes unchanged.
-- The existing soundd one-shot test expectation is updated to the new exact
-  prompt duration; all other soundd tests and production code are unchanged.
+- The soundd one-shot and reboot-chime test expectations are updated to the new
+  exact duration. Asset/reboot tests: 80 passed on macOS; Ruff passes. Production
+  code is unchanged.
+- Before installation, Comma's actual soundd decoder passed 105 alert/language
+  variants, 1,126,284 official PCM sample comparisons, 15 one-shot checks and
+  48 DM-gain/repeat checks in an isolated process without opening audio output.
 - macOS cannot directly collect the native messaging-dependent soundd suite
   in this checkout (`msgq.ipc_pyx` is unavailable). Actual loader/PCM checks on
   Comma must be reported separately from the asset-only tests and from physical
