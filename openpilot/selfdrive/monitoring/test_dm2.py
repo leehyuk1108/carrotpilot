@@ -218,6 +218,36 @@ def test_strict_camera_restores_pose_and_phone_criteria():
   assert dm._timeouts('WHEELTOUCH') == (5, 15, 25)
 
 
+@pytest.mark.parametrize('strict', [False, True])
+def test_wayon_phone_option_preserves_detection_and_existing_alert_state(strict):
+  dm = DriverMonitoring2(experimental=True)
+  msg = make_msg(True)
+  msg.leftDriverData.phoneProb = 0.99
+  dm.alert_3_cnt, dm.no_response_cnt = 1, 2
+  dm.configure_context(1, True, strict=strict)
+  dm._update_states(msg, [0, 0, 0], 20, True, False)
+  assert dm.driver_distracted
+  dm.ignore_phone_dm = True
+  dm.configure_context(1.05, True, strict=strict)
+  dm._update_states(msg, [0, 0, 0], 20, True, False)
+  state = dm.get_state_packet().driverMonitoringState.visionPolicyState
+  assert state.distractedTypes.phone and not state.isDistracted
+  assert dm.forward_score < 0.1  # Do not grant DM2's extra forward-recovery credit for a detected phone.
+  assert (dm.alert_3_cnt, dm.no_response_cnt) == (1, 2)
+
+
+def test_wayon_phone_option_keeps_phone_icon_at_wayon_threshold_in_experimental_mode():
+  dm = DriverMonitoring2(experimental=True)
+  dm.ignore_phone_dm = True
+  dm.configure_context(1, True)
+  msg = make_msg(True)
+  msg.leftDriverData.phoneProb = 0.75
+  dm._update_states(msg, [0, 0, 0], 20, True, False)
+  state = dm.get_state_packet().driverMonitoringState.visionPolicyState
+  assert state.distractedTypes.phone and not state.isDistracted
+  assert dm.settings._PHONE_THRESH == 0.5
+
+
 def test_stale_duplicate_or_future_input_cannot_restart_grace():
   dm = DriverMonitoring2(experimental=True)
   dm.configure_context(10, True)

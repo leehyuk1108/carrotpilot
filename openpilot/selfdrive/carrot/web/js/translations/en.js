@@ -812,6 +812,8 @@ window.CarrotTranslations.register("en", {
     vision_unavailable_title: "Carrot Vision unavailable",
     dm_experimental_warning: "Experimental driver monitoring may violate applicable law. Use only for experiments in a controlled test environment; public-road legality and safety are not assured. Do you agree to experimental use only and wish to enable it?",
     dm_experimental_cancelled: "Experimental mode was not enabled.",
+    dm_ignore_phone_warning: "Ignoring phone-only driver monitoring weakens detection of real phone use. Head pose, eyes, sleep, and camera-loss warnings remain active. Enable only for controlled testing?",
+    dm_ignore_phone_cancelled: "Phone-only DM exclusion was not enabled.",
     vision_unavailable_hint: "Enable Carrot Vision in settings.",
     vision_step_unavailable: "Check the setting.",
     vision_step_inactive: "Waiting to start",

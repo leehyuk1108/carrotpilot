@@ -8,6 +8,14 @@ from openpilot.selfdrive.monitoring import dm2d
 from openpilot.selfdrive.monitoring.test_monitoring import make_msg
 
 
+@pytest.mark.parametrize('ignore_phone_dm', [False, True])
+def test_wayon_phone_setting_loaded_for_actual_dm_daemon(monkeypatch, ignore_phone_dm):
+  monitor = SimpleNamespace(ignore_phone_dm=False)
+  monkeypatch.setattr(dm2d, 'DriverMonitoring2', lambda **kwargs: monitor)
+  params = SimpleNamespace(get_bool=lambda key: ignore_phone_dm if key == 'SimulationIgnorePhoneDM' else False)
+  assert dm2d.new_driver_monitor(params, False).ignore_phone_dm == ignore_phone_dm
+
+
 def checked_submaster(state, replay=False):
   def create(services, *, poll=None, frequency=None):
     # Preserve the real IPC API contract even in the simulated daemon loop.

@@ -770,6 +770,8 @@ window.CarrotTranslations.register("zh", {
     vision_unavailable_title: "Carrot Vision 不可用",
     dm_experimental_warning: "实验性驾驶员监控可能违反法规。仅限受控测试环境中的实验用途，不保证公路使用的合法性或安全性。是否同意仅用于实验并启用？",
     dm_experimental_cancelled: "未启用实验模式。",
+    dm_ignore_phone_warning: "忽略仅由手机触发的驾驶员监控会削弱对实际使用手机的检测。头部姿态、眼睛、困倦和摄像头丢失警告仍会生效。仅在受控测试中启用吗？",
+    dm_ignore_phone_cancelled: "未启用仅手机触发的驾驶员监控排除选项。",
     vision_unavailable_hint: "请在设置中启用 Carrot Vision。",
     vision_step_unavailable: "请检查设置。",
     vision_step_inactive: "等待启动",

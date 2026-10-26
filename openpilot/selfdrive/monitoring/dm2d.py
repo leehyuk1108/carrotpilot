@@ -88,8 +88,10 @@ def soft_hold_pause_eligible(sm, now, demo=False):
 
 
 def new_driver_monitor(params, experimental):
-  return DriverMonitoring2(rhd_saved=params.get_bool("IsRhdDetected"), always_on=params.get_bool("AlwaysOnDM"),
-                           experimental=experimental)
+  dm = DriverMonitoring2(rhd_saved=params.get_bool("IsRhdDetected"), always_on=params.get_bool("AlwaysOnDM"),
+                         experimental=experimental)
+  dm.ignore_phone_dm = params.get_bool("SimulationIgnorePhoneDM")
+  return dm
 
 
 def disabled_state_packet(rhd, experimental, monitor=None, valid=True, camera_unavailable=False):
@@ -225,6 +227,7 @@ def run_dm2(params, experimental, initial_car_params=None):
       monitoring_enabled = requested_enabled
       if monitoring_enabled:
         dm.always_on = params.get_bool("AlwaysOnDM")
+        dm.ignore_phone_dm = params.get_bool("SimulationIgnorePhoneDM")
       demo_mode = params.get_bool("IsDriverViewEnabled")
       rhd_saved = params.get_bool("IsRhdDetected")
     if sm.updated['carParams']:

@@ -176,8 +176,8 @@ class DriverMonitoring2(DriverMonitoring):
         for field, value in zip(fields, previous, strict=True):
           setattr(self.settings, field, value * 1.2)
 
-      # Temporary standard monitoring also restores the stock phone threshold.
-      if self.experimental_active:
+      # Keep Wayon's phone-icon threshold when phone-only DM exclusion is selected.
+      if self.experimental_active and not self.ignore_phone_dm:
         self.settings._PHONE_THRESH = 0.98
 
       super()._get_distracted_types()

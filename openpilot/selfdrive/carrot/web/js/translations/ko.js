@@ -810,6 +810,8 @@ window.CarrotTranslations.register("ko", {
     vision_unavailable_title: "당근 비전 사용 불가",
     dm_experimental_warning: "실험적 운전자 감시는 법규에 위배될 수 있습니다. 통제된 시험 환경의 실험 목적으로만 사용하며 공도 사용의 적법성이나 안전성을 보장하지 않습니다. 실험 용도로만 사용한다는 조건에 동의하고 활성화할까요?",
     dm_experimental_cancelled: "실험 모드를 켜지 않았습니다.",
+    dm_ignore_phone_warning: "휴대폰 단독 운전자 감시를 제외하면 실제 휴대폰 사용 감지가 약해집니다. 고개·눈·졸음·카메라 미검출 경고는 유지됩니다. 통제된 시험에서만 켤까요?",
+    dm_ignore_phone_cancelled: "휴대폰 단독 감시 제외를 켜지 않았습니다.",
     vision_unavailable_hint: "Carrot Vision 사용 설정을 켜세요.",
     vision_step_unavailable: "설정을 확인해 주세요.",
     vision_step_inactive: "시작 대기 중",

@@ -142,6 +142,7 @@ class DriverMonitoring:
 
     self.alert_level = AlertLevel.none
     self.always_on = always_on
+    self.ignore_phone_dm = False
     self.distracted_types = defaultdict(bool)
     self.driver_distracted = False
     self.driver_distraction_filter = FirstOrderFilter(0., self.settings._DISTRACTED_FILTER_TS, DT_DMON)
@@ -280,7 +281,8 @@ class DriverMonitoring:
     self.sleep_prob = driver_data.sleepProb
 
     self._get_distracted_types()
-    self.driver_distracted = any(self.distracted_types.values()) and driver_data.faceProb > self.settings._FACE_THRESHOLD and self.pose.low_std
+    distracted = any(value for kind, value in self.distracted_types.items() if kind != 'phone' or not self.ignore_phone_dm)
+    self.driver_distracted = distracted and driver_data.faceProb > self.settings._FACE_THRESHOLD and self.pose.low_std
     self.driver_distraction_filter.update(self.driver_distracted)
 
     # only update offsetter when driver is actively driving the car above a certain speed

@@ -452,6 +452,7 @@
           "params": [
             "DriverMonitoringEnabled",
             "DriverMonitoringMode",
+            "SimulationIgnorePhoneDM",
             "CarrotVisionEnabled",
             "MuteDoor",
             "MuteSeatbelt"
@@ -2025,6 +2026,24 @@
       "control": "toggle",
       "risk": "high",
       "search_only": true
+    },
+    {
+      "group": "시작",
+      "name": "SimulationIgnorePhoneDM",
+      "title": "휴대폰 단독 DM 판정 제외 (시험용)",
+      "descr": "Wayon 방식. 켜면 휴대폰 감지 단독으로는 운전자 감시 경고가 누적되지 않습니다. 휴대폰 아이콘과 전방 접근 경고는 유지되고, 눈·고개·졸음·얼굴 미검출 경고 및 기존 재사용 제한은 그대로 작동합니다. 실제 휴대폰 사용에 대한 감시가 약해지므로 통제된 시험에서만 사용하세요. 변경은 약 2초 내 반영됩니다.",
+      "egroup": "START",
+      "etitle": "Ignore Phone-Only DM Detection (Experimental)",
+      "edescr": "Wayon-style option. When enabled, phone detection alone does not accumulate driver-monitoring warnings. The phone icon and forward-closing warning remain; gaze, head pose, sleep, face loss, and existing lockout still apply. This weakens monitoring of actual phone use; use only in controlled testing. Changes apply within about two seconds.",
+      "cgroup": "启动设置",
+      "ctitle": "忽略仅由手机触发的驾驶员监控（测试）",
+      "cdescr": "启用后，仅手机检测不会累积驾驶员监控警告。手机图标与前车接近警告仍保留，视线、头部姿态、困倦、面部丢失及已有锁定继续生效。此选项会削弱对实际手机使用的监控，仅限受控测试。约两秒内生效。",
+      "min": 0,
+      "max": 1,
+      "default": 0,
+      "unit": 1,
+      "control": "toggle",
+      "risk": "high"
     },
     {
       "group": "시작",

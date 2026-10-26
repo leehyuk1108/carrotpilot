@@ -50,6 +50,38 @@ always_true = [True] * int(TEST_TIMESPAN / DT_DMON)
 always_false = [False] * int(TEST_TIMESPAN / DT_DMON)
 
 class TestMonitoring:
+  @pytest.mark.parametrize('ignore_phone_dm,expected_distracted', [(False, True), (True, False)])
+  def test_phone_detection_remains_visible_when_excluded_from_dm(self, ignore_phone_dm, expected_distracted):
+    dm = DriverMonitoring()
+    dm.ignore_phone_dm = ignore_phone_dm
+    msg = make_msg(True)
+    msg.leftDriverData.phoneProb = 1.0
+    for _ in range(round(15 / DT_DMON)):
+      dm._update_states(msg, [0, 0, 0], 20, True, False)
+      dm._update_events(False, True, False, False)
+    state = dm.get_state_packet().driverMonitoringState.visionPolicyState
+    assert state.distractedTypes.phone
+    assert state.isDistracted == expected_distracted
+    if ignore_phone_dm:
+      assert dm.alert_level == log.DriverMonitoringState.AlertLevel.none and dm.awareness == 1.0
+    else:
+      assert dm.alert_level != log.DriverMonitoringState.AlertLevel.none
+
+  @pytest.mark.parametrize('cause', ['eye', 'pose', 'sleep'])
+  def test_ignoring_phone_keeps_other_dm_causes(self, cause):
+    dm = DriverMonitoring()
+    dm.ignore_phone_dm = True
+    msg = make_msg(True, distracted=(cause == 'eye'))
+    msg.leftDriverData.phoneProb = 1.0
+    if cause == 'pose':
+      msg.leftDriverData.faceOrientation = [0., 1.0, 0.]
+    elif cause == 'sleep':
+      msg.leftDriverData.sleepProb = 0.99
+    dm._update_states(msg, [0, 0, 0], 20, True, False)
+    state = dm.get_state_packet().driverMonitoringState.visionPolicyState
+    assert state.distractedTypes.phone and getattr(state.distractedTypes, cause)
+    assert state.isDistracted
+
   @pytest.mark.parametrize('rhd', [False, True])
   @pytest.mark.parametrize('seconds,level', [(DISTRACTED_SECONDS_TO_ORANGE, 2), (DISTRACTED_SECONDS_TO_RED, 3)])
   def test_sleep_prediction_triggers_alert_and_recovers(self, rhd, seconds, level):

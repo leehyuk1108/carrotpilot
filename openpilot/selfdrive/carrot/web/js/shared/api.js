@@ -28,6 +28,11 @@ function getParamCommitter() {
 }
 
 async function setParam(name, value, options) {
+  if (name === "SimulationIgnorePhoneDM" && Number(value) === 1) {
+    const accepted = await appConfirm(getUIText("dm_ignore_phone_warning",
+      "Ignoring phone-only driver monitoring weakens detection of real phone use. Head pose, eyes, sleep, and camera-loss warnings remain active. Enable only for controlled testing?"));
+    if (!accepted) throw new Error(getUIText("dm_ignore_phone_cancelled", "Phone-only DM exclusion was not enabled."));
+  }
   if (name === "DriverMonitoringMode" && Number(value) === 1) {
     const accepted = await appConfirm(getUIText("dm_experimental_warning",
       "Experimental driver monitoring may violate applicable law. Use only for experiments in a controlled test environment. Public-road legality and safety are not assured. Enable for experimental use only?"));
