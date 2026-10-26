@@ -315,6 +315,14 @@ class Soundd:
     volume = ((weighted_db - AMBIENT_DB) / DB_SCALE) * (MAX_VOLUME - MIN_VOLUME) + MIN_VOLUME
     return math.pow(VOLUME_BASE, (np.clip(volume, MIN_VOLUME, MAX_VOLUME) - 1))
 
+  def update_volume(self, sm):
+    adjust = self.params.get_int("SoundVolumeAdjust")
+    self.soundVolumeAdjust = 1.0 if adjust == -1 else max(0.0, adjust / 100.0)
+    # Do not let the speaker's own alert feed back into the ambient-noise gain.
+    if sm.updated['soundPressure'] and self.current_alert == AudibleAlert.none:
+      self.spl_filter_weighted.update(sm["soundPressure"].soundPressureWeightedDb)
+      self.current_volume = self.calculate_volume(float(self.spl_filter_weighted.x)) * self.soundVolumeAdjust
+
   @retry(attempts=10, delay=3)
   def get_stream(self, sd):
     # reload sounddevice to reinitialize portaudio
@@ -337,10 +345,7 @@ class Soundd:
       while True:
         sm.update(0)
         self.update_language()
-
-        if sm.updated['soundPressure'] and self.current_alert == AudibleAlert.none: # only update volume filter when not playing alert
-          self.spl_filter_weighted.update(sm["soundPressure"].soundPressureWeightedDb)
-          self.current_volume = self.calculate_volume(float(self.spl_filter_weighted.x)) * self.soundVolumeAdjust
+        self.update_volume(sm)
 
         if cruise_main_toggle.update(sm['carState'].buttonEvents, sm['selfdriveState'].enabled):
           self.update_alert(AudibleAlert.prompt)
@@ -350,8 +355,6 @@ class Soundd:
         rk.keep_time()
 
         assert stream.active
-
-        self.soundVolumeAdjust = float(self.params.get_int("SoundVolumeAdjust"))/100.
 
 
 def main():

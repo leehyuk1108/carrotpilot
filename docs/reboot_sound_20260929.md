@@ -15,7 +15,9 @@ and the WAV are loaded only in the child.
 
 Volume is fixed at 0.5 times saved SoundVolumeAdjust, clamped to 0..1, since no
 live ambient sample is available after cleanup. Saved mute is honored. Missing
-or malformed volume defaults to 0.5. No new sound asset or setting is introduced.
+or malformed volume defaults to 0.5. The `-1` automatic-volume setting also
+uses 0.5 here; it must not be treated as a negative gain or mute.
+No new sound asset or setting is introduced.
 Audio failures are logged and do not prevent reboot. The audio child is killed
 and reaped by subprocess.run after a four-second timeout; reboot command errors
 are still surfaced. Non-device hosts reject reboot before any audio or command.

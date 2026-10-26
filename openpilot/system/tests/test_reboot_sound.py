@@ -60,7 +60,7 @@ def test_web_reboot_spawns_detached_child_with_existing_delay(monkeypatch):
   assert calls == [(([sys.executable, str(Path(reboot.__file__).resolve()), '--delay', '1'],), {'start_new_session': True})]
 
 
-@pytest.mark.parametrize('setting,volume', [(None, .5), ('invalid', .5), ('0', 0), ('100', .5), ('200', 1), ('300', 1), ('-10', 0)])
+@pytest.mark.parametrize('setting,volume', [(None, .5), ('invalid', .5), ('-1', .5), ('0', 0), ('100', .5), ('200', 1), ('300', 1), ('-10', 0)])
 def test_pcm_uses_existing_prompt_and_saved_volume(tmp_path, monkeypatch, setting, volume):
   monkeypatch.setattr(reboot, 'PARAMS_PATH', tmp_path)
   if setting is not None:

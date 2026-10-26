@@ -37,7 +37,10 @@ def _message_valid(sm, service: str) -> bool:
 
 def _param_percent(params: Params, key: str) -> float:
   try:
-    return max(0.0, min(2.0, float(params.get_int(key)) / 100.0))
+    setting = params.get_int(key)
+    if key == "SoundVolumeAdjust" and setting == -1:
+      return 1.0
+    return max(0.0, min(2.0, float(setting) / 100.0))
   except Exception:
     return 1.0
 

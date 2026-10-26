@@ -7,6 +7,7 @@ keep the declarations well formed.
 """
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -41,6 +42,40 @@ def params(settings):
 def test_the_catalogue_is_readable_and_populated(params):
   assert len(params) > 100
   assert all(isinstance(p.get("name"), str) and p["name"] for p in params)
+
+
+def test_sound_volume_auto_sentinel_preserves_existing_defaults_and_engage(params, monkeypatch):
+  from openpilot.selfdrive.carrot.server.services import params as service
+
+  by_name = {p["name"]: p for p in params}
+  volume = by_name["SoundVolumeAdjust"]
+  assert (volume["min"], volume["max"], volume["default"], volume["unit"]) == (-1, 200, 0, 5)
+  assert (by_name["SoundVolumeAdjustEngage"]["min"], by_name["SoundVolumeAdjustEngage"]["max"]) == (5, 200)
+  assert service.clamp_numeric(-1, volume) == -1
+  assert service.clamp_numeric(-10, volume) == -1
+  assert service.clamp_numeric(250, volume) == 200
+
+  class IntParams:
+    def __init__(self):
+      self.values = {}
+
+    def put_int(self, key, value):
+      self.values[key] = value
+
+    def get_int(self, key):
+      return self.values[key]
+
+    def get_type(self, key):
+      return "int"
+
+  stored = IntParams()
+  monkeypatch.setattr(service, "HAS_PARAMS", True)
+  monkeypatch.setattr(service, "Params", lambda: stored)
+  monkeypatch.setattr(service, "ParamKeyType", SimpleNamespace(INT="int", BOOL="bool", FLOAT="float"))
+  for value in (-1, 0, 5, 100, 200, -1):
+    service.set_param_value("SoundVolumeAdjust", value, volume)
+    assert stored.values["SoundVolumeAdjust"] == value
+    assert service.get_param_value("SoundVolumeAdjust", 100) == value
 
 
 def test_new_ui_is_default_off_live_toggle_first_in_display(settings):

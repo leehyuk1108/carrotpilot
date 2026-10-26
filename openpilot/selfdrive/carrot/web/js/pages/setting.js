@@ -844,6 +844,9 @@ function getDeclaredSettingOptionLabel(name, value) {
 }
 
 function formatSettingDisplayValue(p, value) {
+  if (p?.name === "SoundVolumeAdjust" && Number(value) === -1) {
+    return getUIText("automatic", "Automatic");
+  }
   if (String(p?.name || "") === "SoundLanguageSetting") {
     return getSoundLanguageSettingOptionLabel(value);
   }

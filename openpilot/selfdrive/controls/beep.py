@@ -32,7 +32,8 @@ class Beepd:
                    encoding='utf8')
 
   def _beep(self, on):
-    if self.params.get_int("SoundVolumeAdjust") <= 5:
+    adjust = self.params.get_int("SoundVolumeAdjust")
+    if adjust != -1 and adjust <= 5:
       on = False
     val = "1" if on else "0"
     subprocess.run(f"echo \"{val}\" | sudo tee /sys/class/gpio/gpio42/value",

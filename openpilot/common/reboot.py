@@ -21,7 +21,8 @@ def _device_only():
 def _sound_volume() -> float:
   # Keep startup recovery independent of the native Params extension.
   try:
-    adjust = int((PARAMS_PATH / 'SoundVolumeAdjust').read_text()) / 100.0
+    setting = int((PARAMS_PATH / 'SoundVolumeAdjust').read_text())
+    adjust = 1.0 if setting == -1 else setting / 100.0
   except (OSError, ValueError):
     adjust = 1.0
   return max(0.0, min(1.0, 0.5 * adjust))
