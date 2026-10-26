@@ -16,13 +16,14 @@ The user expanded the numeric-font request to Korean and English as well.
   measuring, wrapping, elision, and drawing. Existing emoji rendering remains.
 - Missing generated Korean atlas falls back to the existing TTF at 48px,
   not a 200px all-Hangul allocation. Font coverage is cached and cleared on
-  shutdown. Font generation releases its temporary native allocations.
+  shutdown. The separate, short-lived Korean atlas builder leaves the original
+  generator and bundled Latin font assets unchanged.
 - C3/BIG_UI retains its prior fonts and locale policy. External HUD font
   loaders, vehicle control, DM, Navdy/BT, and settings were not changed.
 
 ## Local Verification
 
-- 522 tests and 1212 subtests passed across font, alert, timer, offroad,
+- 524 tests and 1212 subtests passed across font, alert, timer, offroad,
   new-UI, BSM/lead/DM presentation, bootstrap, and text-offset suites.
 - The broader raygui scan still fails on the pre-existing `GuiTextAlignment`
   reference in `mici/layouts/welcome.py:21`, verified at unchanged HEAD.
@@ -38,7 +39,11 @@ The user expanded the numeric-font request to Korean and English as well.
 - New font tests pass Ruff. Existing whole-file lint findings elsewhere in
   application/alert tests are unchanged. `git diff --check` passes.
 
-No push, device installation, reboot, live C4 screenshot, or road test was
-performed in this request. The atlas specimen was rendered and inspected
-locally; it is not a device capture. A future deployment must build the new
-atlas and verify the installed assets under the normal parked-device guard.
+The initial source request did not include deployment. In the subsequent
+deployment request, the same 524 tests passed on the C4 in a private candidate
+before installation. Native generation revealed one additional Latin codepoint
+relative to the bundled atlas; separating the Korean build avoids rewriting
+those tracked files during an unrelated typography deployment. Korean previews
+also explicitly load their fallback atlases. Installation and GPU verification
+results are recorded separately in the private deployment report; neither the
+atlas specimen nor fixture rendering constitutes a road test.

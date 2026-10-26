@@ -120,10 +120,11 @@ def test_source_fallback_sizes_and_hangul_are_bounded():
 
 
 def test_generator_and_scons_include_the_extra_atlas():
-  generator = (UI_DIR.parents[1] / "selfdrive/assets/fonts/process.py").read_text()
+  generator = (UI_DIR.parents[1] / "selfdrive/assets/fonts/process_korean.py").read_text()
   build = (UI_DIR.parents[1] / "selfdrive/ui/SConscript").read_text()
-  assert "korean=True" in generator
-  assert 'stem = "Pretendard-KR-SemiBold" if korean' in generator
+  assert 'stem = "Pretendard-KR-SemiBold"' in generator
+  assert "alias.symlink_to(source.resolve())" in generator
+  assert 'action=f"python3 {korean_generator}"' in build
   assert "Pretendard-KR-SemiBold.fnt" in build
   assert "Pretendard-KR-SemiBold.png" in build
 

@@ -42,6 +42,10 @@ def atlases(tmp_path_factory):
   spec = importlib.util.spec_from_file_location("c4_font_generator", FONT_DIR / "process.py")
   generator = importlib.util.module_from_spec(spec)
   spec.loader.exec_module(generator)
+  spec = importlib.util.spec_from_file_location("c4_korean_generator", FONT_DIR / "process_korean.py")
+  korean_generator = importlib.util.module_from_spec(spec)
+  spec.loader.exec_module(korean_generator)
+  korean_generator.process = generator
   output = tmp_path_factory.mktemp("c4-font-atlas")
   base, international = generator._char_sets()
   generator.FONT_DIR = output
@@ -51,7 +55,7 @@ def atlases(tmp_path_factory):
     if len(rl.ffi.typeof(rl.rl.LoadFontData).args) == 6:
       rl.load_font_data = lambda data, size, height, cps, count, kind, out_count: load(data, size, height, cps, count, kind)
     generator._process_font(FONT_DIR / "Pretendard-SemiBold.ttf", base)
-    generator._process_font(FONT_DIR / "Pretendard-SemiBold.ttf", tuple(sorted(set(base) | set(international))), korean=True)
+    korean_generator.generate(FONT_DIR / "Pretendard-SemiBold.ttf", output)
     generator._process_font(FONT_DIR / "unifont.otf", international)
   finally:
     rl.load_font_data = load
@@ -76,7 +80,7 @@ def test_generated_atlas_face_and_size_and_texture_budget(atlases):
   from PIL import Image
   for stem, size in (("Pretendard-SemiBold", 200), ("Pretendard-KR-SemiBold", 48)):
     first_line = (atlases / f"{stem}.fnt").read_text().splitlines()[0]
-    assert 'face="Pretendard-SemiBold"' in first_line
+    assert f'face="{stem}"' in first_line
     assert f"size=-{size} " in first_line
   with Image.open(atlases / "Pretendard-KR-SemiBold.png") as image:
     assert max(image.size) <= 8192

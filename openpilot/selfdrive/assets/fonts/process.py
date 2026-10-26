@@ -89,7 +89,7 @@ def _write_bmfont(path: Path, font_size: int, face: str, atlas_name: str, line_h
   path.write_text("\n".join(lines) + "\n")
 
 
-def _process_font(font_path: Path, codepoints: tuple[int, ...], *, korean: bool = False):
+def _process_font(font_path: Path, codepoints: tuple[int, ...]):
   print(f"Processing {font_path.name}...")
 
   #font_size = {
@@ -102,7 +102,7 @@ def _process_font(font_path: Path, codepoints: tuple[int, ...], *, korean: bool 
     font_size = 16
     padding = GLYPH_PADDING
 
-  if korean or font_path.stem in KR_FONTS:
+  if font_path.stem in KR_FONTS:
     font_size = 48
     padding = 2
     
@@ -124,18 +124,14 @@ def _process_font(font_path: Path, codepoints: tuple[int, ...], *, korean: bool 
     raise RuntimeError("raylib returned an empty atlas")
 
   rects = rects_ptr[0]
-  stem = "Pretendard-KR-SemiBold" if korean else font_path.stem
-  atlas_name = f"{stem}.png"
+  atlas_name = f"{font_path.stem}.png"
   atlas_path = FONT_DIR / atlas_name
   entries, line_height, base = _glyph_metrics(glyphs, rects, glyph_count[0])
 
   if not rl.export_image(image, atlas_path.as_posix()):
     raise RuntimeError("Failed to export atlas image")
 
-  _write_bmfont(FONT_DIR / f"{stem}.fnt", font_size, font_path.stem, atlas_name, line_height, base, (image.width, image.height), entries)
-  rl.unload_image(image)
-  rl.mem_free(rects_ptr[0])
-  rl.unload_font_data(glyphs, glyph_count[0])
+  _write_bmfont(FONT_DIR / f"{font_path.stem}.fnt", font_size, font_path.stem, atlas_name, line_height, base, (image.width, image.height), entries)
 
 
 def main():
@@ -146,10 +142,6 @@ def main():
       continue
     glyphs = unifont_cp if font.stem.lower().startswith("unifont") or font.stem in KR_FONTS else base_cp
     _process_font(font, glyphs)
-    if font.name == "Pretendard-SemiBold.ttf":
-      # Full Hangul at 200px would allocate an enormous texture. Use the same
-      # face at 48px for Korean, retaining the sharp 200px numeric atlas.
-      _process_font(font, tuple(sorted(set(base_cp) | set(unifont_cp))), korean=True)
   return 0
 
 

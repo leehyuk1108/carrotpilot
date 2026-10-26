@@ -9,12 +9,19 @@ output_files = [
   for f in source_files
   if "NotoColor" not in f.name
 ]
-output_files.append(("#openpilot/selfdrive/assets/fonts/Pretendard-KR-SemiBold.fnt",
-                     "#openpilot/selfdrive/assets/fonts/Pretendard-KR-SemiBold.png"))
 env.Command(
   target=output_files,
   source=[generator, source_files],
   action=f"python3 {generator}",
+)
+
+korean_generator = File("#openpilot/selfdrive/assets/fonts/process_korean.py")
+env.Command(
+  target=["#openpilot/selfdrive/assets/fonts/Pretendard-KR-SemiBold.fnt",
+          "#openpilot/selfdrive/assets/fonts/Pretendard-KR-SemiBold.png"],
+  source=[korean_generator, generator, "#openpilot/selfdrive/assets/fonts/Pretendard-SemiBold.ttf",
+          "#openpilot/selfdrive/ui/translations/languages.json", Glob("#openpilot/selfdrive/ui/translations/*.po")],
+  action=f"python3 {korean_generator}",
 )
 
 
