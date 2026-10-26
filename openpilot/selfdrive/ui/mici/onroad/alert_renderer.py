@@ -1,3 +1,4 @@
+import math
 import time
 from enum import StrEnum
 from typing import NamedTuple
@@ -141,14 +142,31 @@ class AlertRenderer(Widget):
   def _timer_display(self, alert: Alert | None) -> TimerDisplay | None:
     sm = ui_state.sm
     now = time.monotonic()
-    fresh = all(sm.valid[name] and sm.alive[name] and sm.recv_frame[name] >= ui_state.started_frame and
-                0 <= now - sm.recv_time[name] <= 1. for name in ('carState', 'selfdriveState'))
+
+    def fresh_messages(names, max_age):
+      return all(sm.valid[name] and sm.alive[name] and sm.recv_frame[name] >= ui_state.started_frame and
+                 0 <= now - sm.recv_time[name] <= max_age for name in names)
+
+    fresh = fresh_messages(('carState', 'selfdriveState'), 1.)
     cs = sm['carState']
+    ss = sm['selfdriveState']
+    cc = sm['carControl']
+    gear = car.CarState.GearShifter
+    # GM can clear the stock standstill flag. Read the current commanded stop
+    # for display only; never change that flag or the vehicle's steering limit.
+    commanded_hold = (
+      fresh_messages(('carState', 'selfdriveState', 'carControl'), .25) and
+      cs.standstill and abs(cs.vEgo) <= .1 and not cs.gasPressed and not cs.brakePressed and
+      cs.gearShifter in (gear.drive, gear.sport, gear.low, gear.eco, gear.manumatic) and
+      ss.enabled and ss.active and cc.enabled and cc.longActive and
+      cc.actuators.longControlState == car.CarControl.Actuators.LongControlState.stopping and
+      math.isfinite(cc.actuators.accel) and cc.actuators.accel < 0.
+    )
     return self._status_timers.update(
       now=now, started=ui_state.started, session=ui_state.started_frame, fresh=fresh,
       standstill=cs.standstill, parking_brake=cs.parkingBrake,
-      hold_active=cs.brakeHoldActive or cs.softHoldActive == 2 or cs.cruiseState.standstill,
-      hold_without_alert=cs.brakeHoldActive or cs.softHoldActive == 2,
+      hold_active=cs.brakeHoldActive or cs.softHoldActive == 2 or cs.cruiseState.standstill or commanded_hold,
+      hold_without_alert=cs.brakeHoldActive or cs.softHoldActive == 2 or commanded_hold,
       alert_type=alert.alert_type if alert is not None else None,
       critical=alert is not None and alert.status == AlertStatus.critical,
     )

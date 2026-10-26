@@ -80,15 +80,21 @@ def test_short_invalid_gap_is_hidden_and_does_not_reset_uninterrupted_stop():
 def make_renderer(monkeypatch):
   renderer, ns = load_layout()
   cs = SimpleNamespace(parkingBrake=False, standstill=True, brakeHoldActive=False, softHoldActive=0,
-                       cruiseState=SimpleNamespace(standstill=False))
+                       cruiseState=SimpleNamespace(standstill=False), vEgo=0., gasPressed=False,
+                       brakePressed=False, gearShifter='drive')
+  cc = SimpleNamespace(enabled=False, longActive=False, actuators=SimpleNamespace(longControlState='off', accel=0.))
+  ss = SimpleNamespace(enabled=False, active=False)
+  ns['car'].CarControl.Actuators = SimpleNamespace(LongControlState=SimpleNamespace(stopping='stopping'))
+  ns['car'].CarState = SimpleNamespace(GearShifter=SimpleNamespace(
+    **{gear: gear for gear in ('drive', 'sport', 'low', 'eco', 'manumatic')}))
 
   class SM(dict):
-    valid = {'carState': True, 'selfdriveState': True}
-    alive = {'carState': True, 'selfdriveState': True}
-    recv_frame = {'carState': 101, 'selfdriveState': 101}
-    recv_time = {'carState': 10., 'selfdriveState': 10.}
+    valid = dict.fromkeys(('carState', 'selfdriveState', 'carControl'), True)
+    alive = dict.fromkeys(('carState', 'selfdriveState', 'carControl'), True)
+    recv_frame = dict.fromkeys(('carState', 'selfdriveState', 'carControl'), 101)
+    recv_time = dict.fromkeys(('carState', 'selfdriveState', 'carControl'), 10.0)
 
-  sm = SM(carState=cs)
+  sm = SM(carState=cs, carControl=cc, selfdriveState=ss)
   ns['ui_state'] = SimpleNamespace(sm=sm, started=True, started_frame=100)
   monkeypatch.setattr(ns['time'], 'monotonic', lambda: 10.)
   renderer._status_timers = StatusTimers()
@@ -102,6 +108,130 @@ def make_renderer(monkeypatch):
   renderer._draw_background = lambda _: None
   renderer._draw_icons = lambda _: None
   return renderer, ns, cs, sm, draws
+
+
+def set_commanded_hold(sm):
+  sm['selfdriveState'].enabled = sm['selfdriveState'].active = True
+  sm['carControl'].enabled = sm['carControl'].longActive = True
+  sm['carControl'].actuators.longControlState = 'stopping'
+  sm['carControl'].actuators.accel = -.507
+
+
+def test_stopped_active_longitudinal_hold_without_stock_hold_signal(monkeypatch):
+  renderer, ns, cs, sm, _ = make_renderer(monkeypatch)
+  set_commanded_hold(sm)
+  assert not (cs.brakeHoldActive or cs.softHoldActive or cs.cruiseState.standstill)
+  below_speed = ns['Alert'](alert_type='belowSteerSpeed/warning')
+  assert renderer._timer_display(below_speed).kind == 'hold'
+  assert renderer._timer_display(None).kind == 'hold'
+
+
+def test_native_message_enums_and_sound_only_alert_transition(monkeypatch):
+  from openpilot.cereal import car, log
+
+  renderer, ns, _, sm, draws = make_renderer(monkeypatch)
+  ns['car'] = car
+  cs = car.CarState.new_message(standstill=True, vEgo=0., gearShifter='drive')
+  cc = car.CarControl.new_message(enabled=True, longActive=True)
+  cc.actuators.longControlState = 'stopping'
+  cc.actuators.accel = -.507
+  ss = log.SelfdriveState.new_message(enabled=True, active=True, alertSize='small', alertStatus='normal',
+                                    alertType='belowSteerSpeed/warning', alertText1='Steer assist unavailable')
+  sm.update(carState=cs.as_reader(), carControl=cc.as_reader(), selfdriveState=ss.as_reader())
+  sm.updated = dict.fromkeys(sm, True)
+  for seconds, kind, size in ((0., 'belowSteerSpeed/warning', 'small'), (1., 'audioRefuse/warning', 'none'),
+                              (1.2, 'belowSteerSpeed/warning', 'small')):
+    now = 10. + seconds
+    monkeypatch.setattr(ns['time'], 'monotonic', lambda now=now: now)
+    sm.recv_time = dict.fromkeys(sm, now)
+    ss.alertType, ss.alertSize = kind, size
+    before = {name: message.to_dict() for name, message in sm.items()}
+    renderer.will_render()
+    renderer._render(renderer.rect)
+    assert renderer.timer_visible
+    assert draws[-1][1].kind == 'hold'
+    assert draws[-1][1].elapsed == pytest.approx(seconds)
+    assert before == {name: message.to_dict() for name, message in sm.items()}
+  assert len(draws) == 3
+
+
+@pytest.mark.parametrize(('target', 'field', 'value'), [
+  ('selfdriveState', 'enabled', False), ('selfdriveState', 'active', False),
+  ('carControl', 'enabled', False), ('carControl', 'longActive', False),
+  ('actuators', 'longControlState', 'off'), ('actuators', 'longControlState', 'pid'),
+  ('actuators', 'longControlState', 'starting'), ('actuators', 'accel', 0.),
+  ('actuators', 'accel', 1.), ('actuators', 'accel', float('nan')),
+  ('actuators', 'accel', -float('inf')),
+  ('carState', 'standstill', False), ('carState', 'vEgo', .11), ('carState', 'vEgo', -.11),
+  ('carState', 'vEgo', float('nan')), ('carState', 'vEgo', float('inf')),
+  ('carState', 'gasPressed', True), ('carState', 'brakePressed', True),
+  ('carState', 'gearShifter', 'park'), ('carState', 'gearShifter', 'neutral'),
+  ('carState', 'gearShifter', 'reverse'), ('carState', 'gearShifter', 'unknown'),
+])
+def test_commanded_hold_requires_current_active_stop(monkeypatch, target, field, value):
+  renderer, ns, _, sm, _ = make_renderer(monkeypatch)
+  set_commanded_hold(sm)
+  obj = sm['carControl'].actuators if target == 'actuators' else sm[target]
+  setattr(obj, field, value)
+  assert renderer._timer_display(ns['Alert'](alert_type='belowSteerSpeed/warning')) is None
+  assert renderer._timer_display(None) is None
+
+
+@pytest.mark.parametrize('service', ['carState', 'selfdriveState', 'carControl'])
+@pytest.mark.parametrize('field,value', [('valid', False), ('alive', False), ('recv_frame', 99),
+                                       ('recv_time', 9.74), ('recv_time', 10.01)])
+def test_commanded_hold_rejects_invalid_old_or_future_input(monkeypatch, service, field, value):
+  renderer, ns, _, sm, _ = make_renderer(monkeypatch)
+  set_commanded_hold(sm)
+  getattr(sm, field)[service] = value
+  assert renderer._timer_display(ns['Alert'](alert_type='belowSteerSpeed/warning')) is None
+
+
+def test_low_speed_warning_yields_only_to_confirmed_stopped_hold():
+  for alert_type in (None, 'belowSteerSpeed/warning'):
+    assert update(StatusTimers(), hold_active=True, alert_type=alert_type).kind == 'hold'
+    assert update(StatusTimers(), hold_active=False, alert_type=alert_type) is None
+    assert update(StatusTimers(), hold_active=True, standstill=False, alert_type=alert_type) is None
+    assert update(StatusTimers(), hold_active=True, critical=True, alert_type=alert_type) is None
+    assert update(StatusTimers(), hold_active=True, hold_without_alert=False, alert_type=alert_type) is None
+
+
+def test_commanded_hold_survives_sound_only_transition_but_never_hides_other_warnings(monkeypatch):
+  renderer, ns, _, sm, draws = make_renderer(monkeypatch)
+  set_commanded_hold(sm)
+  below = ns['Alert']('Steer assist unavailable', '10 km/h', size=1, status=1,
+                      alert_type='belowSteerSpeed/warning')
+  for seconds, alert in ((0., below), (1., None), (1.2, below)):
+    now = 10. + seconds
+    monkeypatch.setattr(ns['time'], 'monotonic', lambda now=now: now)
+    sm.recv_time = dict.fromkeys(sm.recv_time, now)
+    renderer.get_alert = lambda _, alert=alert: alert
+    renderer.will_render()
+    assert renderer.timer_visible
+    renderer._render(renderer.rect)
+    assert draws[-1][1].kind == 'hold'
+    assert draws[-1][1].elapsed == pytest.approx(seconds)
+  assert len(draws) == 3
+  for alert_type in ('steerSaturated/warning', 'driverDistracted2/permanent', 'fcw/permanent',
+                     'steerUnavailable/immediateDisable', 'accFaulted/immediateDisable', 'trafficStopping/warning'):
+    renderer.get_alert = lambda _, alert_type=alert_type: ns['Alert']('Warning', size=1, alert_type=alert_type)
+    renderer.will_render()
+    assert not renderer.timer_visible
+    renderer._render(renderer.rect)
+  assert len(draws) == 3
+
+
+def test_commanded_hold_drops_immediately_and_restarts_clock_after_override(monkeypatch):
+  renderer, ns, _, sm, _ = make_renderer(monkeypatch)
+  set_commanded_hold(sm)
+  below = ns['Alert'](alert_type='belowSteerSpeed/warning')
+  assert renderer._timer_display(below).elapsed == 0.
+  sm['carControl'].longActive = False
+  assert renderer._timer_display(below) is None
+  monkeypatch.setattr(ns['time'], 'monotonic', lambda: 11.)
+  sm.recv_time = dict.fromkeys(sm.recv_time, 11.0)
+  sm['carControl'].longActive = True
+  assert renderer._timer_display(below).elapsed == 0.
 
 
 @pytest.mark.parametrize('signal', ['parkingBrake', 'brakeHoldActive', 'softHoldActive', 'cruiseState'])

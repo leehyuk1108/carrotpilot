@@ -46,13 +46,13 @@ class StatusTimers:
 
     self._parking_since = (now if self._parking_since is None else self._parking_since) if parking_brake else None
     self._hold_since = (now if self._hold_since is None else self._hold_since) if hold_active else None
-    # Track the stop behind other alerts, but never cover their text (including
-    # the unnamed startup/communication-failure alerts).
+    # Track the stop behind other alerts. Only a confirmed hold may replace the
+    # low-speed steering notice; all other warnings and communication faults win.
     if critical:
       return None
     if self._parking_since is not None and alert_type in (None, "parkBrake/noEntry", "silentParkBrake/noEntry"):
       return TimerDisplay("parking", max(0., now - self._parking_since))
     if self._hold_since is not None and (alert_type in ("resumeRequired/warning", "brakeHold/warning", "softHold/warning") or
-                                        (alert_type is None and hold_without_alert)):
+                                        (hold_without_alert and alert_type in (None, "belowSteerSpeed/warning"))):
       return TimerDisplay("hold", max(0., now - self._hold_since))
     return None
