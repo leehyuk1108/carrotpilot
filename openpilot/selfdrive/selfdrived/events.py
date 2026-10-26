@@ -1139,12 +1139,11 @@ EVENTS: dict[int, dict[str, Alert | AlertCallbackType]] = {
       Priority.LOW, VisualAlert.none, AudibleAlert.none, .1),
   },
   EventName.trafficStopping: {
-    ET.WARNING: EngagementAlert(AudibleAlert.stopping),
-    #ET.WARNING: Alert(
-    #  "신호 감속정지중입니다.",
-    #  "",
-    #  AlertStatus.normal, AlertSize.small,
-    #  Priority.LOW, VisualAlert.none, AudibleAlert.stopping, 3.),
+    ET.WARNING: Alert(
+      "정지합니다",
+      "전방 신호 감지됨.",
+      AlertStatus.normal, AlertSize.small,
+      Priority.LOW, VisualAlert.none, AudibleAlert.none, 2.),
   },
   EventName.audioPrompt: {
      ET.WARNING: EngagementAlert(AudibleAlert.prompt),

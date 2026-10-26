@@ -839,6 +839,15 @@
       "title": "운전에 집중하세요",
       "subtitle": ""
     },
+    "EVENTS.trafficStopping.WARNING": {
+      "eventName": "trafficStopping",
+      "eventType": "WARNING",
+      "source": "EVENTS",
+      "title": "정지합니다",
+      "subtitle": "전방 신호 감지됨.",
+      "titleFontPx": 60,
+      "subtitleFontPx": 30
+    },
     "EVENTS.driverDistracted2.PERMANENT": {
       "eventName": "driverDistracted2",
       "eventType": "PERMANENT",

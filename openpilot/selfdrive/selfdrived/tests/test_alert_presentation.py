@@ -135,6 +135,37 @@ class TestAlertPresentation(unittest.TestCase):
       alerts = ev.create_alerts([m.ET.PERMANENT], callback_args())
     self.assertEqual(alerts[0].alert_text_1, "Low Memory")
 
+  def test_traffic_stopping_is_silent_visible_and_warning_only(self):
+    for device in ("mici", "tici"):
+      with self.subTest(device=device):
+        m = load_events(device)
+        ev = m.Events()
+        ev.add(m.EventName.trafficStopping)
+        self.assertEqual(set(m.EVENTS[m.EventName.trafficStopping]), {m.ET.WARNING})
+        self.assertEqual(ev.create_alerts([m.ET.PERMANENT], callback_args()), [])
+        alert, = ev.create_alerts([m.ET.WARNING], callback_args())
+        self.assertEqual((alert.alert_text_1, alert.alert_text_2), ("정지합니다", "전방 신호 감지됨."))
+        self.assertEqual(alert.alert_type, "trafficStopping/warning")
+        self.assertEqual(alert.alert_status, m.AlertStatus.normal)
+        self.assertEqual(alert.alert_size, m.AlertSize.small)
+        self.assertEqual(alert.priority, m.Priority.LOW)
+        self.assertEqual(alert.visual_alert, m.VisualAlert.none)
+        self.assertEqual(alert.audible_alert, m.AudibleAlert.none)
+        self.assertEqual(alert.duration, int(2. / m.DT_CTRL))
+        self.assertEqual(alert.creation_delay, 0.)
+
+  def test_traffic_stop_notice_does_not_replace_safety_or_departure_sounds(self):
+    m = self.module
+    stopping = m.EVENTS[m.EventName.trafficStopping][m.ET.WARNING]
+    for event in (m.EventName.fcw, m.EventName.aeb, m.EventName.stockAeb):
+      alert = m.EVENTS[event][m.ET.PERMANENT]
+      self.assertGreater(alert.priority, stopping.priority)
+      self.assertEqual(alert.audible_alert, m.AudibleAlert.stopStop)
+    for event, sound in ((m.EventName.trafficSignGreen, m.AudibleAlert.trafficSignGreen),
+                         (m.EventName.trafficSignChanged, m.AudibleAlert.trafficSignChanged),
+                         (m.EventName.stopStop, m.AudibleAlert.stopStop)):
+      self.assertEqual(m.EVENTS[event][m.ET.WARNING].audible_alert, sound)
+
   def test_steering_delay_and_critical_bypass_unchanged(self):
     m = self.module
     ev = m.Events()
@@ -159,7 +190,7 @@ class TestAlertPresentation(unittest.TestCase):
     self.assertEqual(presentation.get_override("driverDistracted2", "permanent")["titleFontPx"], 60)
 
   def test_asset_counts_and_unsupported_entries_are_not_events(self):
-    self.assertEqual(len(presentation.load_overrides()), 109)
+    self.assertEqual(len(presentation.load_overrides()), 110)
     supported = supported_configs(self.module)
     unsupported = set(presentation.load_overrides()) - set(supported)
     self.assertTrue(all(not key.startswith("STARPILOT_EVENTS.") for key in supported))

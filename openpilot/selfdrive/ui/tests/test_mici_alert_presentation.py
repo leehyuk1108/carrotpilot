@@ -155,6 +155,29 @@ class TestMiciAlertLayout(unittest.TestCase):
     renderer._draw_text(alert, layout)
     self.assertEqual(renderer._text_layout_key, key)
 
+  def test_traffic_stopping_keeps_each_line_unwrapped_in_both_c4_layouts(self):
+    m = load_events()
+    events = m.Events()
+    events.add(m.EventName.trafficStopping)
+    alert, = events.create_alerts([m.ET.WARNING], callback_args())
+    for width in (476, 536):
+      with self.subTest(width=width):
+        renderer, ns = load_layout()
+        renderer._rect = Rect(536 - width, 0, width, 240)
+        renderer._alert_y_filter.x = 0.
+        ui_alert = ns['Alert'](alert.alert_text_1, alert.alert_text_2, alert.alert_size,
+                               alert.alert_status, alert.visual_alert, alert.alert_type)
+        layout = renderer._icon_helper(ui_alert)
+        renderer._draw_text(ui_alert, layout)
+        title, subtitle = renderer._alert_text1_label, renderer._alert_text2_label
+        self.assertEqual((title.font_size, subtitle.font_size), (60, 30))
+        for label, text in ((title, "정지합니다"), (subtitle, "전방 신호 감지됨.")):
+          self.assertEqual(label.text, text)
+          self.assertEqual(label._cached_wrapped_lines, [text])
+          self.assertLessEqual(label.text_width, layout.text_rect.width)
+          self.assertLessEqual(label.rect.y + label.rect.height, 240)
+        self.assertGreaterEqual(subtitle.rect.y, title.rect.y + title.rect.height)
+
   def test_unresponsive_fallback_alerts_fit(self):
     renderer, ns = load_layout()
     for name in ("ALERT_STARTUP_PENDING", "ALERT_CRITICAL_TIMEOUT", "ALERT_CRITICAL_REBOOT"):
