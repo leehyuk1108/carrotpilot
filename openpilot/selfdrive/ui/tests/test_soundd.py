@@ -118,8 +118,8 @@ class TestSoundd:
 
   def test_radar_alert_sound_assets(self):
     expected = {
-      AudibleAlert.radarCutin: ("prompt.wav", 0.75),
-      AudibleAlert.systemReady: ("prompt.wav", 0.75),
+      AudibleAlert.radarCutin: ("prompt.wav", 0.356),
+      AudibleAlert.systemReady: ("prompt.wav", 0.356),
     }
     sound_dir = os.path.join(BASEDIR, "openpilot", "selfdrive", "assets", "sounds_eng")
 

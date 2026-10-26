@@ -257,6 +257,10 @@ class Soundd:
         ret[written_frames:written_frames+frames_to_write] = sound_data[current_sound_frame:current_sound_frame+frames_to_write]
         written_frames += frames_to_write
         self.current_sound_frame += frames_to_write
+        current_sound_frame += frames_to_write
+        if current_sound_frame == len(sound_data):
+          current_sound_frame = 0
+          loops += 1
 
     return ret * dm_warning_volume(alert, alert_type, volume)
 

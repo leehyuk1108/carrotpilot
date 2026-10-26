@@ -1,5 +1,10 @@
 # Official openpilot audio refresh
 
+Historical record: superseded on 2026-10-26 by the user's
+[complete Wayon tone replacement](wayon_audio_20261026.md). The old manifest
+and waveform/duration assertions below describe the previous installation,
+not the current assets.
+
 Source: [commaai/openpilot master at 9fba666fd4](https://github.com/commaai/openpilot/tree/9fba666fd485983b5849dfc62550fa1fd37fe338/openpilot/selfdrive/assets/sounds),
 checked on 2026-10-25. This is an audio-only import, not an upstream model,
 vehicle-control, event-schema, or sound-player update.

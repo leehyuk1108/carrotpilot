@@ -76,7 +76,7 @@ def test_pcm_uses_existing_prompt_and_saved_volume(tmp_path, monkeypatch, settin
   assert rate == 48000
   assert kwargs == {'blocking': True}
   assert samples.shape[1] == 1
-  assert abs(samples.shape[0] / rate - .900) < .001
+  assert abs(samples.shape[0] / rate - .506) < .001
   assert samples.dtype == np.float32
   assert np.max(np.abs(samples)) <= volume
   assert np.any(samples != 0)

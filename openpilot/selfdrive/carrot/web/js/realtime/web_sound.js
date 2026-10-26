@@ -167,7 +167,8 @@
     const key = `${soundDirectory()}/${file}`;
     if (!bufferCache.has(key)) {
       bufferCache.set(key, (async () => {
-        const response = await fetch(`/sound-assets/${encodeURIComponent(soundDirectory())}/${encodeURIComponent(file)}`, { cache: "force-cache" });
+        // Revalidate replaced WAVs once per page; decoded buffers stay cached.
+        const response = await fetch(`/sound-assets/${encodeURIComponent(soundDirectory())}/${encodeURIComponent(file)}`, { cache: "no-cache" });
         if (!response.ok) throw new Error(`sound asset HTTP ${response.status}`);
         const decoded = await audioContext.decodeAudioData(await response.arrayBuffer());
         readyBuffers.set(key, decoded);
