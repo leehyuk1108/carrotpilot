@@ -106,14 +106,14 @@ def korean_renderer(renderer):
   """Run real fallback, measurement, wrapping and labels with distinct font widths."""
   scope = renderer.namespace
   weights = scope["FontWeight"]
-  weights.DISPLAY, weights.UNIFONT = 1, 2
+  weights.DISPLAY, weights.KOREAN, weights.UNIFONT = 1, 1, 2
   normal = SimpleNamespace(texture=SimpleNamespace(id=1), advance=10, baseSize=20, glyphCount=95, glyphPadding=0)
   display = SimpleNamespace(texture=SimpleNamespace(id=2), advance=20, baseSize=20, glyphCount=12000, glyphPadding=0)
   app = scope["gui_app"]
   app.font = lambda weight: display if weight == weights.DISPLAY else normal
   app.has_font = lambda weight: True
   language = SimpleNamespace(value="en")
-  scope.update(re=re, multilang=SimpleNamespace(requires_unifont=lambda: language.value == "ko"))
+  scope.update(re=re, BIG_UI=True, multilang=SimpleNamespace(requires_unifont=lambda: language.value == "ko"))
   tree = ast.parse((UI_DIR / "lib/application.py").read_text(encoding="utf-8"))
   pattern = next(n for n in tree.body if isinstance(n, ast.Assign) and
                  any(isinstance(t, ast.Name) and t.id == "_KOREAN_TEXT_RE" for t in n.targets))
@@ -214,6 +214,22 @@ def test_emoji_splits_keep_korean_label_font_and_advance(korean_renderer, label_
   assert calls[1][2].x - calls[0][2].x == 60
 
 
+@pytest.mark.parametrize("label_class", ["Label", "UnifiedLabel"])
+def test_c4_coverage_fallback_keeps_actual_label_measurement_and_drawing_together(korean_renderer, label_class):
+  r = korean_renderer
+  r.namespace["BIG_UI"] = False
+  r.FontWeight.DISPLAY = r.FontWeight.NORMAL
+  r.gui_app.font = lambda w: r.display if w == r.FontWeight.KOREAN else r.normal
+  r.gui_app.font_supports_text = lambda font, text: font is r.display or text.isascii()
+  for language in ("ko", "en"):
+    r.language.value = language
+    r.rl.draw_calls.clear()
+    r.measurements.clear()
+    test_mixed_label_wraps_and_draws_with_one_font_then_restores_ascii(r, label_class)
+    r.rl.draw_calls.clear()
+    test_eliding_away_korean_keeps_measurement_and_draw_font(r, label_class)
+
+
 def test_generated_and_source_fonts_cover_jamo_and_common_symbols(korean_renderer):
   r = korean_renderer
   font_dir = UI_DIR.parents[1] / "selfdrive/assets/fonts"
@@ -228,7 +244,7 @@ def test_generated_and_source_fonts_cover_jamo_and_common_symbols(korean_rendere
   tree = ast.parse((UI_DIR / "lib/application.py").read_text(encoding="utf-8"))
   app = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "GuiApplication")
   method = next(n for n in app.body if isinstance(n, ast.FunctionDef) and n.name == "_font_codepoints")
-  scope.update(FontWeight=r.FontWeight)
+  scope.update(FontWeight=r.FontWeight, BIG_UI=True)
   exec(compile(ast.Module(body=[method], type_ignores=[]), "application.py", "exec"), scope)
   source = scope["_font_codepoints"]
   jamo = set(range(0x1100, 0x1200)) | set(range(0x3130, 0x3190))

@@ -110,18 +110,18 @@ FONT_SOURCE_EXTS = (".ttf", ".otf")
 
 
 class FontWeight(StrEnum):
-  NORMAL = "Inter-Regular.fnt" if BIG_UI else "Inter-Medium.fnt"
-  MEDIUM = "Inter-Medium.fnt"
-  BOLD = "Inter-Bold.fnt"
-  SEMI_BOLD = "Inter-SemiBold.fnt"
+  NORMAL = "Inter-Regular.fnt" if BIG_UI else "Pretendard-SemiBold.fnt"
+  MEDIUM = "Inter-Medium.fnt" if BIG_UI else "Pretendard-SemiBold.fnt"
+  BOLD = "Inter-Bold.fnt" if BIG_UI else "Pretendard-SemiBold.fnt"
+  SEMI_BOLD = "Inter-SemiBold.fnt" if BIG_UI else "Pretendard-SemiBold.fnt"
   PRETENDARD = "Pretendard-SemiBold.fnt"
   UNIFONT = "unifont.fnt"
 
   # Small UI fonts
-  DISPLAY_REGULAR = "Inter-Regular.fnt"
-  ROMAN = "Inter-Regular.fnt"
-  #DISPLAY = "Inter-Bold.fnt"
-  DISPLAY = "KaiGenGothicKR-Bold.fnt"
+  DISPLAY_REGULAR = "Inter-Regular.fnt" if BIG_UI else "Pretendard-SemiBold.fnt"
+  ROMAN = "Inter-Regular.fnt" if BIG_UI else "Pretendard-SemiBold.fnt"
+  DISPLAY = "KaiGenGothicKR-Bold.fnt" if BIG_UI else "Pretendard-SemiBold.fnt"
+  KOREAN = "KaiGenGothicKR-Bold.fnt" if BIG_UI else "Pretendard-KR-SemiBold.fnt"
 
 
 class TextAlignment(IntEnum):
@@ -141,6 +141,25 @@ _KOREAN_TEXT_RE = re.compile(r"[\u1100-\u11ff\u3130-\u318f\uac00-\ud7a3]")
 
 def font_fallback(font: rl.Font, text: str | bytes | None = None) -> rl.Font:
   """Keep locale fallback and also render Korean text in other locales."""
+  if not BIG_UI:
+    if isinstance(text, bytes):
+      text = text.decode("utf-8", errors="replace")
+    if not isinstance(text, str) or not text:
+      return font
+    candidates = [font] + [gui_app.font(w) for w in (FontWeight.KOREAN, FontWeight.UNIFONT) if gui_app.has_font(w)]
+    for candidate in candidates:
+      if gui_app.font_supports_text(candidate, text):
+        return candidate
+    from openpilot.system.ui.lib.emoji import find_emoji
+    # Labels draw emoji separately. Keep their text fragments in the same font
+    # used to measure the whole label, including after wrapping or elision.
+    for start, end, _ in reversed(find_emoji(text)):
+      text = text[:start] + text[end:]
+    for candidate in candidates:
+      if gui_app.font_supports_text(candidate, text):
+        return candidate
+    return font
+
   if not gui_app.has_font(FontWeight.DISPLAY):
     return font
   if multilang.requires_unifont():
@@ -302,6 +321,7 @@ class GuiApplication:
     self._set_log_callback()
 
     self._fonts: dict[FontWeight, rl.Font] = {}
+    self._font_coverage: dict[int, frozenset[int]] = {}
     self._width = width if width is not None else GuiApplication._default_width()
     self._height = height if height is not None else GuiApplication._default_height()
 
@@ -840,6 +860,7 @@ class GuiApplication:
     for font in self._fonts.values():
       rl.unload_font(font)
     self._fonts = {}
+    self._font_coverage.clear()
 
     if self._render_texture is not None:
       rl.unload_render_texture(self._render_texture)
@@ -981,6 +1002,18 @@ class GuiApplication:
   def has_font(self, font_weight: FontWeight) -> bool:
     return font_weight in self._fonts
 
+  def font_supports_text(self, font: rl.Font, text: str) -> bool:
+    texture_id = int(font.texture.id)
+    if texture_id not in self._font_coverage:
+      # Raylib retains a missing codepoint with empty metrics in some atlases.
+      # Checking glyph.value alone would mistake that blank for a real glyph.
+      self._font_coverage[texture_id] = frozenset(
+        int(font.glyphs[i].value) for i in range(font.glyphCount)
+        if font.glyphs[i].advanceX > 0 or (font.recs[i].width > 0 and font.recs[i].height > 0)
+      )
+    coverage = self._font_coverage[texture_id]
+    return all(c in "\n\r\t" or ord(c) in coverage for c in text)
+
   @property
   def width(self):
     return self._width
@@ -1011,6 +1044,8 @@ class GuiApplication:
       return fnt_path
 
     stem = fnt_path.with_suffix("")
+    if fnt_path.name == "Pretendard-KR-SemiBold.fnt":
+      stem = stem.with_name("Pretendard-SemiBold")
     for ext in FONT_SOURCE_EXTS:
       source_path = stem.with_suffix(ext)
       if source_path.exists():
@@ -1022,7 +1057,7 @@ class GuiApplication:
       return rl.load_font(font_path.as_posix())
 
     try:
-      font_size = 16 if font_weight == FontWeight.UNIFONT else 48 if font_weight == FontWeight.DISPLAY else 200
+      font_size = 16 if font_weight == FontWeight.UNIFONT else 48 if font_weight == FontWeight.KOREAN else 200
       codepoints = self._font_codepoints(font_weight)
       cp_buffer = rl.ffi.new("int[]", codepoints)
       cp_ptr = rl.ffi.cast("int *", cp_buffer)
@@ -1035,10 +1070,11 @@ class GuiApplication:
     codepoints = set(range(32, 127))
     # Match the common symbols in the generated atlases (fonts/process.py).
     codepoints.update(map(ord, "–‑✓×°§•X⚙✕◀▶✔⌫⇧␣○●↳çêüñ–‑✓×°§•€£¥"))
-    if font_weight in (FontWeight.DISPLAY, FontWeight.UNIFONT):
+    if font_weight in (FontWeight.KOREAN, FontWeight.UNIFONT):
       codepoints.update(range(0xAC00, 0xD7A4))
       codepoints.update(range(0x1100, 0x1200))
       codepoints.update(range(0x3130, 0x3190))
+    if font_weight == FontWeight.UNIFONT or (BIG_UI and font_weight == FontWeight.DISPLAY):
       codepoints.update(range(0x4E00, 0xA000))
       codepoints.update(range(0x3400, 0x4DC0))
     return sorted(codepoints)

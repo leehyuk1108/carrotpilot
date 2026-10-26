@@ -9,6 +9,8 @@ output_files = [
   for f in source_files
   if "NotoColor" not in f.name
 ]
+output_files.append(("#openpilot/selfdrive/assets/fonts/Pretendard-KR-SemiBold.fnt",
+                     "#openpilot/selfdrive/assets/fonts/Pretendard-KR-SemiBold.png"))
 env.Command(
   target=output_files,
   source=[generator, source_files],

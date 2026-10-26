@@ -63,7 +63,8 @@ def main():
     reference = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(reference)
 
-  gui_app.init_window('C4 new ui native preview', font_weights=[FontWeight.DISPLAY, FontWeight.SEMI_BOLD])
+  gui_app.init_window('C4 new ui native preview', font_weights=[FontWeight.DISPLAY, FontWeight.SEMI_BOLD,
+                                                            FontWeight.KOREAN, FontWeight.UNIFONT])
   real_clock = rl.get_time
   preview_time = [10.]
   rl.get_time = lambda: preview_time[0]

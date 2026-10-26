@@ -39,7 +39,7 @@ class Widget:
 
 @lru_cache(maxsize=256)
 def pil_font(size):
-  return ImageFont.truetype(str(ROOT / "selfdrive/assets/fonts/KaiGenGothicKR-Bold.ttf"), max(1, round(size * 1.16)))
+  return ImageFont.truetype(str(ROOT / "selfdrive/assets/fonts/Pretendard-SemiBold.ttf"), max(1, round(size * 1.16)))
 
 
 def measured(_font, text, size, spacing=0):

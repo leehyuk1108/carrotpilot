@@ -15,7 +15,7 @@ def main():
   parser.add_argument('--output', type=Path, required=True)
   args = parser.parse_args()
   args.output.mkdir(parents=True, exist_ok=True)
-  gui_app.init_window('C4 offroad native preview', font_weights=[FontWeight.DISPLAY])
+  gui_app.init_window('C4 offroad native preview', font_weights=[FontWeight.DISPLAY, FontWeight.KOREAN, FontWeight.UNIFONT])
   trip = TripSummary()
   welcome = MiciWelcomeLayout(trip)
   try:
