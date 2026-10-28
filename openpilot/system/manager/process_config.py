@@ -6,6 +6,8 @@ from openpilot.cereal import car
 from openpilot.common.params import Params
 from openpilot.system.hardware import PC, TICI
 from openpilot.system.manager.process import PythonProcess, NativeProcess, DaemonProcess
+from openpilot.system.wayon_camera import (wayon_ready, wayon_offroad, wayon_impact_ready,
+                                          wayon_camera_requested, wayon_panorama_requested)
 
 try:
   BODYTELEOP_AVAILABLE = importlib.util.find_spec("openpilot.tools.bodyteleop.web") is not None
@@ -17,6 +19,20 @@ CARROT_WEB_EXTERNAL = os.getenv("CARROT_WEB_EXTERNAL") == "1"
 
 def driverview(started: bool, params: Params, CP: car.CarParams) -> bool:
   return started or params.get_bool("IsDriverViewEnabled")
+
+def normal_camera(started, params, CP):
+  return driverview(started, params, CP) and managed_processes["wayon_camerad"].proc is None
+
+def remote_camera(started, params, CP):
+  return (wayon_camera_requested(started, params, CP) and not params.get_bool("IsDriverViewEnabled")
+          and managed_processes["camerad"].proc is None)
+
+class CameraProcess(NativeProcess):
+  def start(self):
+    # Params may change between predicates; recheck ownership at actual launch.
+    other = "wayon_camerad" if self.name == "camerad" else "camerad"
+    if managed_processes[other].proc is None:
+      super().start()
 
 def notcar(started: bool, params: Params, CP: car.CarParams) -> bool:
   return started and CP.notCar
@@ -120,12 +136,18 @@ procs = [
   # Preserve generic multi-camera WebRTC for notCar users. Carrot Vision on a
   # real device is road-only and independently enabled by CarrotVisionEnabled.
   NativeProcess("stream_encoderd", "openpilot/system/loggerd", ["./encoderd", "--stream"], notcar),
+  NativeProcess("wayon_encoderd", "openpilot/system/loggerd",
+                ["/usr/bin/env", "STREAM_BITRATE=1500000", "./encoderd", "--wayon-panorama"], wayon_panorama_requested, sigkill=True),
   # Prewarm the hardware encoder with the rest of the onroad stack. The
   # encoder process stays idle until CarrotVisionActive is set by a session.
   NativeProcess("carrot_vision_encoderd", "openpilot/system/loggerd", ["./encoderd", "--carrot-vision-road"], and_(iscar, enable_webrtc)),
   PythonProcess("logmessaged", "openpilot.system.logmessaged", always_run),
 
-  NativeProcess("camerad", "openpilot/system/camerad", ["./camerad"], driverview, enabled=not WEBCAM),
+  # Separate ownership keeps the onroad wide-camera preference untouched.
+  CameraProcess("wayon_camerad", "openpilot/system/camerad",
+                ["/usr/bin/env", "-u", "DISABLE_WIDE_ROAD", "-u", "DISABLE_DRIVER", "DISABLE_ROAD=1", "./camerad"],
+                remote_camera, enabled=not WEBCAM),
+  CameraProcess("camerad", "openpilot/system/camerad", ["./camerad"], normal_camera, enabled=not WEBCAM),
   PythonProcess("webcamerad", "openpilot.tools.webcam.camerad", driverview, enabled=WEBCAM),
   PythonProcess("proclogd", "openpilot.system.proclogd", only_onroad, enabled=platform.system() != "Darwin"),
   PythonProcess("journald", "openpilot.system.journald", only_onroad, platform.system() != "Darwin"),
@@ -136,7 +158,7 @@ procs = [
   PythonProcess("signalcolord", "openpilot.selfdrive.modeld.signal_color_shadow", signal_color_observer, spawn=True),
   PythonProcess("jetlinkd", "openpilot.selfdrive.modeld.jetlink.daemon", always_run, enabled=TICI, restart_if_crash=True),
   PythonProcess("dmonitoringmodeld", "openpilot.selfdrive.modeld.dmonitoringmodeld", enable_dm_model, enabled=(WEBCAM or not PC)),
-  PythonProcess("sensord", "openpilot.system.sensord.sensord", only_onroad, enabled=not PC),
+  PythonProcess("sensord", "openpilot.system.sensord.sensord", or_(only_onroad, wayon_impact_ready), enabled=not PC),
   PythonProcess("ui", "openpilot.selfdrive.ui.ui", always_run, restart_if_crash=True),
   PythonProcess("soundd", "openpilot.selfdrive.ui.soundd", driverview),
   PythonProcess("locationd", "openpilot.selfdrive.locationd.locationd", only_onroad),
@@ -183,6 +205,10 @@ procs = [
   PythonProcess("navdy_bridge", "openpilot.selfdrive.navdy.bridge", always_run, enabled=not PC, restart_if_crash=True, spawn=True),
   PythonProcess("jetson_maintenance", "openpilot.selfdrive.carrot.jetson_maintenance", always_run, enabled=not PC, restart_if_crash=True),
   PythonProcess("comma_remote", "openpilot.selfdrive.carrot.comma_remote", always_run, enabled=not PC, restart_if_crash=True),
+  PythonProcess("wayon_cloud", "openpilot.system.wayon_cloud_uploader", wayon_ready, enabled=not PC, restart_if_crash=True, spawn=True),
+  PythonProcess("wayon_impactd", "openpilot.system.wayon_impactd", wayon_impact_ready, enabled=not PC, restart_if_crash=True, spawn=True),
+  PythonProcess("wayon_live", "openpilot.system.wayon_live_stream", wayon_offroad, enabled=not PC, restart_if_crash=True, spawn=True),
+  PythonProcess("wayon_relay", "openpilot.system.wayon_remote_relay", wayon_ready, enabled=not PC, restart_if_crash=True, spawn=True),
   # carrot_navi permanently owns TCP 7714 and publishes navigation data over cereal.
   PythonProcess("carrot_navi", "openpilot.selfdrive.carrot.carrot_navi", always_run, restart_if_crash=True),
 

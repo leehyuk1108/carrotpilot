@@ -23,6 +23,7 @@ from openpilot.system.loggerd.config import get_available_percent
 from openpilot.system.statsd import statlog
 from openpilot.common.swaglog import cloudlog
 from openpilot.system.hardware.power_monitoring import PowerMonitoring
+from openpilot.system.wayon_camera import camera_request
 from openpilot.system.hardware.automatic_shutdown import REQUEST_KEY, message_is_fresh
 from openpilot.system.hardware.fan_controller import FanController
 from openpilot.system.hardware.tici.pins import GPIO
@@ -369,7 +370,8 @@ def hardware_thread(end_event, hw_queue) -> None:
     cp_cache.update(params)
     tesla_no_sleep = cp_cache.is_tesla
 
-    should_pwrsave = (not tesla_no_sleep) and not onroad_conditions["ignition"] and msg.deviceState.screenBrightnessPercent < 1e-3
+    remote_camera_active = camera_request() is not None
+    should_pwrsave = (not tesla_no_sleep) and not remote_camera_active and not onroad_conditions["ignition"] and msg.deviceState.screenBrightnessPercent < 1e-3
     if should_pwrsave != pwrsave or (count == 0):
       HARDWARE.set_power_save(should_pwrsave)
     pwrsave = should_pwrsave

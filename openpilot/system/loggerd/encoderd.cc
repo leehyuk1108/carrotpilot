@@ -172,11 +172,12 @@ void encoderd_thread(const LogCameraInfo (&cameras)[N], bool encode_on_demand = 
 int main(int argc, char* argv[]) {
   const std::string mode = argc > 1 ? argv[1] : "";
   const bool carrot_vision_mode = mode == "--carrot-vision-road";
+  const bool wayon_panorama_mode = mode == "--wayon-panorama";
   if (!Hardware::PC()) {
     // Carrot Vision is optional and may drop frames. Keeping its V4L setup and
     // worker threads out of SCHED_FIFO prevents on-demand video work from
     // delaying control and camera services.
-    if (!carrot_vision_mode) {
+    if (!carrot_vision_mode && !wayon_panorama_mode) {
       int ret = util::set_realtime_priority(52);
       assert(ret == 0);
     }
@@ -188,6 +189,8 @@ int main(int argc, char* argv[]) {
   if (argc > 1) {
     if (mode == "--stream") {
       encoderd_thread(stream_cameras_logged);
+    } else if (wayon_panorama_mode) {
+      encoderd_thread(wayon_panorama_cameras_logged);
     } else if (carrot_vision_mode) {
       encoderd_thread(carrot_vision_cameras_logged, true);
     } else {

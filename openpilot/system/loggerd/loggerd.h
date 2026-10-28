@@ -190,4 +190,12 @@ const LogCameraInfo carrot_vision_road_camera_info{
 
 const LogCameraInfo cameras_logged[] = {road_camera_info, wide_road_camera_info, driver_camera_info};
 const LogCameraInfo stream_cameras_logged[] = {stream_road_camera_info, stream_wide_road_camera_info, stream_driver_camera_info};
+inline LogCameraInfo panorama_camera(LogCameraInfo camera) {
+  camera.encoder_infos[0].frame_width = 1344;
+  camera.encoder_infos[0].frame_height = 760;
+  return camera;
+}
+const LogCameraInfo wayon_panorama_cameras_logged[] = {
+  panorama_camera(stream_wide_road_camera_info), panorama_camera(stream_driver_camera_info)
+};
 const LogCameraInfo carrot_vision_cameras_logged[] = {carrot_vision_road_camera_info};
