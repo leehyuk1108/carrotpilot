@@ -108,18 +108,22 @@ class RelayChannel:
     self.allow_ssh = allow_ssh
     self.local: socket.socket | None = None
     self.local_lock = threading.Lock()
+    self.retiring_websocket = None
 
-  def close_local(self, expected=None) -> None:
+  def close_local(self, expected=None, failed_websocket=None) -> bool:
     with self.local_lock:
       if expected is not None and self.local is not expected:
-        return
+        return False
       local, self.local = self.local, None
+      if local is not None and failed_websocket is not None:
+        self.retiring_websocket = failed_websocket
     if local is not None:
       try:
         local.shutdown(socket.SHUT_RDWR)
       except OSError:
         pass
       local.close()
+    return local is not None
 
   def open_local(self, websocket) -> None:
     self.close_local()
@@ -131,6 +135,9 @@ class RelayChannel:
     local = socket.create_connection(RELAY_TARGETS[self.kind], timeout=10)
     local.settimeout(1.0)
     with self.local_lock:
+      if self.retiring_websocket is websocket:
+        local.close()
+        raise WebSocketException("live relay session ended")
       self.local = local
 
     def forward() -> None:
@@ -146,7 +153,12 @@ class RelayChannel:
       except (OSError, WebSocketException) as exc:
         print(f"Wayon relay {self.kind}: local forwarding ended {type(exc).__name__}", flush=True)
       finally:
-        self.close_local(expected=local)
+        failed_websocket = websocket if self.kind == "live" else None
+        if self.close_local(expected=local, failed_websocket=failed_websocket) and failed_websocket is not None:
+          # End the Cloud session too; otherwise the viewer retains a dead LIVE
+          # socket. Explicit peer-close/replacement already detached this owner.
+          print("Wayon relay live: local stream ended, closing cloud session", flush=True)
+          websocket.close(timeout=1)
 
     threading.Thread(target=forward, name=f"wayon-{self.kind}-local", daemon=True).start()
 

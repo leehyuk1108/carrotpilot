@@ -204,3 +204,82 @@ def test_old_forwarder_does_not_close_replacement_session():
     old.close()
     peer.close()
     other.close()
+
+
+class ClosingWebSocket:
+  def __init__(self):
+    self.closed = []
+    self.sent = []
+
+  def send(self, data, opcode):
+    self.sent.append(data)
+
+  def close(self, **kwargs):
+    self.closed.append(kwargs)
+
+
+@pytest.fixture
+def delayed_forwarders(monkeypatch):
+  forwarders = []
+  class DelayedThread:
+    def __init__(self, target, **kwargs):
+      forwarders.append(target)
+    def start(self):
+      pass
+  monkeypatch.setattr(relay.threading, "Thread", DelayedThread)
+  return forwarders
+
+
+def test_local_eof_closes_live_cloud_session_and_rejects_late_peer_open(monkeypatch, delayed_forwarders):
+  channel = relay.RelayChannel("live", "https://wayon.test", "token")
+  websocket = ClosingWebSocket()
+  local, peer = socket.socketpair()
+  monkeypatch.setattr(relay.socket, "create_connection", lambda *a, **kw: local)
+  channel.open_local(websocket)
+  peer.sendall(b"WLV1-test")
+  peer.close()
+  delayed_forwarders[0]()
+  assert websocket.sent == [b"WLV1-test"]
+  assert websocket.closed == [{"timeout": 1}]
+  assert channel.local is None
+  replacement, other = socket.socketpair()
+  monkeypatch.setattr(relay.socket, "create_connection", lambda *a, **kw: replacement)
+  try:
+    with pytest.raises(relay.WebSocketException, match="session ended"):
+      channel.open_local(websocket)
+    assert replacement.fileno() == -1
+    fresh = ClosingWebSocket()
+    next_local, next_peer = socket.socketpair()
+    monkeypatch.setattr(relay.socket, "create_connection", lambda *a, **kw: next_local)
+    channel.open_local(fresh)
+    assert channel.local is next_local
+    channel.close_local()
+    next_peer.close()
+    delayed_forwarders[-1]()
+    assert not fresh.closed
+  finally:
+    other.close()
+
+
+def test_ten_replacements_and_explicit_close_never_retire_new_session(monkeypatch, delayed_forwarders):
+  channel = relay.RelayChannel("live", "https://wayon.test", "token")
+  websocket = ClosingWebSocket()
+  peers = []
+  try:
+    for _ in range(10):
+      local, peer = socket.socketpair()
+      peers.append(peer)
+      monkeypatch.setattr(relay.socket, "create_connection", lambda *a, **kw: local)
+      channel.open_local(websocket)
+      if len(delayed_forwarders) > 1:
+        delayed_forwarders[-2]()
+      assert channel.local is local
+      assert channel.retiring_websocket is None
+      assert not websocket.closed
+    channel.close_local()
+    delayed_forwarders[-1]()
+    assert not websocket.closed
+  finally:
+    channel.close_local()
+    for peer in peers:
+      peer.close()
