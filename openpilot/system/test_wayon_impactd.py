@@ -18,7 +18,7 @@ def message(service, now, valid=True, **fields):
 def safety_messages(now, started=False, ignition_line=False, ignition_can=False):
   device = message("deviceState", now, started=started)
   pandas = log.Event.new_message(logMonoTime=round(now * 1e9), valid=True)
-  pandas.pandaStates = [{"pandaType": "tres", "ignitionLine": ignition_line, "ignitionCan": ignition_can}]
+  pandas.pandaStates = [{"pandaType": "tres", "harnessStatus": "normal", "ignitionLine": ignition_line, "ignitionCan": ignition_can}]
   return device, pandas
 
 
@@ -342,13 +342,21 @@ def guarded_monitor(tmp_path, arm_delay_s=0, settle_s=0):
   )
 
 
-def test_traverse_defaults_enable_both_guards_without_affecting_other_vehicles(tmp_path):
+def test_traverse_defaults_to_activity_guard_without_affecting_other_vehicles(tmp_path):
   config = {"impact_lock_state_path": str(tmp_path / "lock")}
   tracker = impactd.lock_tracker_from_config(config, "CHEVROLET_TRAVERSE")
-  assert tracker.required and tracker.require_doors_closed
+  assert tracker.activity_guard and not tracker.required and not tracker.require_doors_closed
   for fingerprint in ("", "CHEVROLET_BOLT_EUV", "HYUNDAI_IONIQ_5"):
     tracker = impactd.lock_tracker_from_config(config, fingerprint)
-    assert not tracker.required and not tracker.require_doors_closed
+    assert not tracker.activity_guard and not tracker.required and not tracker.require_doors_closed
+  # Upgrade the previously deployed strict config without retaining the
+  # regression. The new explicit policy switch still supports strict users.
+  config.update(impact_require_door_locked=True, impact_require_doors_closed=True)
+  tracker = impactd.lock_tracker_from_config(config, "CHEVROLET_TRAVERSE")
+  assert tracker.activity_guard and not tracker.required and not tracker.require_doors_closed
+  config["impact_door_activity_guard"] = "false"
+  tracker = impactd.lock_tracker_from_config(config, "CHEVROLET_TRAVERSE")
+  assert not tracker.activity_guard and tracker.required and tracker.require_doors_closed
   config.update(impact_require_door_locked="false", impact_require_doors_closed=False)
   tracker = impactd.lock_tracker_from_config(config, "CHEVROLET_TRAVERSE")
   assert not tracker.required and not tracker.require_doors_closed
@@ -501,3 +509,198 @@ def test_queue_rechecks_door_guard_without_blocking_lock_notifications(tmp_path,
   assert queued == []
   assert impactd.queue_if_offroad(safety, monitor, {"eventType": "door_lock"}, queued.append)
   assert queued == [{"eventType": "door_lock"}]
+
+
+@pytest.fixture
+def parking_monitor(tmp_path):
+  return impactd.OffroadImpactMonitor(
+    ImpactDetector(arm_delay_s=0.2, warmup_s=0),
+    DoorLockTracker(activity_guard=True, arm_delay_s=0.1, state_path=tmp_path / "parking-lock", max_age_s=1),
+    ParkingUnlockReminder(delay_s=1000),
+  )
+
+
+def parking_update(monitor, now, frames=(), heartbeat=True, panda_changes=None, **kwargs):
+  # Match Cap'n Proto nanosecond timestamps, not float addition roundoff.
+  now = round(now * 1e9) / 1e9
+  if heartbeat:
+    monitor.can_health.observe(now, now)
+  safety = Snapshot(safety_messages(now), now)
+  for field, value in (panda_changes or {}).items():
+    if field.startswith("canState0."):
+      setattr(safety["pandaStates"][0].canState0, field.split(".")[1], value)
+    else:
+      setattr(safety["pandaStates"][0], field, value)
+  return monitor.update(kwargs.get("imu", imu_snapshot(now)), safety, list(frames), kwargs.get("can_complete", True), now)
+
+
+def warm_parking(monitor, known=True):
+  frames = [lock_sample(10, 4), door_sample(10)] if known else []
+  parking_update(monitor, 10, frames)
+  for i in range(1, 51): parking_update(monitor, 10 + i * 0.01)
+  assert monitor.detector.armed
+
+
+@pytest.mark.parametrize("known", [False, True])
+def test_long_quiet_parking_keeps_real_impact_detection_without_claiming_unknown_locked(parking_monitor, known):
+  monitor = parking_monitor
+  warm_parking(monitor, known)
+  # A full quiet interval longer than the old 10-second expiry, with normal
+  # CAN receiver heartbeats and continuous IMU, must not disable coverage.
+  for i in range(51, 3051):
+    assert parking_update(monitor, 10 + i * 0.01)[1] is None
+    assert monitor.detector.armed
+  assert monitor.tracker.locked is (True if known else None)
+  assert monitor.tracker.door_open is (False if known else None)
+  assert impactd.detector_status(monitor.detector, monitor.tracker)["doorStateObserved"] == known
+  assert parking_update(monitor, 40.51, imu=imu_snapshot(40.51, accel=(2.05, 0, 9.80665)))[1] is None
+  assert monitor.pending_impact is not None
+  emitted = []
+  for i in range(52, 120):
+    event = parking_update(monitor, 40 + i * 0.01)[1]
+    if event: emitted.append(event)
+  assert len(emitted) == 1 and emitted[0]["captureRequested"]
+
+
+@pytest.mark.parametrize("opened", [False, True])
+def test_open_or_unlocked_state_survives_six_hour_quiet_interval(parking_monitor, opened):
+  monitor = parking_monitor
+  warm_parking(monitor)
+  frames = [door_sample(10.6, True)] if opened else [lock_sample(10.6, 2)]
+  parking_update(monitor, 10.6, frames, imu=imu_snapshot(10.6, accel=(8, 0, 9.8)))
+  assert not monitor.detector.armed and monitor.pending_impact is None
+  assert not monitor.tracker.detection_allowed(10.6 + 6 * 3600)
+  assert (monitor.tracker.door_open is True) if opened else (monitor.tracker.locked is False)
+
+
+def test_closed_locked_state_survives_six_hour_quiet_interval(parking_monitor):
+  warm_parking(parking_monitor)
+  assert parking_monitor.tracker.detection_allowed(10 + 6 * 3600)
+  assert parking_monitor.tracker.locked is True and parking_monitor.tracker.door_open is False
+
+
+@pytest.mark.parametrize("edge", ["open", "unlock"])
+def test_activity_after_quiet_cancels_pending_and_preserves_notifications(parking_monitor, edge):
+  monitor = parking_monitor
+  warm_parking(monitor)
+  for i in range(51, 201): parking_update(monitor, 10 + i * 0.01)
+  parking_update(monitor, 12.01, imu=imu_snapshot(12.01, accel=(2.05, 0, 9.80665)))
+  assert monitor.pending_impact
+  for i in range(2, 42): parking_update(monitor, 12 + i * 0.01)
+  frames = [door_sample(12.42, True)] if edge == "open" else [lock_sample(12.42, 2)]
+  events, impact = parking_update(monitor, 12.42, frames)
+  assert impact is None and monitor.pending_impact is None and not monitor.detector.armed
+  assert [e["locked"] for e in events] == ([] if edge == "open" else [False])
+  for i in range(43, 60): assert parking_update(monitor, 12 + i * 0.01)[1] is None
+  close_frames = [door_sample(12.6)] if edge == "open" else [lock_sample(12.6, 4)]
+  events, _ = parking_update(monitor, 12.6, close_frames)
+  assert [e["locked"] for e in events] == ([] if edge == "open" else [True])
+  for i in range(61, 89):
+    parking_update(monitor, 12 + i * 0.01)
+    assert not monitor.detector.armed
+  for i in range(89, 100): parking_update(monitor, 12 + i * 0.01)
+  assert monitor.detector.armed
+
+
+def test_empty_can_envelopes_are_live_but_no_envelopes_are_not(parking_monitor):
+  health = parking_monitor.can_health
+  assert not health.fresh(10)
+  assert impactd.drain_lock_can(Socket([can_bytes(10)]), parking_monitor.tracker, 10, health) == ([], True)
+  assert health.fresh(10.49)
+  assert impactd.drain_lock_can(Socket([]), parking_monitor.tracker, 10.6, health) == ([], True)
+  assert not health.fresh(10.6)
+  impactd.drain_lock_can(Socket([can_bytes(10)]), parking_monitor.tracker, 10.6, health)
+  assert not health.fresh(10.6)
+  impactd.drain_lock_can(Socket([can_bytes(10.61)]), parking_monitor.tracker, 10.61, health)
+  assert health.fresh(10.61)
+
+
+def test_first_heartbeat_can_follow_other_subscriptions_without_blocking_quiet_startup(parking_monitor):
+  for now in (9, 9.5, 9.9):
+    parking_update(parking_monitor, now, heartbeat=False)
+    assert parking_monitor.pause_reason == "waitingForCanReceiver"
+    assert not parking_monitor.detector.armed
+  warm_parking(parking_monitor, known=False)
+  assert parking_monitor.tracker.locked is None
+  assert not parking_monitor.tracker.lock_refresh_required
+
+
+@pytest.mark.parametrize("edge", ["open", "unlock"])
+def test_activity_just_before_first_offroad_poll_is_not_lost(parking_monitor, edge):
+  frames = [door_sample(9.99, True)] if edge == "open" else [lock_sample(9.99, 2)]
+  parking_update(parking_monitor, 10, frames)
+  for i in range(1, 100): parking_update(parking_monitor, 10 + i * 0.01)
+  assert not parking_monitor.detector.armed
+  assert not parking_monitor.tracker.detection_allowed(11)
+
+
+def test_replayed_can_heartbeat_does_not_renew_receiver_health(parking_monitor):
+  health = parking_monitor.can_health
+  for now in (10, 10.2, 10.4):
+    impactd.drain_lock_can(Socket([can_bytes(10)]), parking_monitor.tracker, now, health)
+  assert health.received_at == 10
+  assert not health.fresh(10.51)
+
+
+@pytest.mark.parametrize("failure", ["no_heartbeat", "can_overload", "harness", "panda_restart", "rx_loss", "spi_loss", "bus_off", "rx_error", "panda_heartbeat", "panda_fault"])
+def test_receiver_fault_discards_pending_and_requires_new_observations(parking_monitor, failure):
+  monitor = parking_monitor
+  parking_update(monitor, 10, [lock_sample(10, 4), door_sample(10)], panda_changes={"uptime": 100})
+  for i in range(1, 51): parking_update(monitor, 10 + i * 0.01, panda_changes={"uptime": 100})
+  parking_update(monitor, 10.51, imu=imu_snapshot(10.51, accel=(2.05, 0, 9.80665)), panda_changes={"uptime": 100})
+  assert monitor.pending_impact
+  changes = {"harness": {"harnessStatus": "notConnected"}, "panda_restart": {"uptime": 1},
+             "rx_loss": {"canState0.totalRxLostCnt": 1}, "spi_loss": {"spiChecksumErrorCount": 1},
+             "bus_off": {"canState0.busOff": True}, "rx_error": {"canState0.receiveErrorCnt": 1},
+             "panda_heartbeat": {"heartbeatLost": True}, "panda_fault": {"faultStatus": "faultTemp"}}.get(failure, {})
+  now = 11.02 if failure == "no_heartbeat" else 10.52
+  _, event = parking_update(monitor, now, heartbeat=failure != "no_heartbeat", can_complete=failure != "can_overload",
+                            panda_changes={"uptime": 100, **changes})
+  assert event is None and monitor.pending_impact is None
+  assert monitor.pause_reason == "waitingForCanReceiver"
+  assert not monitor.detector.armed
+  assert monitor.tracker.lock_refresh_required and monitor.tracker.door_refresh_required
+  # Recover transport, not permission to reuse old lock evidence.
+  for i in range(1, 10): parking_update(monitor, now + i * 0.01, panda_changes={"uptime": 101})
+  assert not monitor.detector.armed
+  parking_update(monitor, now + 0.1, [lock_sample(now + 0.1, 4), door_sample(now + 0.1)], panda_changes={"uptime": 101})
+  for i in range(11, 51): parking_update(monitor, now + i * 0.01, panda_changes={"uptime": 101})
+  assert monitor.detector.armed
+
+
+def test_sleep_and_historical_counters_do_not_suspend_parking(parking_monitor):
+  monitor = parking_monitor
+  changes = {"powerSaveEnabled": True, "spiChecksumErrorCount": 14, "canState0.totalErrorCnt": 425}
+  for i in range(100): parking_update(monitor, 10 + i * 0.01, panda_changes=changes)
+  assert monitor.detector.armed
+  assert monitor.tracker.locked is None
+
+
+@pytest.mark.parametrize("address", [0x130, 0x12A])
+def test_malformed_door_or_lock_is_not_treated_as_quiet(parking_monitor, address):
+  monitor = parking_monitor
+  warm_parking(monitor)
+  parking_update(monitor, 10.6, [(10.6, 0, address, b"")])
+  assert not monitor.detector.armed
+  assert not monitor.tracker.detection_allowed(20)
+
+
+def test_startup_does_not_restore_old_locked_file_and_unknown_policy_is_explicit(tmp_path):
+  path = tmp_path / "state"
+  old = DoorLockTracker(activity_guard=True, state_path=path)
+  old.update(0, 0x130, b"\x04", 10)
+  old.update(0, 0x12A, door_sample(10)[3], 10)
+  new = DoorLockTracker(activity_guard=True, state_path=path)
+  assert new.locked is None and new.door_open is None
+  assert new.detection_allowed(20)
+  assert not impactd.detector_status(ImpactDetector(), new)["doorStateObserved"]
+
+
+def test_activity_queue_rechecks_receiver_and_preserves_door_guard(parking_monitor, monkeypatch):
+  monitor = parking_monitor
+  warm_parking(monitor)
+  safety = Snapshot(safety_messages(11.1), 11.1)
+  monkeypatch.setattr(impactd.time, "monotonic", lambda: 11.1)
+  queued = []
+  assert not impactd.queue_if_offroad(safety, monitor, {"id": "impact"}, queued.append, impact=True)
+  assert not queued and monitor.tracker.lock_refresh_required

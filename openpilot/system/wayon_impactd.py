@@ -75,8 +75,9 @@ def config_bool(config: dict, key: str, default: bool = False) -> bool:
 def lock_tracker_from_config(config: dict, car_fingerprint: str = "") -> DoorLockTracker:
   # Only this vehicle's receive-side CAN layout has been verified here.
   traverse = car_fingerprint == "CHEVROLET_TRAVERSE"
+  activity_guard = config_bool(config, "impact_door_activity_guard", traverse)
   return DoorLockTracker(
-    required=config_bool(config, "impact_require_door_locked", traverse),
+    required=not activity_guard and config_bool(config, "impact_require_door_locked"),
     bus=int(config.get("impact_lock_can_bus", 0)),
     address=int(config.get("impact_lock_can_address", 0x130)),
     byte_index=int(config.get("impact_lock_can_byte", 0)),
@@ -85,11 +86,13 @@ def lock_tracker_from_config(config: dict, car_fingerprint: str = "") -> DoorLoc
     arm_delay_s=float(config.get("impact_lock_arm_delay_s", 3.0)),
     state_path=Path(config.get("impact_lock_state_path", DEFAULT_DOOR_LOCK_STATE_PATH)),
     max_age_s=float(config.get("impact_lock_state_max_age_s", DEFAULT_LOCK_STATE_MAX_AGE_S)),
-    require_doors_closed=config_bool(config, "impact_require_doors_closed", traverse),
+    require_doors_closed=not activity_guard and config_bool(config, "impact_require_doors_closed"),
+    activity_guard=activity_guard,
   )
 
 
 def detector_status(detector: ImpactDetector, lock_tracker: DoorLockTracker) -> dict:
+  now = time.monotonic()
   return {
     "armDelayS": detector.arm_delay_s,
     "minDynamicG": detector.min_dynamic_g,
@@ -101,19 +104,24 @@ def detector_status(detector: ImpactDetector, lock_tracker: DoorLockTracker) -> 
     "doorsLocked": lock_tracker.locked,
     "requireDoorsClosed": lock_tracker.require_doors_closed,
     "doorOpen": lock_tracker.door_open,
+    "doorActivityGuard": lock_tracker.activity_guard,
+    "doorStateObserved": lock_tracker.locked is not None and lock_tracker.door_open is not None,
+    "doorStateRefreshRequired": lock_tracker.lock_refresh_required or lock_tracker.door_refresh_required,
+    "lockObservationAgeS": None if lock_tracker.last_sample_at is None else round(now - lock_tracker.last_sample_at, 1),
+    "doorObservationAgeS": None if lock_tracker.last_door_sample_at is None else round(now - lock_tracker.last_door_sample_at, 1),
   }
 
 
 def operating_state(detector: ImpactDetector, lock_tracker: DoorLockTracker,
                     received_first_sample: bool, now: float) -> str:
   lock_tracker.expire(now)
-  if lock_tracker.require_doors_closed and lock_tracker.door_open is True:
+  if lock_tracker.watches_doors and lock_tracker.door_open is True:
     return "pausedDoorOpen"
-  if lock_tracker.require_doors_closed and lock_tracker.door_open is None:
+  if lock_tracker.door_refresh_required or (lock_tracker.require_doors_closed and lock_tracker.door_open is None):
     return "waitingForDoorState"
-  if lock_tracker.required and lock_tracker.locked is None:
+  if lock_tracker.lock_refresh_required or (lock_tracker.required and lock_tracker.locked is None):
     return "waitingForLockState"
-  if lock_tracker.required and lock_tracker.locked is False:
+  if (lock_tracker.required or lock_tracker.activity_guard) and lock_tracker.locked is False:
     return "pausedUnlocked"
   if not lock_tracker.detection_allowed(now):
     return "lockSettling"
@@ -171,7 +179,24 @@ def sensor_sample(sm, service: str, measurement: str, now: float):
   return (vector, sample_at) if vector is not None else None
 
 
-def drain_lock_can(sock, tracker: DoorLockTracker, now: float | None = None) -> tuple[list, bool]:
+class CanStreamHealth:
+  """Fresh empty CAN envelopes prove the receiver is alive, not that doors are locked."""
+  def __init__(self) -> None:
+    self.sample_at: float | None = None
+    self.received_at: float | None = None
+
+  def observe(self, sample_at: float, received_at: float) -> None:
+    if self.sample_at is None or sample_at > self.sample_at:
+      self.sample_at = sample_at
+      self.received_at = received_at
+
+  def fresh(self, now: float) -> bool:
+    return all(value is not None and 0 <= now - value <= CAN_MAX_AGE_S
+               for value in (self.sample_at, self.received_at))
+
+
+def drain_lock_can(sock, tracker: DoorLockTracker, now: float | None = None,
+                   health: CanStreamHealth | None = None) -> tuple[list, bool]:
   """Keep fresh lock frames in wire order, with fixed work/storage bounds.
 
   An incomplete drain is not a latest-state observation. The caller discards
@@ -193,6 +218,8 @@ def drain_lock_can(sock, tracker: DoorLockTracker, now: float | None = None) -> 
         received_at = time.monotonic() if now is None else now
         if sample_at <= 0 or not 0 <= received_at - sample_at <= CAN_MAX_AGE_S:
           continue
+        if health is not None:
+          health.observe(sample_at, received_at)
         frame_count += len(event.can)
         if frame_count > MAX_CAN_FRAMES:
           return [], False
@@ -215,6 +242,10 @@ class OffroadImpactMonitor:
     self.offroad_since: float | None = None
     self.last_can_at = 0.0
     self.pending_impact: tuple[float, dict] | None = None
+    self.can_health = CanStreamHealth()
+    self.panda_snapshot: tuple | None = None
+    self.guard_established = False
+    self.pause_reason = "waitingForOffroad"
 
   def reset(self) -> None:
     self.detector.reset()
@@ -223,11 +254,53 @@ class OffroadImpactMonitor:
     self.offroad_since = None
     self.last_can_at = 0.0
     self.pending_impact = None
+    self.pause_reason = "waitingForOffroad"
+
+  def interrupt(self, reason: str) -> None:
+    self.reset()
+    if self.tracker.activity_guard:
+      self.tracker.invalidate()
+    self.pause_reason = reason
+    self.guard_established = True
+
+  def transport_healthy(self, safety, now: float) -> bool:
+    if not self.tracker.activity_guard:
+      return True
+    if not self.can_health.fresh(now) or not 0 <= self.tracker.bus <= 2:
+      return False
+    panda = safety["pandaStates"][0]
+    bus = getattr(panda, f"canState{self.tracker.bus}")
+    snapshot = (int(panda.uptime), str(panda.harnessStatus), str(panda.pandaType), int(panda.rxBufferOverflow),
+                int(panda.spiChecksumErrorCount), int(bus.totalRxLostCnt), int(bus.busOffCnt), int(bus.canCoreResetCnt))
+    previous = self.panda_snapshot
+    self.panda_snapshot = snapshot
+    if previous is not None and (snapshot[0] < previous[0] or snapshot[1:] != previous[1:]):
+      return False
+    return (panda.harnessStatus != "notConnected" and not panda.heartbeatLost and panda.faultStatus == "none"
+            and not bus.busOff and not bus.errorWarning and not bus.errorPassive and bus.receiveErrorCnt == 0)
 
   def update(self, imu, safety, can_samples: list, can_complete: bool, now: float) -> tuple[list[dict], dict | None]:
-    if not offroad_allowed(safety, now) or not can_complete:
-      self.reset()
+    if not offroad_allowed(safety, now):
+      active = (service_fresh(safety, "deviceState", now, DEVICE_STATE_MAX_AGE_S) and safety["deviceState"].started) or (
+        service_fresh(safety, "pandaStates", now, PANDA_STATE_MAX_AGE_S)
+        and any(p.ignitionLine or p.ignitionCan or p.controlsAllowed for p in safety["pandaStates"]))
+      if self.guard_established and not active:
+        self.interrupt("waitingForOffroad")
+      else:
+        self.reset()
+        self.guard_established = False
+        self.panda_snapshot = None
       return [], None
+    if not can_complete or not self.transport_healthy(safety, now):
+      if not can_complete or self.guard_established or self.panda_snapshot is not None:
+        self.interrupt("waitingForCanReceiver")
+      else:
+        # Subscription startup is not a lost established connection. Wait for
+        # the first heartbeat without requiring sleeping doors to speak.
+        self.reset()
+        self.pause_reason = "waitingForCanReceiver"
+      return [], None
+    self.guard_established = True
     if self.offroad_since is None:
       self.offroad_since = now
 
@@ -235,7 +308,10 @@ class OffroadImpactMonitor:
     wall_now = datetime.now(UTC)
     previous_can_at = self.last_can_at
     for sample_at, bus, address, data in can_samples:
-      if sample_at < self.offroad_since or sample_at <= previous_can_at or sample_at < self.last_can_at \
+      # A fresh door edge can precede the first offroad poll by milliseconds.
+      # The activity policy must not drop that edge and call the state unknown.
+      if (not self.tracker.activity_guard and sample_at < self.offroad_since) \
+          or sample_at <= previous_can_at or sample_at < self.last_can_at \
           or not 0 <= now - sample_at <= CAN_MAX_AGE_S:
         continue
       self.tracker.expire(sample_at)
@@ -249,7 +325,7 @@ class OffroadImpactMonitor:
         self.pending_impact = None
       if changed:
         self.reminder.reset()
-        if was_known:
+        if was_known and self.tracker.locked is not None:
           event = door_lock_event(self.tracker.locked)
           # Preserve edge spacing for the uploader's refresh-pair filter.
           event["occurredAt"] = (wall_now - timedelta(seconds=now - sample_at)).isoformat(
@@ -276,7 +352,7 @@ class OffroadImpactMonitor:
       self.pending_impact = None
     if event is not None:
       event["captureRequested"] = True
-      if self.tracker.required or self.tracker.require_doors_closed:
+      if self.tracker.guards_impacts:
         # Door CAN may arrive just after the physical door jolt. Keep the
         # original detection timestamp, but allow those edges to cancel it.
         self.pending_impact = (now, event)
@@ -292,7 +368,10 @@ def queue_if_offroad(safety, monitor: OffroadImpactMonitor, event: dict, enqueue
   safety.update(0)
   now = time.monotonic()
   if monitor.offroad_since is None or not offroad_allowed(safety, now):
-    monitor.reset()
+    monitor.interrupt("waitingForOffroad")
+    return False
+  if not monitor.transport_healthy(safety, now):
+    monitor.interrupt("waitingForCanReceiver")
     return False
   if impact and not monitor.tracker.detection_allowed(now):
     monitor.detector.reset()
@@ -342,7 +421,7 @@ def main() -> None:
   while True:
     sm.update(100)
     safety.update(0)
-    can_samples, can_complete = drain_lock_can(can_sock, lock_tracker)
+    can_samples, can_complete = drain_lock_can(can_sock, lock_tracker, health=monitor.can_health)
     if not can_complete:
       del can_sock
       can_sock = messaging.sub_sock("can", conflate=False)
@@ -359,7 +438,7 @@ def main() -> None:
         write_status("impactQueued", lastEvent=event, **detector_status(detector, lock_tracker))
         print(f"Wayon impact: queued {event['severity']} impact ({event['peakDynamicG']:.2f}g)", flush=True)
 
-    state = ("waitingForOffroad" if monitor.offroad_since is None else
+    state = (monitor.pause_reason if monitor.offroad_since is None else
              operating_state(detector, lock_tracker, detector.first_sample_at is not None, now))
     if state != reported_state:
       reported_state = state

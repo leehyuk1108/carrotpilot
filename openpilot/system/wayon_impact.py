@@ -51,6 +51,7 @@ class DoorLockTracker:
     state_path: Path = DEFAULT_DOOR_LOCK_STATE_PATH,
     max_age_s: float = DEFAULT_LOCK_STATE_MAX_AGE_S,
     require_doors_closed: bool = False,
+    activity_guard: bool = False,
   ) -> None:
     self.required = required
     self.bus = bus
@@ -66,6 +67,9 @@ class DoorLockTracker:
     self.observed_at: str | None = None
     self.last_sample_at: float | None = None
     self.require_doors_closed = require_doors_closed
+    self.activity_guard = activity_guard
+    self.lock_refresh_required = False
+    self.door_refresh_required = False
     self.door_open: bool | None = None
     self.doors_closed_since: float | None = None
     self.last_door_sample_at: float | None = None
@@ -80,10 +84,18 @@ class DoorLockTracker:
     self.door_open = None
     self.doors_closed_since = None
     self.last_door_sample_at = None
+    self.lock_refresh_required = False
+    self.door_refresh_required = False
     if changed:
       self._persist()
 
   def expire(self, now: float) -> None:
+    if self.activity_guard:
+      # Silence is normal on a parked bus. The monitor owns receiver/Panda
+      # health; only it may retain observations across this quiet interval.
+      if any(sample is not None and now < sample for sample in (self.last_sample_at, self.last_door_sample_at)):
+        self.invalidate()
+      return
     if self.last_sample_at is not None and not 0 <= now - self.last_sample_at <= self.max_age_s:
       self.reset()
     elif self.last_door_sample_at is not None and not 0 <= now - self.last_door_sample_at <= self.max_age_s:
@@ -91,6 +103,19 @@ class DoorLockTracker:
       self.doors_closed_since = None
       self.last_door_sample_at = None
       self._persist()
+
+  def invalidate(self) -> None:
+    self.reset()
+    self.lock_refresh_required = True
+    self.door_refresh_required = True
+
+  @property
+  def watches_doors(self) -> bool:
+    return self.require_doors_closed or self.activity_guard
+
+  @property
+  def guards_impacts(self) -> bool:
+    return self.required or self.watches_doors
 
   def _persist(self) -> None:
     self.state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -108,7 +133,7 @@ class DoorLockTracker:
     os.replace(temporary, self.state_path)
 
   def update(self, bus: int, address: int, data: bytes, now: float) -> bool:
-    if self.require_doors_closed and bus == self.bus and address == 0x12A:
+    if self.watches_doors and bus == self.bus and address == 0x12A:
       if not math.isfinite(now) or (self.last_door_sample_at is not None and now < self.last_door_sample_at):
         return False
       self.expire(now)
@@ -117,6 +142,7 @@ class DoorLockTracker:
       changed = door_open != self.door_open
       self.last_door_sample_at = now if door_open is not None else None
       self.door_open = door_open
+      self.door_refresh_required = door_open is None
       if door_open is not False:
         self.doors_closed_since = None
       elif changed:
@@ -124,12 +150,19 @@ class DoorLockTracker:
       if changed:
         self._persist()
       return False  # A door switch is not a lock/unlock notification.
-    if not math.isfinite(now) or bus != self.bus or address != self.address or len(data) <= self.byte_index:
+    if not math.isfinite(now) or bus != self.bus or address != self.address:
       return False
     if self.last_sample_at is not None and now < self.last_sample_at:
       return False
     self.expire(now)
+    if len(data) <= self.byte_index:
+      if self.activity_guard:
+        self.locked = self.locked_since = self.last_sample_at = self.observed_at = None
+        self.lock_refresh_required = True
+        self._persist()
+      return False
     self.last_sample_at = now
+    self.lock_refresh_required = False
 
     unlocked = data[self.byte_index] & self.mask == self.unlocked_value
     locked = not unlocked
@@ -144,10 +177,17 @@ class DoorLockTracker:
     return True
 
   def matches_frame(self, bus: int, address: int) -> bool:
-    return bus == self.bus and (address == self.address or (self.require_doors_closed and address == 0x12A))
+    return bus == self.bus and (address == self.address or (self.watches_doors and address == 0x12A))
 
   def detection_allowed(self, now: float) -> bool:
     self.expire(now)
+    if self.activity_guard:
+      if self.lock_refresh_required or self.door_refresh_required or self.locked is False or self.door_open is True:
+        return False
+      # Unknown at startup is not proof of locking. This policy keeps impact
+      # coverage unless door activity was observed; diagnostics retain nulls.
+      return all(since is None or now - since >= self.arm_delay_s
+                 for since in (self.locked_since, self.doors_closed_since))
     if self.require_doors_closed and (self.door_open is not False or self.doors_closed_since is None
                                      or now - self.doors_closed_since < self.arm_delay_s):
       return False
