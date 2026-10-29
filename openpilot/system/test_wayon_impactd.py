@@ -326,3 +326,178 @@ def test_queue_allows_fresh_offroad_write(monitor, monkeypatch):
   queued = []
   assert impactd.queue_if_offroad(safety, monitor, {"id": "event"}, queued.append)
   assert queued == [{"id": "event"}]
+
+
+def door_sample(now, opened=False):
+  # Actual Traverse BCMDoorBeltStatus from route 1aa, rear-right door.
+  return now, 0, 0x12A, bytes.fromhex("30e0f06e00001085" if opened else "30e0706e00001085")
+
+
+def guarded_monitor(tmp_path, arm_delay_s=0, settle_s=0):
+  return impactd.OffroadImpactMonitor(
+    ImpactDetector(arm_delay_s=arm_delay_s, warmup_s=0),
+    DoorLockTracker(required=True, require_doors_closed=True, arm_delay_s=settle_s,
+                    state_path=tmp_path / "guard-lock", max_age_s=1),
+    ParkingUnlockReminder(),
+  )
+
+
+def test_traverse_defaults_enable_both_guards_without_affecting_other_vehicles(tmp_path):
+  config = {"impact_lock_state_path": str(tmp_path / "lock")}
+  tracker = impactd.lock_tracker_from_config(config, "CHEVROLET_TRAVERSE")
+  assert tracker.required and tracker.require_doors_closed
+  for fingerprint in ("", "CHEVROLET_BOLT_EUV", "HYUNDAI_IONIQ_5"):
+    tracker = impactd.lock_tracker_from_config(config, fingerprint)
+    assert not tracker.required and not tracker.require_doors_closed
+  config.update(impact_require_door_locked="false", impact_require_doors_closed=False)
+  tracker = impactd.lock_tracker_from_config(config, "CHEVROLET_TRAVERSE")
+  assert not tracker.required and not tracker.require_doors_closed
+
+
+def test_drain_includes_real_door_frames_only_on_receive_bus(tmp_path):
+  tracker = guarded_monitor(tmp_path).tracker
+  door = door_sample(10, True)[3]
+  frames = [lock_frame(4), {"src": 0, "address": 0x12A, "dat": door},
+            {"src": 130, "address": 0x12A, "dat": door}]
+  samples, complete = impactd.drain_lock_can(Socket([can_bytes(10, *frames)]), tracker, 10)
+  assert complete
+  assert samples == [lock_sample(10, 4), door_sample(10, True)]
+
+
+@pytest.mark.parametrize("frames,state", [
+  ([], "waitingForDoorState"),
+  ([lock_sample(10, 4)], "waitingForDoorState"),
+  ([door_sample(10)], "waitingForLockState"),
+  ([lock_sample(10, 2), door_sample(10)], "pausedUnlocked"),
+  ([lock_sample(10, 4), door_sample(10, True)], "pausedDoorOpen"),
+])
+def test_door_jolt_blocked_when_unlocked_open_or_unknown(tmp_path, frames, state):
+  monitor = guarded_monitor(tmp_path)
+  update(monitor, 10, frames)
+  update(monitor, 10.01)
+  assert update(monitor, 10.02, imu=imu_snapshot(10.02, accel=(8, 0, 9.8)))[1] is None
+  assert monitor.pending_impact is None
+  assert not monitor.detector.armed
+  assert impactd.operating_state(monitor.detector, monitor.tracker, False, 10.02) == state
+
+
+@pytest.mark.parametrize("byte,mask", [(1, 1), (1, 2), (1, 4), (2, 128)])
+def test_each_of_four_door_switches_blocks_even_if_locked(tmp_path, byte, mask):
+  monitor = guarded_monitor(tmp_path)
+  update(monitor, 10, [lock_sample(10, 4), door_sample(10)])
+  update(monitor, 10.01)
+  data = bytearray(door_sample(10)[3]); data[byte] |= mask
+  events, impact = update(monitor, 10.02, [(10.02, 0, 0x12A, bytes(data))],
+                          imu=imu_snapshot(10.02, accel=(8, 0, 9.8)))
+  assert not events and impact is None
+  assert monitor.tracker.door_open is True
+  assert not monitor.detector.armed
+
+
+@pytest.mark.parametrize("edge", ["unlock", "open", "invalid_door"])
+def test_late_door_edge_cancels_pending_impact_before_upload(tmp_path, edge):
+  monitor = guarded_monitor(tmp_path)
+  update(monitor, 10, [lock_sample(10, 4), door_sample(10)])
+  update(monitor, 10.01)
+  assert update(monitor, 10.02, imu=imu_snapshot(10.02, accel=(2.05, 0, 9.80665)))[1] is None
+  assert monitor.pending_impact is not None
+  for n in range(3, 45):
+    assert update(monitor, 10 + n * 0.01)[1] is None
+  frames = {"unlock": [lock_sample(10.45, 2)], "open": [door_sample(10.45, True)],
+            "invalid_door": [(10.45, 0, 0x12A, b"\x00")]}[edge]
+  update(monitor, 10.45, frames)
+  assert monitor.pending_impact is None
+  for n in range(46, 70):
+    assert update(monitor, 10 + n * 0.01)[1] is None
+
+
+def test_genuine_locked_closed_impact_survives_confirmation_with_original_timestamp(tmp_path):
+  monitor = guarded_monitor(tmp_path)
+  update(monitor, 10, [lock_sample(10, 4), door_sample(10)])
+  update(monitor, 10.01)
+  assert update(monitor, 10.02, imu=imu_snapshot(10.02, accel=(2.05, 0, 9.80665)))[1] is None
+  expected = monitor.pending_impact[1].copy()
+  emitted = []
+  for n in range(3, 80):
+    _, impact = update(monitor, 10 + n * 0.01)
+    if impact: emitted.append(impact)
+  assert emitted == [expected]
+  assert expected["captureRequested"]
+
+
+@pytest.mark.parametrize("failure", ["stale_lock", "stale_door", "can_overload", "ignition"])
+def test_pending_impact_never_survives_lost_guard(tmp_path, failure):
+  monitor = guarded_monitor(tmp_path)
+  update(monitor, 10, [lock_sample(10, 4), door_sample(10)])
+  update(monitor, 10.01)
+  update(monitor, 10.02, imu=imu_snapshot(10.02, accel=(2.05, 0, 9.80665)))
+  assert monitor.pending_impact
+  if failure == "stale_lock": monitor.tracker.last_sample_at = 8
+  if failure == "stale_door": monitor.tracker.last_door_sample_at = 8
+  assert update(monitor, 10.03, can_complete=failure != "can_overload", ignition_can=failure == "ignition")[1] is None
+  assert monitor.pending_impact is None
+  assert not monitor.detector.armed
+
+
+def test_door_open_close_in_same_batch_requires_new_warmup(tmp_path):
+  monitor = guarded_monitor(tmp_path, arm_delay_s=0.2, settle_s=0.1)
+  update(monitor, 10, [lock_sample(10, 4), door_sample(10)])
+  for n in range(1, 50): update(monitor, 10 + n * 0.01)
+  assert monitor.detector.armed
+  frames = [door_sample(10.5, True), door_sample(10.51)]
+  update(monitor, 10.51, frames)
+  assert not monitor.detector.armed
+  for n in range(52, 80):
+    assert update(monitor, 10 + n * 0.01)[1] is None
+    assert not monitor.detector.armed
+  for n in range(80, 90): update(monitor, 10 + n * 0.01)
+  assert monitor.detector.armed
+
+
+def test_guard_reset_happens_even_without_new_accel_sample(tmp_path):
+  monitor = guarded_monitor(tmp_path)
+  update(monitor, 10, [lock_sample(10, 4), door_sample(10)])
+  update(monitor, 10.01)
+  assert monitor.detector.armed
+  imu = imu_snapshot(10.02); imu.updated["accelerometer"] = False
+  update(monitor, 10.02, [door_sample(10.02, True)], imu=imu)
+  assert not monitor.detector.armed
+
+
+def test_old_lock_and_door_files_are_not_reused_after_process_restart(tmp_path):
+  monitor = guarded_monitor(tmp_path)
+  update(monitor, 10, [lock_sample(10, 4), door_sample(10)])
+  restarted = guarded_monitor(tmp_path)
+  assert restarted.tracker.locked is None and restarted.tracker.door_open is None
+  assert not restarted.tracker.detection_allowed(11)
+
+
+@pytest.mark.parametrize("failure", ["duplicate", "gap", "invalid"])
+def test_pending_impact_is_discarded_when_imu_continuity_breaks(tmp_path, failure):
+  monitor = guarded_monitor(tmp_path)
+  update(monitor, 10, [lock_sample(10, 4), door_sample(10)])
+  update(monitor, 10.01)
+  update(monitor, 10.02, imu=imu_snapshot(10.02, accel=(2.05, 0, 9.80665)))
+  assert monitor.pending_impact
+  now = 10.53 if failure == "gap" else 10.03
+  imu = imu_snapshot(now)
+  if failure == "duplicate": imu["accelerometer"].timestamp = 10_020_000_000
+  if failure == "invalid": imu.valid["gyroscope"] = False
+  assert update(monitor, now, imu=imu)[1] is None
+  assert monitor.pending_impact is None
+
+
+@pytest.mark.parametrize("edge", ["unlock", "open", "expire"])
+def test_queue_rechecks_door_guard_without_blocking_lock_notifications(tmp_path, monkeypatch, edge):
+  monitor = guarded_monitor(tmp_path)
+  update(monitor, 10, [lock_sample(10, 4), door_sample(10)])
+  now = 12 if edge == "expire" else 10.1
+  safety = Snapshot(safety_messages(now), now)
+  if edge == "unlock": monitor.tracker.update(0, 0x130, b"\x02", now)
+  if edge == "open": monitor.tracker.update(*door_sample(now, True)[1:], now)
+  monkeypatch.setattr(impactd.time, "monotonic", lambda: now)
+  queued = []
+  assert not impactd.queue_if_offroad(safety, monitor, {"id": "impact"}, queued.append, impact=True)
+  assert queued == []
+  assert impactd.queue_if_offroad(safety, monitor, {"eventType": "door_lock"}, queued.append)
+  assert queued == [{"eventType": "door_lock"}]

@@ -36,6 +36,7 @@ DEVICE_STATE_MAX_AGE_S = 2.5
 PANDA_STATE_MAX_AGE_S = 0.5
 SENSOR_MAX_AGE_S = 0.2
 CAN_MAX_AGE_S = 0.5
+DOOR_IMPACT_CONFIRM_S = 0.5
 MAX_CAN_MESSAGES = 256
 MAX_CAN_FRAMES = 8192
 MAX_CAN_LOCK_SAMPLES = 128
@@ -71,9 +72,11 @@ def config_bool(config: dict, key: str, default: bool = False) -> bool:
   return bool(value)
 
 
-def lock_tracker_from_config(config: dict) -> DoorLockTracker:
+def lock_tracker_from_config(config: dict, car_fingerprint: str = "") -> DoorLockTracker:
+  # Only this vehicle's receive-side CAN layout has been verified here.
+  traverse = car_fingerprint == "CHEVROLET_TRAVERSE"
   return DoorLockTracker(
-    required=config_bool(config, "impact_require_door_locked"),
+    required=config_bool(config, "impact_require_door_locked", traverse),
     bus=int(config.get("impact_lock_can_bus", 0)),
     address=int(config.get("impact_lock_can_address", 0x130)),
     byte_index=int(config.get("impact_lock_can_byte", 0)),
@@ -82,6 +85,7 @@ def lock_tracker_from_config(config: dict) -> DoorLockTracker:
     arm_delay_s=float(config.get("impact_lock_arm_delay_s", 3.0)),
     state_path=Path(config.get("impact_lock_state_path", DEFAULT_DOOR_LOCK_STATE_PATH)),
     max_age_s=float(config.get("impact_lock_state_max_age_s", DEFAULT_LOCK_STATE_MAX_AGE_S)),
+    require_doors_closed=config_bool(config, "impact_require_doors_closed", traverse),
   )
 
 
@@ -95,11 +99,18 @@ def detector_status(detector: ImpactDetector, lock_tracker: DoorLockTracker) -> 
     "strongDynamicG": detector.strong_dynamic_g,
     "requireDoorLocked": lock_tracker.required,
     "doorsLocked": lock_tracker.locked,
+    "requireDoorsClosed": lock_tracker.require_doors_closed,
+    "doorOpen": lock_tracker.door_open,
   }
 
 
 def operating_state(detector: ImpactDetector, lock_tracker: DoorLockTracker,
                     received_first_sample: bool, now: float) -> str:
+  lock_tracker.expire(now)
+  if lock_tracker.require_doors_closed and lock_tracker.door_open is True:
+    return "pausedDoorOpen"
+  if lock_tracker.require_doors_closed and lock_tracker.door_open is None:
+    return "waitingForDoorState"
   if lock_tracker.required and lock_tracker.locked is None:
     return "waitingForLockState"
   if lock_tracker.required and lock_tracker.locked is False:
@@ -186,7 +197,7 @@ def drain_lock_can(sock, tracker: DoorLockTracker, now: float | None = None) -> 
         if frame_count > MAX_CAN_FRAMES:
           return [], False
         for frame in event.can:
-          if frame.src == tracker.bus and frame.address == tracker.address and len(frame.dat) > tracker.byte_index:
+          if tracker.matches_frame(frame.src, frame.address):
             if len(samples) >= MAX_CAN_LOCK_SAMPLES:
               return [], False
             samples.append((sample_at, int(frame.src), int(frame.address), bytes(frame.dat)))
@@ -203,6 +214,7 @@ class OffroadImpactMonitor:
     self.reminder = reminder
     self.offroad_since: float | None = None
     self.last_can_at = 0.0
+    self.pending_impact: tuple[float, dict] | None = None
 
   def reset(self) -> None:
     self.detector.reset()
@@ -210,6 +222,7 @@ class OffroadImpactMonitor:
     self.reminder.reset()
     self.offroad_since = None
     self.last_can_at = 0.0
+    self.pending_impact = None
 
   def update(self, imu, safety, can_samples: list, can_complete: bool, now: float) -> tuple[list[dict], dict | None]:
     if not offroad_allowed(safety, now) or not can_complete:
@@ -229,6 +242,11 @@ class OffroadImpactMonitor:
       was_known = self.tracker.locked is not None
       changed = self.tracker.update(bus, address, data, sample_at)
       self.last_can_at = sample_at
+      if not self.tracker.detection_allowed(sample_at):
+        # An open/unlock followed by close/lock in one drain must discard the
+        # old gravity/candidate too, even if there is no new IMU sample yet.
+        self.detector.reset()
+        self.pending_impact = None
       if changed:
         self.reminder.reset()
         if was_known:
@@ -239,6 +257,9 @@ class OffroadImpactMonitor:
           vehicle_events.append(event)
 
     self.tracker.expire(now)
+    if not self.tracker.detection_allowed(now):
+      self.detector.reset()
+      self.pending_impact = None
     if self.reminder.update(self.tracker.locked, now):
       vehicle_events.append(parking_unlocked_event(self.reminder.delay_s))
 
@@ -246,31 +267,56 @@ class OffroadImpactMonitor:
     gyro = sensor_sample(imu, "gyroscope", "gyroUncalibrated", now)
     if accel is None or gyro is None or min(accel[1], gyro[1]) < self.offroad_since:
       self.detector.reset()
+      self.pending_impact = None
       return vehicle_events, None
     if not imu.updated["accelerometer"]:
       return vehicle_events, None
     event = self.detector.update(accel[0], gyro[0], accel[1], self.tracker.detection_allowed(now))
+    if not self.detector.armed:
+      self.pending_impact = None
     if event is not None:
       event["captureRequested"] = True
+      if self.tracker.required or self.tracker.require_doors_closed:
+        # Door CAN may arrive just after the physical door jolt. Keep the
+        # original detection timestamp, but allow those edges to cancel it.
+        self.pending_impact = (now, event)
+        event = None
+    if self.pending_impact is not None and now - self.pending_impact[0] >= DOOR_IMPACT_CONFIRM_S:
+      _, event = self.pending_impact
+      self.pending_impact = None
     return vehicle_events, event
 
 
-def queue_if_offroad(safety, monitor: OffroadImpactMonitor, event: dict, enqueue) -> bool:
+def queue_if_offroad(safety, monitor: OffroadImpactMonitor, event: dict, enqueue, *, impact: bool = False) -> bool:
   # CAN processing and disk IO may span a state transition. Recheck each write.
   safety.update(0)
-  if monitor.offroad_since is None or not offroad_allowed(safety, time.monotonic()):
+  now = time.monotonic()
+  if monitor.offroad_since is None or not offroad_allowed(safety, now):
     monitor.reset()
+    return False
+  if impact and not monitor.tracker.detection_allowed(now):
+    monitor.detector.reset()
+    monitor.pending_impact = None
     return False
   enqueue(event)
   return True
 
 
 def main() -> None:
-  from openpilot.cereal import messaging
+  from openpilot.cereal import car, messaging
+  from openpilot.common.params import Params
 
   config = read_config()
   detector = detector_from_config(config)
-  lock_tracker = lock_tracker_from_config(config)
+  car_fingerprint = ""
+  raw_params = Params().get("CarParamsPersistent")
+  if raw_params:
+    try:
+      with car.CarParams.from_bytes(raw_params) as cp:
+        car_fingerprint = cp.carFingerprint
+    except Exception:
+      print("Wayon impact: cannot read vehicle identity; using explicit configuration", flush=True)
+  lock_tracker = lock_tracker_from_config(config, car_fingerprint)
   parking_unlock_reminder = ParkingUnlockReminder(
     delay_s=float(config.get(
       "parking_unlocked_reminder_delay_s", DEFAULT_PARKING_UNLOCKED_REMINDER_DELAY_S)),
@@ -309,7 +355,7 @@ def main() -> None:
         break
 
     if event is not None:
-      if queue_if_offroad(safety, monitor, event, enqueue_impact_event):
+      if queue_if_offroad(safety, monitor, event, enqueue_impact_event, impact=True):
         write_status("impactQueued", lastEvent=event, **detector_status(detector, lock_tracker))
         print(f"Wayon impact: queued {event['severity']} impact ({event['peakDynamicG']:.2f}g)", flush=True)
 

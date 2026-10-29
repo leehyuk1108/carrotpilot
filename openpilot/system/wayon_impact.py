@@ -50,6 +50,7 @@ class DoorLockTracker:
     arm_delay_s: float = 3.0,
     state_path: Path = DEFAULT_DOOR_LOCK_STATE_PATH,
     max_age_s: float = DEFAULT_LOCK_STATE_MAX_AGE_S,
+    require_doors_closed: bool = False,
   ) -> None:
     self.required = required
     self.bus = bus
@@ -64,20 +65,32 @@ class DoorLockTracker:
     self.locked_since: float | None = None
     self.observed_at: str | None = None
     self.last_sample_at: float | None = None
+    self.require_doors_closed = require_doors_closed
+    self.door_open: bool | None = None
+    self.doors_closed_since: float | None = None
+    self.last_door_sample_at: float | None = None
     # The file is diagnostic history, never evidence from this process/boot.
 
   def reset(self) -> None:
-    changed = self.locked is not None
+    changed = self.locked is not None or self.door_open is not None
     self.locked = None
     self.locked_since = None
     self.last_sample_at = None
     self.observed_at = None
+    self.door_open = None
+    self.doors_closed_since = None
+    self.last_door_sample_at = None
     if changed:
       self._persist()
 
   def expire(self, now: float) -> None:
     if self.last_sample_at is not None and not 0 <= now - self.last_sample_at <= self.max_age_s:
       self.reset()
+    elif self.last_door_sample_at is not None and not 0 <= now - self.last_door_sample_at <= self.max_age_s:
+      self.door_open = None
+      self.doors_closed_since = None
+      self.last_door_sample_at = None
+      self._persist()
 
   def _persist(self) -> None:
     self.state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -88,12 +101,29 @@ class DoorLockTracker:
       "address": self.address,
       "byteIndex": self.byte_index,
       "mask": self.mask,
+      "doorOpen": self.door_open,
     }
     temporary = self.state_path.with_suffix(".tmp")
     temporary.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
     os.replace(temporary, self.state_path)
 
   def update(self, bus: int, address: int, data: bytes, now: float) -> bool:
+    if self.require_doors_closed and bus == self.bus and address == 0x12A:
+      if not math.isfinite(now) or (self.last_door_sample_at is not None and now < self.last_door_sample_at):
+        return False
+      self.expire(now)
+      # GM BCMDoorBeltStatus: four door switches, not the lock command.
+      door_open = bool(data[1] & 0x07 or data[2] & 0x80) if len(data) == 8 else None
+      changed = door_open != self.door_open
+      self.last_door_sample_at = now if door_open is not None else None
+      self.door_open = door_open
+      if door_open is not False:
+        self.doors_closed_since = None
+      elif changed:
+        self.doors_closed_since = now
+      if changed:
+        self._persist()
+      return False  # A door switch is not a lock/unlock notification.
     if not math.isfinite(now) or bus != self.bus or address != self.address or len(data) <= self.byte_index:
       return False
     if self.last_sample_at is not None and now < self.last_sample_at:
@@ -113,8 +143,14 @@ class DoorLockTracker:
     self._persist()
     return True
 
+  def matches_frame(self, bus: int, address: int) -> bool:
+    return bus == self.bus and (address == self.address or (self.require_doors_closed and address == 0x12A))
+
   def detection_allowed(self, now: float) -> bool:
     self.expire(now)
+    if self.require_doors_closed and (self.door_open is not False or self.doors_closed_since is None
+                                     or now - self.doors_closed_since < self.arm_delay_s):
+      return False
     if not self.required:
       return True
     return self.locked is True and self.locked_since is not None \
