@@ -1,3 +1,6 @@
+import math
+
+
 EXTERNAL_NAVI_SOURCES = frozenset((
   "cam", "section", "bump", "police", "waze", "road", "atc", "atc2", "route",
 ))
@@ -22,6 +25,28 @@ DECELERATION_SOURCE_LABELS = {
   "model": "model",
   "turn": "turn",
 }
+
+
+def deceleration_candidates(speed_n_sources, targets, distances=None):
+  """Expose only enabled, valid candidates without changing their control caps.
+
+  A distant event may have a 250 kph approach envelope and a real endpoint.
+  Conversely, sentinel road/straight-curve caps are not detected events.
+  """
+  candidates = []
+  for speed, source in speed_n_sources:
+    if source not in targets or source not in DECELERATION_SOURCE_LABELS or source == 'gas':
+      continue
+    target = targets[source]
+    if not math.isfinite(speed) or not 0 < speed <= 250 or not math.isfinite(target):
+      continue
+    known_target = 0 < target < 200
+    if not known_target and not 0 < speed < 200:
+      continue
+    distance = (distances or {}).get(source, -1.0)
+    candidates.append({'source': source, 'speedKph': float(speed), 'targetKph': float(target) if known_target else 0.0,
+                       'distanceM': float(distance) if math.isfinite(distance) and distance >= 0 else -1.0})
+  return candidates
 
 
 def is_vehicle_navigation_source(source: str | None) -> bool:

@@ -21,6 +21,7 @@ from openpilot.common.constants import CV
 from openpilot.common.gps import get_gps_location_service
 from openpilot.selfdrive.carrot.gps_sources import GPSSources
 from openpilot.selfdrive.carrot.carrot_navi_control import CarrotNaviControl, parse_carrot_navi_control
+from openpilot.selfdrive.carrot.deceleration_source import deceleration_candidates
 from openpilot.selfdrive.navdy.navigation import NavigationReader
 from openpilot.selfdrive.navigation.provenance import RoutePublication
 
@@ -1392,7 +1393,8 @@ class CarrotServ:
         self.xSpdDist = distance
         self.xSpdType = xSpdType
 
-  def update_navi(self, remote_ip, sm, pm, vturn_speed, coords, distances, route_speed, gps_service):
+  def update_navi(self, remote_ip, sm, pm, vturn_speed, coords, distances, route_speed, gps_service,
+                  *, vturn_target=0.0, route_target=0.0):
 
     self.debugText = ""
     self.update_params()
@@ -1507,7 +1509,7 @@ class CarrotServ:
     #print(f"sdi_speed: {sdi_speed}, vehicle_speed_camera_active: {vehicle_speed_camera_active}, xSpdType: {self.xSpdType}, xSpdDist: {self.xSpdDist}, active_carrot: {self.active_carrot}, v_ego_kph: {v_ego_kph}, nRoadLimitSpeed: {self.nRoadLimitSpeed}")
     ### TBT 속도제어
     atc_desired, self.atcType, self.atcSpeed, self.atcDist = self.update_auto_turn(v_ego*3.6, sm, self.xTurnInfo, self.xDistToTurn, True)
-    atc_desired_next, _, _, _ = self.update_auto_turn(v_ego*3.6, sm, self.xTurnInfoNext, self.xDistToTurnNext, False)
+    atc_desired_next, _, atc_speed_next, _ = self.update_auto_turn(v_ego*3.6, sm, self.xTurnInfoNext, self.xDistToTurnNext, False)
 
     if self.nSdiType  >= 0: # or self.active_carrot > 0:
       pass
@@ -1559,6 +1561,34 @@ class CarrotServ:
     elif self.turnSpeedControlMode in [3, 4]:
       speed_n_sources.append((route_speed, "route"))
       #speed_n_sources.append((self.calculate_current_speed(dist, speed * self.mapTurnSpeedFactor, 0, 1.2), "route"))
+
+    # This extra payload describes existing calculations; control still selects
+    # the unchanged speed_n_sources below, including the existing gas override.
+    display_targets = {}
+    if self.autoTurnControl in [2, 3]:
+      if 0 < self.atcSpeed < 200 and self.xDistToTurn > 0:
+        display_targets['atc'] = self.atcSpeed
+      if 0 < atc_speed_next < 200 and self.xDistToTurnNext > 0:
+        display_targets['atc2'] = atc_speed_next
+    if legacy_sdi_active or rear_camera_holding:
+      display_targets[sdi_source] = rear_camera_speed if rear_camera_holding else self.xSpdLimit
+    if vehicle_speed_camera_active:
+      display_targets['hda'] = CS.speedLimit * self.autoNaviSpeedSafetyFactor
+    if vehicle_bump_active:
+      display_targets['hda_bump'] = self.autoNaviSpeedBumpSpeed
+    if vehicle_school_zone_speed < 250:
+      display_targets['school'] = vehicle_school_zone_speed
+    if vehicle_section_zone_speed < 250:
+      display_targets['hda_section'] = vehicle_section_zone_speed
+    if limit_speed < 200:
+      display_targets['road'] = limit_speed
+    display_targets['vturn'] = max(vturn_target, self.autoCurveSpeedLowerLimit) if vturn_target > 0 else 0.0
+    display_targets['route'] = max(route_target * self.mapTurnSpeedFactor, self.autoCurveSpeedLowerLimit) if route_target > 0 else 0.0
+    display_distances = {'atc': self.xDistToTurn, 'atc2': self.xDistToTurnNext,
+                         sdi_source: rear_camera_remaining if rear_camera_holding else max(0.0, self.xSpdDist)}
+    if CS is not None:
+      display_distances.update(hda=CS.speedLimitDistance, hda_bump=CS.speedBumpDistance)
+    display_candidates = deceleration_candidates(speed_n_sources, display_targets, display_distances)
 
     desired_speed, source = min(speed_n_sources, key=lambda x: x[0])
 
@@ -1620,6 +1650,7 @@ class CarrotServ:
     msg.carrotMan.szTBTMainText = self.szTBTMainText
     msg.carrotMan.desiredSpeed = int(desired_speed)
     msg.carrotMan.desiredSource = source
+    msg.carrotMan.decelerationCandidates = display_candidates
     vehicle_navi_active, vehicle_navi_speed, vehicle_navi_section_active = self._vehicle_navigation_display(CS)
     msg.carrotMan.vehicleNaviActive = vehicle_navi_active
     msg.carrotMan.vehicleNaviSpeed = vehicle_navi_speed

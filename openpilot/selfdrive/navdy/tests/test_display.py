@@ -57,7 +57,7 @@ class TestDisplay:
       "alertText1": "", "alertText2": "", "alertType": "", "alertStatus": "normal",
       "alertSize": "none", "greenLightAlert": False, "leadDepartAlert": False,
       "longitudinalActuator": "none", "longitudinalActuatorLevel": 0.0,
-      "latActive": False, "longActive": False, "activeLaneLine": False, "navVehicles": [],
+      "latActive": False, "longActive": False, "activeLaneLine": False, "navVehicles": [], "decel": 0,
     }
 
   def test_speed_units_and_fallbacks(self):

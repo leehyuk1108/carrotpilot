@@ -54,6 +54,15 @@ struct CarrotMan @0x81c2f05a394cf4af {
 	routeTrafficTotalMeters @39 : UInt32;
 	routeTrafficSegments @40 : List(RouteTrafficSegment);
 	roadLimitSpeedValid @41 : Bool;
+	decelerationCandidates @42 : List(DecelerationCandidate);
+
+	# Display-only observations; never inputs to speed control.
+	struct DecelerationCandidate {
+		source @0 : Text;
+		speedKph @1 : Float32;
+		targetKph @2 : Float32; # zero means the endpoint is unknown
+		distanceM @3 : Float32; # negative means unavailable
+	}
 
 	struct RouteTrafficSegment {
 		endM @0 : UInt32;

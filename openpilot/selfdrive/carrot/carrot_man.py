@@ -421,7 +421,8 @@ class CarrotMan:
 
         #print("coords=", coords)
         #print("curvatures=", curvatures)
-        self.carrot_serv.update_navi(remote_ip, self.sm, self.pm, vturn_speed, coords, distances, route_speed, self.gps_location_service)
+        self.carrot_serv.update_navi(remote_ip, self.sm, self.pm, vturn_speed, coords, distances, route_speed, self.gps_location_service,
+                                    vturn_target=self.vturn_display_target, route_target=self.route_display_target)
 
         now = time.monotonic()
         if now >= next_broadcast_time:
@@ -536,7 +537,7 @@ class CarrotMan:
     self.send_routes(coords, route_source='network-v2')
 
   def carrot_navi_route(self):
-
+    self.route_display_target = 0.0
     if self.carrot_serv.active_carrot > 1:
       if False and self.navd_active:  # mabox always active
         self.navd_active = False
@@ -601,6 +602,10 @@ class CarrotMan:
             accel_limit_kmh = accel_limit * 3.6  # Convert to km/h per second
             out_speeds = [0] * len(speeds)
             out_speeds[-1] = speeds[-1]  # Set the last speed as the initial value
+            # Track which existing endpoint owns each distance-adjusted cap.
+            # This parallel array is display-only and never feeds out_speeds.
+            display_targets = [0] * len(speeds)
+            display_targets[-1] = speeds[-1]
             v_ego_kph = self.sm['carState'].vEgo * 3.6
 
             time_delay = self.carrot_serv.autoNaviSpeedCtrlEnd
@@ -621,6 +626,7 @@ class CarrotMan:
                 # Calculate maximum allowed speed with acceleration limit
                 max_allowed_speed = next_out_speed + (accel_limit_kmh * time_apply)
                 adjusted_speed = min(target_speed, max_allowed_speed)
+                display_targets[i] = target_speed if target_speed <= max_allowed_speed else display_targets[i + 1]
 
                 #time_wait += time_interval
                 time_wait += min(2.0, time_interval)
@@ -630,6 +636,7 @@ class CarrotMan:
             #distance_advance = self.sm['carState'].vEgo * 3.0  # Advance distance by 3.0 seconds
             #out_speed = interp(distance_advance, distances, out_speeds)
             out_speed = out_speeds[0]
+            self.route_display_target = display_targets[0]
             #print(f"out_speeds= {[round(s, 1) for s in out_speeds]}")
     else:
         resampled_points = []
@@ -1440,6 +1447,7 @@ class CarrotMan:
 
   def carrot_curve_speed(self, sm):
     self.carrot_curve_speed_params()
+    self.vturn_display_target = 0.0
     if not all(sm.alive[name] and sm.valid[name] for name in ('carState', 'modelV2')):
       return self.vision_curve_speed.update(None, time.monotonic())
     return self.vturn_speed(sm['carState'], sm)
@@ -1448,7 +1456,10 @@ class CarrotMan:
     result = curve_speed(sm['modelV2'], CS.vEgo, self.autoCurveSpeedFactor,
                          self.carrot_serv.autoCurveSpeedLowerLimit,
                          speed_ratio=CS.vCluRatio, a_ego=CS.aEgo)
-    return self.vision_curve_speed.update(result, time.monotonic(), model_time=sm.logMonoTime['modelV2'])
+    speed = self.vision_curve_speed.update(result, time.monotonic(), model_time=sm.logMonoTime['modelV2'])
+    # A held/releasing cap must not borrow the endpoint of different geometry.
+    self.vturn_display_target = result.curve_kph if result is not None and abs(abs(speed) - result.approach_kph) < 1e-3 else 0.0
+    return speed
 
   def carrot_navi_thread(self):
     self.carrot_navi_tcp_server(7712)

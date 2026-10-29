@@ -1,5 +1,7 @@
 import hashlib
 import json
+from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -7,6 +9,28 @@ import tarfile
 import pytest
 
 import build_host_bundle as bundle
+
+
+def test_navdy_display_dependencies_are_exported_without_c4_ui(tmp_path):
+  files = ['openpilot/__init__.py', 'openpilot/selfdrive/navdy/display.py',
+           'openpilot/selfdrive/navdy/deceleration.py',
+           'openpilot/selfdrive/carrot/deceleration_source.py',
+           'openpilot/selfdrive/carrot/deceleration_display.py']
+  for name in files:
+    assert any(Path(name).is_relative_to(selected) for selected in bundle.PATHS), name
+    destination = tmp_path / name
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(bundle.ROOT / name, destination)
+  script = '''import sys
+sys.path.insert(0, sys.argv[1])
+from openpilot.selfdrive.navdy.display import payload_from_messages
+assert payload_from_messages()["decel"] == 0
+assert "pyray" not in sys.modules
+print("isolated-import-ok")
+'''
+  result = subprocess.run([sys.executable, '-I', '-c', script, str(tmp_path)],
+                          cwd=tmp_path, capture_output=True, text=True, check=True)
+  assert result.stdout.strip() == 'isolated-import-ok'
 
 
 def test_bundle_tracks_exact_commit_and_refuses_uncommitted_sources(tmp_path, monkeypatch):

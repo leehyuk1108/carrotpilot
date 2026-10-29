@@ -12,6 +12,8 @@ from itertools import islice
 import math
 from typing import Any
 
+from openpilot.selfdrive.navdy.deceleration import badge_code
+
 KPH_PER_MS = 3.6
 MAX_MODEL_SAMPLES = 64
 MAX_PROJECTED_POINTS = 10
@@ -260,8 +262,8 @@ def payload_from_messages(*, car_state: Any = None, selfdrive_state: Any = None,
                           door_open: bool | None = None) -> dict[str, Any]:
   """Map fresh service structs without retaining state or synthesizing alerts.
 
-  carrot_man has navigation inputs, not Wayon's automatic ACC/section-control
-  state; navigation forwarding is intentionally owned by the bridge separately.
+  Only the display-only deceleration verdict uses carrot_man here; navigation
+  feedback is still owned by the bridge separately.
   Alert strings are preserved verbatim, including hold/resume/critical alerts.
   """
   car_valid = (car_state is not None and bool(getattr(car_state, "canValid", False))
@@ -330,7 +332,10 @@ def payload_from_messages(*, car_state: Any = None, selfdrive_state: Any = None,
     "longActive": active and bool(getattr(car_control, "longActive", False)),
     "activeLaneLine": active and bool(getattr(controls_state, "activeLaneLine", False)),
     "navVehicles": [],
+    "decel": 0,
   }
+  if payload['longActive'] and payload['alertSize'] == 'none' and payload['alertStatus'] == 'normal':
+    payload['decel'] = badge_code(car_state, selfdrive_state, car_control, longitudinal_plan, carrot_man)
   if active:
     geometry = navdy_model_geometry(model)
     payload.update(geometry)

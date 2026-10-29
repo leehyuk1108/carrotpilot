@@ -1,41 +1,18 @@
-"""Display only an applied speed cap, not a claim that the brake is actuating."""
-import math
-
+"""Display speed-target progress, never physical braking or actual speed compliance."""
 import pyray as rl
 
 from openpilot.selfdrive.carrot.carrot_man_input import get_carrot_man
-from openpilot.selfdrive.carrot.deceleration_source import DECELERATION_SOURCE_LABELS
+from openpilot.selfdrive.carrot.deceleration_display import DecelerationState, deceleration_state
 from openpilot.system.ui.lib.text_measure import measure_text_cached
 
 
-def selected_deceleration(sm, started_frame: int) -> tuple[str, bool] | None:
+def selected_deceleration(sm, started_frame: int) -> DecelerationState | None:
   def fresh(service):
     return sm.valid[service] and sm.alive[service] and sm.recv_frame[service] > 0 and sm.recv_frame[service] >= started_frame
 
-  if not all(fresh(service) for service in ('carState', 'selfdriveState', 'carrotMan')):
+  if not all(fresh(service) for service in ('carState', 'selfdriveState', 'carrotMan', 'carControl', 'longitudinalPlan')):
     return None
-  carrot = get_carrot_man(sm)
-  if carrot is None or not 0 < carrot.desiredSpeed < 200:
-    return None
-  source = str(carrot.desiredSource or '').strip().lower()
-  for suffix in (':n', ':v', ':c'):
-    source = source.removesuffix(suffix)
-  label = DECELERATION_SOURCE_LABELS.get(source)
-  if not label or source == 'gas':
-    return None
-
-  # Match the planner's kph cap to the selected source. Cluster speed can be
-  # corrected independently, so it must not decide whether this cap is applied.
-  car = sm['carState']
-  active = False
-  if fresh('carControl') and fresh('longitudinalPlan'):
-    target = float(sm['longitudinalPlan'].cruiseTarget)
-    selected = float(car.vCruise)
-    active = (sm['selfdriveState'].enabled and sm['carControl'].longActive and
-              not car.gasPressed and not car.brakePressed and
-              math.isfinite(selected) and 0 < selected < 255 and carrot.desiredSpeed < selected and
-              math.isfinite(target) and abs(target - carrot.desiredSpeed) <= 1.0)
-  return label.upper(), bool(active)
+  return deceleration_state(sm['carState'], sm['selfdriveState'], sm['carControl'], sm['longitudinalPlan'], get_carrot_man(sm))
 
 
 class DecelerationBadge:
@@ -43,27 +20,34 @@ class DecelerationBadge:
   HEIGHT = 26
   PERIOD = 1.0
   GREEN = (32, 216, 106, 255)
+  ORANGE = (255, 149, 0, 255)
   WHITE = (255, 255, 255, 255)
 
   def __init__(self):
     self.reset()
 
   def reset(self):
-    self._active_label = None
+    self._active_state = None
     self._active_since = 0.0
 
-  def draw(self, rect: rl.Rectangle, font, state: tuple[str, bool] | None, now: float):
-    if state is None or not state[1]:
+  def draw(self, rect: rl.Rectangle, font, state: DecelerationState | None, now: float):
+    if state is None:
       self.reset()
       return
-    label, active = state
-    active_label = label if active else None
-    if active_label != self._active_label:
-      self._active_label = active_label
+    label, phase, source = state
+    active_state = (source, phase)
+    if active_state != self._active_state or now < self._active_since:
+      self._active_state = active_state
       self._active_since = now
-    bright = active and (now - self._active_since) % self.PERIOD < 0.6
+    # Live curve geometry can alternate at entry/exit. Confirm green briefly;
+    # invalid/overridden/disengaged inputs still clear it immediately.
+    if phase == 'complete' and source in ('route', 'vturn') and now - self._active_since < 0.3:
+      phase = 'waiting'
+    color = self.GREEN if phase == 'complete' else self.WHITE
+    if phase == 'decelerating' and (now - self._active_since) % self.PERIOD < 0.6:
+      color = self.ORANGE
     box = rl.Rectangle(rect.x + 136, rect.y + rect.height - 78, self.WIDTH, self.HEIGHT)
-    rl.draw_rectangle_rounded(box, 0.3, 6, rl.Color(*(self.GREEN if bright else self.WHITE)))
+    rl.draw_rectangle_rounded(box, 0.3, 6, rl.Color(*color))
     size = 18
     measured = measure_text_cached(font, label, size)
     size *= min(1, (self.WIDTH - 16) / max(1, measured.x))

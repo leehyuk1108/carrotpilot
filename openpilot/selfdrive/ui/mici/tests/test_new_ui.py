@@ -210,30 +210,47 @@ def test_new_ui_is_display_only_and_existing_overlay_owners_remain():
 
 @pytest.mark.parametrize('source,label', [('atc', 'TURN'), ('atc2', 'TURN'), ('cam', 'CAM'), ('hda', 'CAM'),
                                         ('cam:v', 'CAM'), ('bump:n', 'BUMP'), ('hda_section', 'SECTION'),
-                                        ('vturn', 'VTURN'), ('route', 'ROUTE'), ('school', 'SCHOOL')])
-def test_selected_deceleration_source_labels(scene, source, label):
-  s = scene
-  s.sm['carrotMan'] = NS(desiredSpeed=60, desiredSource=source)
-  s.sm['longitudinalPlan'].cruiseTarget = 60
-  assert s.badge.selected_deceleration(s.sm, 100) == (label, True)
+                                        ('vturn', 'VTURN'), ('route', 'ROUTE'), ('school', 'SCHOOL'),
+                                        ('section', 'SECTION'), ('road', 'ROAD'), ('police', 'POLICE'),
+                                        ('waze', 'WAZE'), ('hda_bump', 'BUMP')])
+@pytest.mark.parametrize('cap,final,selected,phase', [(160, 80, 120, 'waiting'), (100, 80, 120, 'decelerating'),
+                                                   (80, 80, 120, 'complete'), (160, 80, 70, 'complete')])
+def test_selected_deceleration_source_labels(scene, source, label, cap, final, selected, phase):
+  set_deceleration(scene, source, cap, final, selected)
+  assert scene.badge.selected_deceleration(scene.sm, 100).label == label
+  assert scene.badge.selected_deceleration(scene.sm, 100).phase == phase
 
 
-@pytest.mark.parametrize('condition', ['disengaged', 'lateral_only', 'gas', 'brake', 'no_cap', 'other_target',
-                                      'stale_plan', 'invalid_control', 'old_plan', 'nan_plan', 'invalid_set'])
-def test_deceleration_is_hidden_without_applied_cap(scene, condition):
+def set_deceleration(s, source='cam', cap=100., final=80., selected=120.):
+  s.cs.vCruise = selected
+  s.sm['carrotMan'] = NS(desiredSpeed=int(cap), desiredSource=source,
+                         decelerationCandidates=[NS(source=source, speedKph=cap, targetKph=final)])
+  s.sm['longitudinalPlan'].cruiseTarget = min(selected, int(cap))
+  s.hud._set_speed_changed_time = -10
+
+
+@pytest.mark.parametrize('actual', [0, 70, 95, 120])
+def test_progress_uses_same_reason_cap_not_actual_vehicle_speed(scene, actual):
   s = scene
-  s.sm['carrotMan'] = NS(desiredSpeed=60, desiredSource='cam')
-  s.sm['longitudinalPlan'].cruiseTarget = 60
+  s.cs.vEgo = s.cs.vEgoCluster = actual / 3.6
+  for cap, phase in [(250, 'waiting'), (160, 'waiting'), (120, 'waiting'), (110, 'decelerating'),
+                     (100, 'decelerating'), (81.99, 'decelerating'), (81.01, 'decelerating'),
+                     (80.99, 'complete'), (80, 'complete')]:
+    set_deceleration(s, cap=cap)
+    # Repeated rounded targets and a stopped car must never imply completion.
+    for _ in range(5):
+      assert s.badge.selected_deceleration(s.sm, 100).phase == phase
+
+
+@pytest.mark.parametrize('condition', ['disengaged', 'lateral_only', 'stale_plan', 'invalid_control',
+                                      'old_plan', 'nan_plan', 'invalid_set'])
+def test_deceleration_is_hidden_without_current_engaged_control(scene, condition):
+  s = scene
+  set_deceleration(s)
   if condition == 'disengaged':
     s.sm['selfdriveState'].enabled = False
   elif condition == 'lateral_only':
     s.sm['carControl'].longActive = False
-  elif condition in ('gas', 'brake'):
-    setattr(s.cs, condition + 'Pressed', True)
-  elif condition == 'no_cap':
-    s.cs.vCruise = 60
-  elif condition == 'other_target':
-    s.sm['longitudinalPlan'].cruiseTarget = 40
   elif condition == 'stale_plan':
     s.sm.alive['longitudinalPlan'] = False
   elif condition == 'invalid_control':
@@ -244,34 +261,93 @@ def test_deceleration_is_hidden_without_applied_cap(scene, condition):
     s.sm['longitudinalPlan'].cruiseTarget = float('nan')
   else:
     s.cs.vCruise = 255
-  assert s.badge.selected_deceleration(s.sm, 100) == ('CAM', False)
-  s.hud._set_speed_changed_time = -10
+  assert s.badge.selected_deceleration(s.sm, 100) is None
   s.renderer.draw(s.rect, s.hud)
   assert not texts(s)
   assert not any(call[0] == 'draw_rectangle_rounded' for call in s.calls)
 
 
-@pytest.mark.parametrize('source', (
-  'atc', 'atc2', 'cam', 'hda', 'cam:v', 'bump:n', 'hda_section', 'vturn', 'route', 'school',
-))
-def test_candidate_above_set_speed_has_no_badge(scene, source):
+@pytest.mark.parametrize('condition', ['gas', 'brake', 'gas_floor', 'other_target'])
+@pytest.mark.parametrize('cap', [80, 100])
+def test_valid_information_stays_white_when_cap_is_overridden(scene, condition, cap):
   s = scene
-  s.hud._set_speed_changed_time = -10
-  s.cs.vCruise = 35
-  s.sm['carrotMan'] = NS(desiredSpeed=180, desiredSource=source)
-  s.sm['longitudinalPlan'].cruiseTarget = 35
-  state = s.badge.selected_deceleration(s.sm, 100)
-  assert state is not None and not state[1]
-  s.renderer.draw(s.rect, s.hud)
-  assert not texts(s)
-  assert not any(call[0] == 'draw_rectangle_rounded' for call in s.calls)
+  set_deceleration(s, cap=cap)
+  if condition in ('gas', 'brake'):
+    setattr(s.cs, condition + 'Pressed', True)
+  elif condition == 'gas_floor':
+    s.sm['carrotMan'].desiredSource = 'gas'
+  else:
+    s.sm['longitudinalPlan'].cruiseTarget = 40
+  assert s.badge.selected_deceleration(s.sm, 100).phase == 'waiting'
+
+
+def test_pending_camera_survives_unrelated_neutral_winner_and_clears_when_invalid(scene):
+  s = scene
+  set_deceleration(s, cap=250)
+  s.sm['carrotMan'].desiredSource = 'road'
+  s.sm['carrotMan'].desiredSpeed = 200
+  assert s.badge.selected_deceleration(s.sm, 100) == ('CAM', 'waiting', 'cam')
+  s.sm['carrotMan'].decelerationCandidates = []
+  assert s.badge.selected_deceleration(s.sm, 100) is None
+
+
+def test_actual_winning_reason_precedes_pending_camera_and_never_borrows_completion(scene):
+  s = scene
+  set_deceleration(s, cap=100)
+  s.sm['carrotMan'].decelerationCandidates.append(NS(source='road', speedKph=60., targetKph=60.))
+  s.sm['carrotMan'].desiredSource, s.sm['carrotMan'].desiredSpeed = 'road', 60
+  s.sm['longitudinalPlan'].cruiseTarget = 60
+  assert s.badge.selected_deceleration(s.sm, 100) == ('ROAD', 'complete', 'road')
+  s.sm['carrotMan'].decelerationCandidates.pop()
+  assert s.badge.selected_deceleration(s.sm, 100) == ('CAM', 'waiting', 'cam')
+
+
+@pytest.mark.parametrize('source', ['vturn', 'route', 'road'])
+def test_unnecessary_green_candidate_cannot_mask_pending_camera(scene, source):
+  s = scene
+  set_deceleration(s, cap=250)
+  s.sm['carrotMan'].decelerationCandidates.append(NS(source=source, speedKph=150., targetKph=150.))
+  s.sm['carrotMan'].desiredSource, s.sm['carrotMan'].desiredSpeed = source, 150
+  assert s.badge.selected_deceleration(s.sm, 100) == ('CAM', 'waiting', 'cam')
+  s.cs.vCruise = 70
+  assert s.badge.selected_deceleration(s.sm, 100).phase == 'complete'
+
+
+@pytest.mark.parametrize('camera_first', [False, True])
+def test_nearer_pending_event_wins_saturated_envelope_tie(scene, camera_first):
+  s = scene
+  set_deceleration(s, cap=250)
+  camera = s.sm['carrotMan'].decelerationCandidates[0]
+  camera.distanceM = 300.
+  turn = NS(source='atc', speedKph=250., targetKph=30., distanceM=3000.)
+  s.sm['carrotMan'].decelerationCandidates = [camera, turn] if camera_first else [turn, camera]
+  s.sm['carrotMan'].desiredSource, s.sm['carrotMan'].desiredSpeed = 'road', 200
+  assert s.badge.selected_deceleration(s.sm, 100) == ('CAM', 'waiting', 'cam')
+  camera.distanceM, turn.distanceM = 3000., 300.
+  assert s.badge.selected_deceleration(s.sm, 100) == ('TURN', 'waiting', 'atc')
+
+
+def test_new_camera_or_target_does_not_inherit_previous_green(scene):
+  s = scene
+  for cap, final, phase in [(80, 80, 'complete'), (160, 60, 'waiting'), (100, 60, 'decelerating'), (60, 60, 'complete')]:
+    set_deceleration(s, cap=cap, final=final)
+    assert s.badge.selected_deceleration(s.sm, 100).phase == phase
+
+
+def test_unknown_curve_endpoint_can_blink_but_cannot_invent_completion(scene):
+  s = scene
+  set_deceleration(s, source='vturn', cap=70, final=0)
+  for _ in range(20):
+    assert s.badge.selected_deceleration(s.sm, 100).phase == 'decelerating'
+  set_deceleration(s, source='vturn', cap=70, final=0, selected=60)
+  assert s.badge.selected_deceleration(s.sm, 100).phase == 'waiting'
 
 
 @pytest.mark.parametrize('condition', ['unseen', 'expired', 'future', 'invalid', 'dead', 'old_session',
-                                      'zero', 'neutral_200', 'neutral_250', 'unknown', 'gas', 'empty'])
+                                      'zero', 'legacy', 'neutral_200', 'neutral_250', 'unknown', 'gas', 'empty', 'nan_cap', 'nan_final'])
 def test_badge_hides_missing_expired_and_neutral_navigation(scene, condition):
   s = scene
-  s.sm['carrotMan'] = NS(desiredSpeed=60, desiredSource='cam')
+  set_deceleration(s)
   if condition == 'unseen':
     s.sm.seen['carrotMan'] = False
   elif condition == 'expired':
@@ -284,19 +360,24 @@ def test_badge_hides_missing_expired_and_neutral_navigation(scene, condition):
     s.sm.alive['carrotMan'] = False
   elif condition == 'old_session':
     s.sm.recv_frame['carrotMan'] = 99
-  elif condition in ('zero', 'neutral_200', 'neutral_250'):
-    s.sm['carrotMan'].desiredSpeed = {'zero': 0, 'neutral_200': 200, 'neutral_250': 250}[condition]
+  elif condition == 'zero':
+    s.sm['carrotMan'].desiredSpeed = 0
+  elif condition == 'legacy':
+    del s.sm['carrotMan'].decelerationCandidates
+  elif condition in ('neutral_200', 'neutral_250'):
+    s.sm['carrotMan'].decelerationCandidates[0].speedKph = int(condition[-3:])
+    s.sm['carrotMan'].decelerationCandidates[0].targetKph = 0
+  elif condition in ('nan_cap', 'nan_final'):
+    setattr(s.sm['carrotMan'].decelerationCandidates[0], 'speedKph' if condition == 'nan_cap' else 'targetKph', float('nan'))
   else:
-    s.sm['carrotMan'].desiredSource = '' if condition == 'empty' else condition
+    s.sm['carrotMan'].decelerationCandidates[0].source = '' if condition == 'empty' else condition
   assert s.badge.selected_deceleration(s.sm, 100) is None
 
 
 @pytest.mark.parametrize('source,label', [('cam', 'CAM'), ('atc', 'TURN')])
-def test_badge_blinks_white_green_at_one_hz_keeps_dark_text_and_does_not_move(scene, source, label):
+def test_badge_blinks_orange_white_at_one_hz_keeps_dark_text_and_does_not_move(scene, source, label):
   s = scene
-  s.hud._set_speed_changed_time = -10
-  s.sm['carrotMan'] = NS(desiredSpeed=60, desiredSource=source)
-  s.sm['longitudinalPlan'].cruiseTarget = 60
+  set_deceleration(s, source=source)
   boxes, colors = [], []
   for now in (10, 10.59, 10.7, 11.01):
     s.now[0] = now
@@ -309,44 +390,67 @@ def test_badge_blinks_white_green_at_one_hz_keeps_dark_text_and_does_not_move(sc
     boxes.append(box)
     colors.append(tuple(color))
   assert boxes == [s.module.rl.Rectangle(136, 162, 76, 26)] * 4
-  assert colors == [(32, 216, 106, 255)] * 2 + [(255, 255, 255, 255), (32, 216, 106, 255)]
+  assert colors == [(255, 149, 0, 255)] * 2 + [(255, 255, 255, 255), (255, 149, 0, 255)]
   s.sm['carControl'].longActive = False
   s.calls.clear()
   s.renderer.draw(s.rect, s.hud)
   assert not texts(s)
-  assert not any(call[0] == 'draw_rectangle_rounded' for call in s.calls)
-  assert s.renderer._deceleration_badge._active_label is None
+  assert s.renderer._deceleration_badge._active_state is None
   s.sm['carControl'].longActive = True
   s.now[0] = 11.7
   s.calls.clear()
   s.renderer.draw(s.rect, s.hud)
-  assert tuple(next(call for call in s.calls if call[0] == 'draw_rectangle_rounded')[-1]) == s.badge.DecelerationBadge.GREEN
+  assert tuple(next(call for call in s.calls if call[0] == 'draw_rectangle_rounded')[-1]) == s.badge.DecelerationBadge.ORANGE
 
 
-@pytest.mark.parametrize('state', [None, ('ROUTE', False), ('CAM', False)])
-def test_badge_clears_during_white_phase_and_restarts_green(scene, state):
+@pytest.mark.parametrize('phase,color', [('waiting', (255, 255, 255, 255)), ('complete', (32, 216, 106, 255))])
+def test_waiting_and_complete_are_steady_and_do_not_blink(scene, phase, color):
+  s = scene
+  for now in (10., 10.7, 11.4, 12.9):
+    s.calls.clear()
+    s.renderer._deceleration_badge.draw(s.rect, s.hud._font_semi_bold, ('CAM', phase, 'cam'), now)
+    assert tuple(next(call for call in s.calls if call[0] == 'draw_rectangle_rounded')[-1]) == color
+
+
+@pytest.mark.parametrize('source', ['route', 'vturn'])
+def test_curve_green_requires_stable_completion_and_lost_endpoint_clears_immediately(scene, source):
   s = scene
   badge = s.renderer._deceleration_badge
-  badge.draw(s.rect, s.hud._font_semi_bold, ('ROUTE', True), 10.)
+  for now, phase, green in [(10., 'complete', False), (10.15, 'decelerating', False),
+                             (10.2, 'complete', False), (10.49, 'complete', False),
+                             (10.51, 'complete', True), (10.6, 'decelerating', False)]:
+    s.calls.clear()
+    badge.draw(s.rect, s.hud._font_semi_bold, (source.upper(), phase, source), now)
+    color = tuple(next(call for call in s.calls if call[0] == 'draw_rectangle_rounded')[-1])
+    assert (color == badge.GREEN) == green
+    if phase == 'complete' and not green:
+      assert color == badge.WHITE
   s.calls.clear()
-  badge.draw(s.rect, s.hud._font_semi_bold, state, 10.7)
-  assert s.calls == []
-  assert badge._active_label is None and badge._active_since == 0
-  badge.draw(s.rect, s.hud._font_semi_bold, ('ROUTE', True), 10.8)
-  assert texts(s) == ['ROUTE']
-  assert tuple(next(call for call in s.calls if call[0] == 'draw_rectangle_rounded')[-1]) == badge.GREEN
+  badge.draw(s.rect, s.hud._font_semi_bold, None, 10.7)
+  assert not s.calls and badge._active_state is None
+
+
+def test_badge_clears_and_resets_blink_when_phase_or_source_changes(scene):
+  s = scene
+  badge = s.renderer._deceleration_badge
+  for state in [None, ('CAM', 'waiting', 'cam'), ('CAM', 'complete', 'cam'), ('CAM', 'decelerating', 'hda')]:
+    badge.draw(s.rect, s.hud._font_semi_bold, ('CAM', 'decelerating', 'cam'), 10.)
+    badge.draw(s.rect, s.hud._font_semi_bold, state, 10.7)
+    s.calls.clear()
+    badge.draw(s.rect, s.hud._font_semi_bold, ('CAM', 'decelerating', 'cam'), 10.8)
+    assert tuple(next(call for call in s.calls if call[0] == 'draw_rectangle_rounded')[-1]) == badge.ORANGE
 
 
 def test_compact_badge_clears_wheel_and_fits_long_label_at_offset(scene):
   s = scene
   rect = s.module.rl.Rectangle(60, 10, 476, 240)
-  s.renderer._deceleration_badge.draw(rect, s.hud._font_semi_bold, ('SECTION', True), 10.)
+  s.renderer._deceleration_badge.draw(rect, s.hud._font_semi_bold, ('SECTION', 'complete', 'section'), 10.)
   _, box, *_ = next(call for call in s.calls if call[0] == 'draw_rectangle_rounded')
   _, _, label, position, size, spacing, _ = next(call for call in s.calls if call[0] == 'draw_text_ex')
   assert box.x == rect.x + 136 and box.y == rect.y + 162
-  assert box.x > rect.x + 46 + 25 * 2 ** .5 + 15  # Rotated 50px wheel, plus a gap.
-  assert box.x >= rect.x + 20 + 108 + 8  # Wayon BSM texture, plus a gap.
-  assert box.y + box.height < rect.y + 200  # Above the bottom torque bar.
+  assert box.x > rect.x + 46 + 25 * 2 ** .5 + 15
+  assert box.x >= rect.x + 20 + 108 + 8
+  assert box.y + box.height < rect.y + 200
   assert label == 'SECTION' and spacing == 0
   assert box.x + 8 <= position.x and position.x + len(label) * size * .6 <= box.x + box.width - 8
   assert box.y <= position.y and position.y + size <= box.y + box.height
@@ -355,8 +459,7 @@ def test_compact_badge_clears_wheel_and_fits_long_label_at_offset(scene):
 @pytest.mark.parametrize('condition', ['warning', 'timer', 'critical', 'offroad'])
 def test_deceleration_yields_to_warnings_and_timers(scene, condition):
   s = scene
-  s.sm['carrotMan'] = NS(desiredSpeed=60, desiredSource='cam')
-  s.sm['longitudinalPlan'].cruiseTarget = 60
+  set_deceleration(s)
   s.renderer.draw(s.rect, s.hud)
   assert 'CAM' in texts(s)
   if condition == 'warning':
@@ -370,7 +473,7 @@ def test_deceleration_yields_to_warnings_and_timers(scene, condition):
   s.calls.clear()
   s.renderer.draw(s.rect, s.hud)
   assert 'CAM' not in texts(s)
-  assert s.renderer._deceleration_badge._active_label is None
+  assert s.renderer._deceleration_badge._active_state is None
 
 
 def bsm_icons(scene):
@@ -388,6 +491,8 @@ def test_wayon_bsm_original_asset_position_and_side(scene, left, right):
   assert all((call[1].width, call[1].height, call[2].y) == (108, 128, 100) for call in icons)
   assert all(tuple(call[-1]) == (255, 255, 255, 255) for call in icons)
   assert ('MAX' in texts(s)) == (not left)
+
+
 
 
 @pytest.mark.parametrize('condition', ['offroad', 'invalid', 'dead', 'unseen', 'old_session'])
