@@ -18,6 +18,7 @@ from openpilot.common.repo_update import release_boot_lock
 from openpilot.common.text_window import TextWindow
 from openpilot.system.hardware import HARDWARE
 from openpilot.system.hardware.automatic_shutdown import try_automatic_shutdown
+from openpilot.system.wayon_shutdown_notice import notify_automatic_shutdown
 from openpilot.system.manager.camera_config import configure_wide_camera
 from openpilot.selfdrive.monitoring.config import configure_monitoring
 from openpilot.system.manager.helpers import unblock_stdout, write_onroad_params, save_bootlog
@@ -262,7 +263,7 @@ def manager_thread(update_status: UpdateStatus) -> None:
     if shutdown:
       break
 
-    automatic_reason = try_automatic_shutdown(sm, params, HARDWARE.shutdown)
+    automatic_reason = try_automatic_shutdown(sm, params, HARDWARE.shutdown, notify=notify_automatic_shutdown)
     if automatic_reason is not None:
       params.put("LastManagerExitReason", f"AutomaticShutdown {automatic_reason} {datetime.datetime.now()}")
       cloudlog.warning({"event": "Automatic poweroff requested", "reason": automatic_reason})

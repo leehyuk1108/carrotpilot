@@ -39,7 +39,7 @@ def automatic_shutdown_reason(request, sm, now):
   return request["reason"]
 
 
-def try_automatic_shutdown(sm, params, shutdown, clock=time.monotonic):
+def try_automatic_shutdown(sm, params, shutdown, clock=time.monotonic, notify=None):
   reason = automatic_shutdown_reason(params.get(REQUEST_KEY), sm, clock())
   if reason is None:
     return None
@@ -48,5 +48,16 @@ def try_automatic_shutdown(sm, params, shutdown, clock=time.monotonic):
   sm.update(0)
   if automatic_shutdown_reason(params.get(REQUEST_KEY), sm, clock()) != reason:
     return None
+  if notify is not None:
+    try:
+      notify(reason, sm, params)
+    except Exception:
+      # A notification failure must never disable battery protection.
+      pass
+    # Network delivery can overlap ignition or voltage recovery. Drain again,
+    # leaving all managed processes alive when automatic poweroff is cancelled.
+    sm.update(0)
+    if automatic_shutdown_reason(params.get(REQUEST_KEY), sm, clock()) != reason:
+      return None
   shutdown()
   return reason

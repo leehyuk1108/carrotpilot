@@ -193,21 +193,70 @@ def test_actual_manager_loop_uses_cancellable_auto_path(mode):
     "write_onroad_params": Mock(), "clear_ignition_on_params": Mock(),
     "ensure_running": Mock(), "time": NS(monotonic=lambda: 100.),
     "datetime": datetime, "HARDWARE": NS(shutdown=shutdown),
-    "try_automatic_shutdown": lambda s, p, fn: try_automatic_shutdown(s, p, fn, clock=lambda: 100.),
+    "notify_automatic_shutdown": Mock(),
+    "try_automatic_shutdown": lambda s, p, fn, **kw: try_automatic_shutdown(s, p, fn, clock=lambda: 100., **kw),
   }
   exec(compile(ast.Module(body=[thread], type_ignores=[]), "manager.py", "exec"), globals_)
   globals_["manager_thread"](NS(update=lambda *_: False))
   if mode == "automatic":
     shutdown.assert_called_once_with()
-    assert polls == [1000, 0]
+    assert polls == [1000, 0, 0]
+    globals_["notify_automatic_shutdown"].assert_called_once_with("low_voltage", sm, params)
     assert values["LastManagerExitReason"].startswith("AutomaticShutdown low_voltage ")
     assert "DoShutdown" not in values
   elif mode == "ignition_during_final_check":
+    globals_["notify_automatic_shutdown"].assert_not_called()
     shutdown.assert_not_called()
     assert polls == [1000, 0, 1000]
     assert values["LastManagerExitReason"].startswith("DoReboot ")
     assert globals_["ensure_running"].call_count == 3
   else:
+    globals_["notify_automatic_shutdown"].assert_not_called()
     shutdown.assert_not_called()  # Manual poweroff/reboot stays in main(), after cleanup.
     assert polls == [1000]
     assert values["LastManagerExitReason"].startswith("DoShutdown " if mode == "manual_shutdown" else "DoReboot ")
+
+
+@pytest.mark.parametrize("reason", ["low_voltage", "offroad_timeout"])
+@pytest.mark.parametrize("fails", [False, True])
+def test_notice_precedes_poweroff_but_failure_does_not_prevent_it(reason, fails):
+  sm, params, shutdown = Messages(), Mock(), Mock()
+  params.get.return_value = request(reason)
+  order = []
+  def notify(*args):
+    order.append("notice")
+    assert args == (reason, sm, params)
+    if fails:
+      raise RuntimeError("offline")
+  shutdown.side_effect = lambda: order.append("shutdown")
+  assert try_automatic_shutdown(sm, params, shutdown, clock=lambda: 100., notify=notify) == reason
+  assert order == ["notice", "shutdown"]
+  assert sm.update.call_count == 2
+
+
+@pytest.mark.parametrize("change", ["ignition", "onroad", "recovery", "withdraw", "stale", "reason"])
+def test_recheck_after_notice_cancels_shutdown(change):
+  sm, params, shutdown = Messages(), Mock(), Mock()
+  params.get.return_value = request()
+  def notify(*_):
+    if change == "ignition":
+      sm["pandaStates"][0].ignitionCan = True
+    elif change == "onroad":
+      sm["deviceState"].started = True
+    elif change == "recovery":
+      sm["peripheralState"].voltage = 12000
+    elif change == "withdraw":
+      params.get.return_value = None
+    elif change == "stale":
+      sm.valid["pandaStates"] = False
+    else:
+      params.get.return_value = request("offroad_timeout")
+  assert try_automatic_shutdown(sm, params, shutdown, clock=lambda: 100., notify=notify) is None
+  shutdown.assert_not_called()
+
+
+def test_invalid_request_does_not_notify():
+  sm, params, shutdown, notify = Messages(), Mock(), Mock(), Mock()
+  params.get.return_value = None
+  assert try_automatic_shutdown(sm, params, shutdown, clock=lambda: 100., notify=notify) is None
+  notify.assert_not_called()
