@@ -447,11 +447,11 @@ def impact_media_directory(event_id, media_root=IMPACT_MEDIA_ROOT):
   return Path(media_root) / (safe_id or "unknown")
 
 
-def jpeg_bytes(array, quality=78):
+def jpeg_bytes(array, quality=78, subsampling=-1):
   from PIL import Image
 
   buffer = io.BytesIO()
-  Image.fromarray(array).save(buffer, "JPEG", quality=quality, optimize=True)
+  Image.fromarray(array).save(buffer, "JPEG", quality=quality, subsampling=subsampling, optimize=True)
   return buffer.getvalue()
 
 
@@ -2020,8 +2020,8 @@ def upload_recent_route_summary(config, device_id):
 
 
 
-def jpeg_base64(array):
-  return base64.b64encode(jpeg_bytes(array, quality=72)).decode("ascii")
+def jpeg_base64(array, quality=72, subsampling=-1):
+  return base64.b64encode(jpeg_bytes(array, quality=quality, subsampling=subsampling)).decode("ascii")
 
 
 def enhance_wide_snapshot(image, target_median=WAYON_WIDE_SNAPSHOT_TARGET_MEDIAN,
@@ -2052,19 +2052,30 @@ def enhance_wide_snapshot(image, target_median=WAYON_WIDE_SNAPSHOT_TARGET_MEDIAN
   return enhanced
 
 
-def upload_offroad_snapshot(config, device_id):
+def upload_offroad_snapshot(config, device_id, multiframe=True):
   try:
-    wide, driver = capture_offroad_images()
+    from openpilot.system.wayon_camera import CameraGuard, capture_pair
+    params = Params()
+    burst = [] if multiframe and config.get("parking_multiframe_enabled", False) else None
+    wide, driver = capture_pair(params, OFFROAD_SNAPSHOT_TIMEOUT_S, wide_frames=burst)
     if wide is None and driver is None:
       return False
-
-    payload = {
-      "deviceId": device_id,
-      "capturedAt": utc_now(),
-      "wideJpegBase64": jpeg_base64(wide) if wide is not None else None,
-      "driverJpegBase64": jpeg_base64(driver) if driver is not None else None,
-    }
-    post_json(config, "/api/snapshot", payload)
+    guard = CameraGuard(params)
+    if not guard.wait_ready():
+      return False
+    frames = burst or [(time.time(), wide)]
+    for index, (captured_at, image) in enumerate(frames):
+      if not guard.allowed():
+        return False
+      payload = {
+        "deviceId": device_id,
+        "capturedAt": datetime.fromtimestamp(captured_at, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "wideJpegBase64": jpeg_base64(enhance_wide_snapshot(image), quality=92, subsampling=0) if image is not None else None,
+        "driverJpegBase64": jpeg_base64(driver) if index == 0 and driver is not None else None,
+      }
+      if not guard.allowed():
+        return False
+      post_json(config, "/api/snapshot", payload)
     print("Wayon cloud: uploaded offroad snapshot")
     return True
   except Exception as exc:
@@ -2088,6 +2099,7 @@ def main():
   next_telemetry = 0.0
   next_route_summary = 0.0
   next_snapshot = 0.0
+  parking_burst_pending = True
   next_impact_upload = 0.0
   next_vehicle_event_upload = 0.0
   ambient_delivery = AmbientCommandDelivery()
@@ -2154,6 +2166,7 @@ def main():
       next_telemetry = now
 
     if not started and previous_started:
+      parking_burst_pending = True
       next_telemetry = now
       route_summary_due = now + route_summary_grace_period
       next_route_summary = route_summary_due if next_route_summary <= now else min(next_route_summary, route_summary_due)
@@ -2197,7 +2210,8 @@ def main():
         next_route_summary = time.monotonic() + max(route_summary_interval, route_backoff.failure_delay())
 
     if not started and config.get("snapshots_enabled", True) and now >= next_snapshot:
-      upload_offroad_snapshot(config, device_id)
+      if upload_offroad_snapshot(config, device_id, multiframe=parking_burst_pending):
+        parking_burst_pending = False
       next_snapshot = now + max(300.0, snapshot_interval)
 
     previous_started = started

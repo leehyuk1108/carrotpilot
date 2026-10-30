@@ -106,7 +106,11 @@ def snapshot_frame_fresh(client, now):
   return math.isfinite(eof) and eof > 0 and 0 <= now - eof <= 0.5
 
 
-def capture_pair(params, timeout=25.0):
+def snapshot_width(camera_index, native_width):
+  return min(1928 if camera_index == 0 else 960, native_width)
+
+
+def capture_pair(params, timeout=25.0, wide_frames=None):
   """Request manager-owned cameras without blocking ignition or taking ownership of camerad."""
   import cv2
   import numpy as np
@@ -128,11 +132,14 @@ def capture_pair(params, timeout=25.0):
     connected = [False, False]
     images = [None, None]
     first_frame = [None, None]
+    burst = []
+    last_wide_at = 0.0
+    wanted = 3 if wide_frames is not None else 1
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline and guard.allowed(100):
       request_camera("snapshot")
       for i, client in enumerate(clients):
-        if images[i] is not None:
+        if images[i] is not None and (i != 0 or len(burst) >= wanted):
           continue
         if not connected[i]:
           connected[i] = client.connect(False)
@@ -148,15 +155,24 @@ def capture_pair(params, timeout=25.0):
           first_frame[i] = now
         if now - first_frame[i] < 4.0:
           continue
+        if i == 0 and burst and now - last_wide_at < 1.0:
+          continue
         # Decode NV12 with a bounded native conversion, not a full float64 RGB matrix.
         y = np.asarray(frame.data[:frame.uv_offset]).reshape(-1, frame.stride)[:frame.height, :frame.width]
         uv = np.asarray(frame.data[frame.uv_offset:frame.uv_offset + frame.stride * (frame.height // 2)])
         uv = uv.reshape(-1, frame.stride)[:frame.height // 2, :frame.width]
         rgb = cv2.cvtColor(np.vstack((y, uv)), cv2.COLOR_YUV2RGB_NV12)
-        width = min(960, frame.width)
-        images[i] = cv2.resize(rgb, (width, round(frame.height * width / frame.width)))
-      if all(image is not None for image in images):
-        return tuple(images) if guard.allowed() else (None, None)
+        width = snapshot_width(i, frame.width)
+        images[i] = rgb if width == frame.width else cv2.resize(rgb, (width, round(frame.height * width / frame.width)))
+        if i == 0:
+          burst.append((time.time(), images[i]))
+          last_wide_at = now
+      if all(image is not None for image in images) and len(burst) >= wanted:
+        if not guard.allowed():
+          return None, None
+        if wide_frames is not None:
+          wide_frames.extend(burst)
+        return tuple(images)
     return None, None
   finally:
     release_camera()
