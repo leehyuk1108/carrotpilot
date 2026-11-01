@@ -134,3 +134,55 @@ def test_production_upload_preserves_timestamps_and_jpeg92(monkeypatch, multifra
     assert image.size == (1344, 760)
     assert image.layer[0][1:3] == (1, 1)
     assert image.quantization[0][0] == 3  # libjpeg luminance table at Q92.
+
+
+@pytest.mark.parametrize('abort_at', [99, 7])
+def test_approach_group_keeps_real_capture_times_and_offroad_guard(monkeypatch, abort_at):
+  from openpilot.system import wayon_parking as parking
+  tree = ast.parse(Path(camera.__file__).with_name('wayon_cloud_uploader.py').read_text())
+  nodes = [node for node in tree.body if isinstance(node, ast.FunctionDef)
+           and node.name in {'jpeg_bytes', 'jpeg_base64', 'upload_offroad_snapshot'}]
+  uploaded = []
+  now = camera.time.time()
+  mono = camera.time.monotonic()
+  array = np.zeros((760, 1344, 3), dtype=np.uint8)
+  stop_times = [now - 3 + i for i in range(3)]
+  def capture(params, timeout, wide_frames=None):
+    wide_frames.extend((t, array) for t in stop_times)
+    return array, array
+  state = SimpleNamespace(calls=0)
+  def allowed():
+    state.calls += 1
+    return state.calls < abort_at
+  monkeypatch.setattr(camera, 'capture_pair', capture)
+  monkeypatch.setattr(camera, 'CameraGuard', lambda p: SimpleNamespace(wait_ready=lambda: True, allowed=allowed))
+  scope = {'io': io, 'base64': base64, 'Params': lambda: None, 'datetime': datetime, 'timezone': timezone,
+           'OFFROAD_SNAPSHOT_TIMEOUT_S': 25, 'time': camera.time, 'enhance_wide_snapshot': lambda x: x,
+           'post_json': lambda config, path, payload: uploaded.append(payload)}
+  exec(compile(ast.Module(nodes, []), 'production_snapshot', 'exec'), scope)
+  approach = [parking.ApproachFrame(mono - age, now - age, b'jpeg') for age in (40, 38, 24, 22, 8, 6)]
+  ok = scope['upload_offroad_snapshot']({'parking_multiframe_enabled': True, 'parking_approach_enabled': True},
+                                       'test', approach_frames=approach)
+  assert ok == (abort_at == 99)
+  assert len(uploaded) == (9 if ok else 3)
+  assert len({p['parking']['eventId'] for p in uploaded}) == 1
+  assert all(p['parking']['count'] == 9 for p in uploaded)
+  assert [p['parking']['index'] for p in uploaded] == list(range(len(uploaded)))
+  assert all(p['parking']['phase'] == 'approach' and p['driverJpegBase64'] is None for p in uploaded[:6])
+  for payload, source in zip(uploaded[:6], approach):
+    assert payload['capturedAt'] == datetime.fromtimestamp(source.captured_at, timezone.utc).isoformat(timespec='milliseconds')
+    assert base64.b64decode(payload['wideJpegBase64']) == source.jpeg
+  if ok:
+    assert uploaded[6]['driverJpegBase64']
+    assert all(p['parking']['phase'] == 'parked' for p in uploaded[6:])
+    assert uploaded[-1]['parking']['parkedAt'] == uploaded[-1]['capturedAt']
+
+
+def test_photo_timestamp_uses_sensor_eof_not_encoding_finish(monkeypatch):
+  monkeypatch.setattr(camera.time, 'monotonic', lambda: 100.25)
+  monkeypatch.setattr(camera.time, 'time', lambda: 1100.25)
+  client = SimpleNamespace(timestamp_eof=int(99.875 * 1e9))
+  assert camera.snapshot_capture_time(client) == pytest.approx(1099.875)
+  monkeypatch.setattr(camera.time, 'monotonic', lambda: 101.5)
+  monkeypatch.setattr(camera.time, 'time', lambda: 1101.5)
+  assert camera.snapshot_capture_time(client) == pytest.approx(1099.875)

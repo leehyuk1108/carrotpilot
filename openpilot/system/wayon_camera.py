@@ -110,6 +110,10 @@ def snapshot_width(camera_index, native_width):
   return min(1928 if camera_index == 0 else 960, native_width)
 
 
+def snapshot_capture_time(client):
+  return time.time() - (time.monotonic() - float(client.timestamp_eof) / 1e9)
+
+
 def capture_pair(params, timeout=25.0, wide_frames=None):
   """Request manager-owned cameras without blocking ignition or taking ownership of camerad."""
   import cv2
@@ -165,7 +169,7 @@ def capture_pair(params, timeout=25.0, wide_frames=None):
         width = snapshot_width(i, frame.width)
         images[i] = rgb if width == frame.width else cv2.resize(rgb, (width, round(frame.height * width / frame.width)))
         if i == 0:
-          burst.append((time.time(), images[i]))
+          burst.append((snapshot_capture_time(client), images[i]))
           last_wide_at = now
       if all(image is not None for image in images) and len(burst) >= wanted:
         if not guard.allowed():

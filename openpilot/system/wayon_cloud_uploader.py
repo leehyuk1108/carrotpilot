@@ -2052,7 +2052,7 @@ def enhance_wide_snapshot(image, target_median=WAYON_WIDE_SNAPSHOT_TARGET_MEDIAN
   return enhanced
 
 
-def upload_offroad_snapshot(config, device_id, multiframe=True):
+def upload_offroad_snapshot(config, device_id, multiframe=True, approach_frames=None):
   try:
     from openpilot.system.wayon_camera import CameraGuard, capture_pair
     params = Params()
@@ -2064,15 +2064,31 @@ def upload_offroad_snapshot(config, device_id, multiframe=True):
     if not guard.wait_ready():
       return False
     frames = burst or [(time.time(), wide)]
-    for index, (captured_at, image) in enumerate(frames):
+    parking = None
+    approach = []
+    if config.get("parking_approach_enabled", False) and burst and len(burst) == 3:
+      import uuid
+      from openpilot.system.wayon_parking import upload_frames
+      parked_at = frames[-1][0]
+      approach = upload_frames(approach_frames or [], parked_at)
+      parking = {"version": 1, "eventId": uuid.uuid4().hex,
+                 "parkedAt": datetime.fromtimestamp(parked_at, timezone.utc).isoformat(timespec="milliseconds"),
+                 "count": len(approach) + len(frames)}
+    entries = [(at, raw, "approach", None) for at, raw, _ in approach]
+    entries.extend((at, image, "parked", i) for i, (at, image) in enumerate(frames))
+    for index, (captured_at, image, phase, parked_index) in enumerate(entries):
       if not guard.allowed():
         return False
       payload = {
         "deviceId": device_id,
-        "capturedAt": datetime.fromtimestamp(captured_at, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "wideJpegBase64": jpeg_base64(enhance_wide_snapshot(image), quality=92, subsampling=0) if image is not None else None,
-        "driverJpegBase64": jpeg_base64(driver) if index == 0 and driver is not None else None,
+        "capturedAt": (datetime.fromtimestamp(captured_at, timezone.utc).isoformat(timespec="milliseconds") if parking else
+                       datetime.fromtimestamp(captured_at, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")),
+        "wideJpegBase64": (base64.b64encode(image).decode("ascii") if phase == "approach" else
+                           jpeg_base64(enhance_wide_snapshot(image), quality=92, subsampling=0) if image is not None else None),
+        "driverJpegBase64": jpeg_base64(driver) if parked_index == 0 and driver is not None else None,
       }
+      if parking is not None:
+        payload["parking"] = {**parking, "index": index, "phase": phase}
       if not guard.allowed():
         return False
       post_json(config, "/api/snapshot", payload)
@@ -2090,6 +2106,7 @@ def capture_offroad_images():
 
 
 def main():
+  from openpilot.system.wayon_parking import ApproachSession
   set_core_affinity([0, 1, 2, 3])
   params = Params()
   sm = messaging.SubMaster(TELEMETRY_SERVICES)
@@ -2100,6 +2117,8 @@ def main():
   next_route_summary = 0.0
   next_snapshot = 0.0
   parking_burst_pending = True
+  parking_approach = ApproachSession()
+  pending_approach = []
   next_impact_upload = 0.0
   next_vehicle_event_upload = 0.0
   ambient_delivery = AmbientCommandDelivery()
@@ -2118,6 +2137,8 @@ def main():
       config = read_config()
       next_config_load = now + CONFIG_RELOAD_INTERVAL
       if config is None:
+        parking_approach.clear()
+        pending_approach = []
         time.sleep(5.0)
         continue
 
@@ -2132,6 +2153,19 @@ def main():
       continue
 
     started = bool(sm["deviceState"].started)
+    approach_enabled = (config.get("parking_approach_enabled", False)
+                        and config.get("parking_multiframe_enabled", False)
+                        and config.get("snapshots_enabled", True))
+    if not approach_enabled:
+      parking_approach.clear()
+      pending_approach = []
+    elif started:
+      if not previous_started:
+        parking_approach.clear()
+        pending_approach = []
+      parking_approach.sample(sm)
+    elif previous_started:
+      pending_approach = parking_approach.take()
 
     if now >= next_impact_upload:
       try:
@@ -2210,8 +2244,10 @@ def main():
         next_route_summary = time.monotonic() + max(route_summary_interval, route_backoff.failure_delay())
 
     if not started and config.get("snapshots_enabled", True) and now >= next_snapshot:
-      if upload_offroad_snapshot(config, device_id, multiframe=parking_burst_pending):
+      if upload_offroad_snapshot(config, device_id, multiframe=parking_burst_pending,
+                                 approach_frames=pending_approach):
         parking_burst_pending = False
+        pending_approach = []
       next_snapshot = now + max(300.0, snapshot_interval)
 
     previous_started = started
