@@ -217,6 +217,9 @@ def test_new_ui_is_display_only_and_existing_overlay_owners_remain():
                                                    (80, 80, 120, 'complete'), (160, 80, 70, 'complete')])
 def test_selected_deceleration_source_labels(scene, source, label, cap, final, selected, phase):
   set_deceleration(scene, source, cap, final, selected)
+  if source in ('vturn', 'route') and cap >= selected:
+    assert scene.badge.selected_deceleration(scene.sm, 100) is None
+    return
   assert scene.badge.selected_deceleration(scene.sm, 100).label == label
   assert scene.badge.selected_deceleration(scene.sm, 100).phase == phase
 
@@ -340,7 +343,21 @@ def test_unknown_curve_endpoint_can_blink_but_cannot_invent_completion(scene):
   for _ in range(20):
     assert s.badge.selected_deceleration(s.sm, 100).phase == 'decelerating'
   set_deceleration(s, source='vturn', cap=70, final=0, selected=60)
-  assert s.badge.selected_deceleration(s.sm, 100).phase == 'waiting'
+  assert s.badge.selected_deceleration(s.sm, 100) is None
+
+
+@pytest.mark.parametrize('source', ['vturn', 'route'])
+def test_unapplied_curve_noise_never_draws_a_ready_badge(scene, source):
+  s = scene
+  for tick in range(200):
+    # Current endpoint alternates with unknown while a prior lower cap is held.
+    set_deceleration(s, source=source, cap=175.442, final=175.442 if tick % 5 == 0 else 0, selected=100)
+    s.now[0] = 10 + tick * .05
+    s.calls.clear()
+    s.renderer.draw(s.rect, s.hud)
+    assert s.badge.selected_deceleration(s.sm, 100) is None
+    assert not texts(s)
+    assert not any(call[0] == 'draw_rectangle_rounded' for call in s.calls)
 
 
 @pytest.mark.parametrize('condition', ['unseen', 'expired', 'future', 'invalid', 'dead', 'old_session',
@@ -374,7 +391,7 @@ def test_badge_hides_missing_expired_and_neutral_navigation(scene, condition):
   assert s.badge.selected_deceleration(s.sm, 100) is None
 
 
-@pytest.mark.parametrize('source,label', [('cam', 'CAM'), ('atc', 'TURN')])
+@pytest.mark.parametrize('source,label', [('cam', 'CAM'), ('atc', 'TURN'), ('vturn', 'VTURN'), ('route', 'ROUTE')])
 def test_badge_blinks_orange_white_at_one_hz_keeps_dark_text_and_does_not_move(scene, source, label):
   s = scene
   set_deceleration(s, source=source)
@@ -424,7 +441,7 @@ def test_curve_green_requires_stable_completion_and_lost_endpoint_clears_immedia
     color = tuple(next(call for call in s.calls if call[0] == 'draw_rectangle_rounded')[-1])
     assert (color == badge.GREEN) == green
     if phase == 'complete' and not green:
-      assert color == badge.WHITE
+      assert color == badge.ORANGE
   s.calls.clear()
   badge.draw(s.rect, s.hud._font_semi_bold, None, 10.7)
   assert not s.calls and badge._active_state is None

@@ -42,7 +42,7 @@ class DecelerationBadge:
     # Live curve geometry can alternate at entry/exit. Confirm green briefly;
     # invalid/overridden/disengaged inputs still clear it immediately.
     if phase == 'complete' and source in ('route', 'vturn') and now - self._active_since < 0.3:
-      phase = 'waiting'
+      phase = 'decelerating'
     color = self.GREEN if phase == 'complete' else self.WHITE
     if phase == 'decelerating' and (now - self._active_since) % self.PERIOD < 0.6:
       color = self.ORANGE

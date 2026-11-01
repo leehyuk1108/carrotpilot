@@ -62,6 +62,12 @@ def deceleration_state(car, selfdrive, control, plan, carrot) -> DecelerationSta
     return (not overridden and source == selected_source and desired < selected and
             abs(cap - desired) < 1.01 and abs(applied_target - desired) <= 1.0)
 
+  # Curvature is calculated continuously; show curves only while their cap is applied.
+  # Filter before selection so an unapplied curve cannot mask a pending camera.
+  candidates = [candidate for candidate in candidates if candidate[0] not in ('vturn', 'route') or is_applied(candidate)]
+  if not candidates:
+    return None
+
   def priority(candidate):
     _, cap, final, distance = candidate
     # A satisfied curve/road cap must not hide a pending camera/turn slowdown.

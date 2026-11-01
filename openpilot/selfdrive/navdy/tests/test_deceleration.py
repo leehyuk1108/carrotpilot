@@ -32,9 +32,53 @@ def test_every_current_reason_shares_c4_verdict(source, cap, final, selected, ph
   data = inputs(source, cap, final, selected)
   shared = deceleration_state(data['car_state'], data['selfdrive_state'], data['car_control'],
                               data['longitudinal_plan'], data['carrot_man'])
-  assert shared.phase == phase
   payload = payload_from_messages(**data)
+  if source in ('vturn', 'route') and cap >= selected:
+    assert shared is None
+    assert payload['decel'] == 0
+    return
+  assert shared.phase == phase
   assert payload['decel'] == SOURCE_IDS[source] * 4 + PHASE_IDS[shared.phase]
+
+
+@pytest.mark.parametrize('source', ['vturn', 'route', 'vturn:c', 'route:n'])
+@pytest.mark.parametrize('cap,final,selected', [(175.442, 0, 100), (175.442, 175.442, 100),
+                                              (120, 80, 120), (250, 80, 120), (100, 80, 70)])
+def test_unapplied_curve_is_hidden_without_mutating_messages(source, cap, final, selected):
+  data = inputs(source, cap, final, selected)
+  before = copy.deepcopy(data)
+  assert payload_from_messages(**data)['decel'] == 0
+  assert data == before
+
+
+@pytest.mark.parametrize('source', ['vturn', 'route'])
+@pytest.mark.parametrize('fault', ['gas', 'brake', 'other_source', 'plan_mismatch', 'cap_mismatch'])
+def test_curve_only_visible_while_its_limit_is_applied(source, fault):
+  data = inputs(source)
+  assert payload_from_messages(**data)['decel'] == SOURCE_IDS[source] * 4 + 2
+  if fault in ('gas', 'brake'):
+    setattr(data['car_state'], fault + 'Pressed', True)
+  elif fault == 'other_source':
+    data['carrot_man'].desiredSource = 'cam'
+  elif fault == 'plan_mismatch':
+    data['longitudinal_plan'].cruiseTarget = 90
+  else:
+    data['carrot_man'].decelerationCandidates[0].speedKph = 105
+  assert payload_from_messages(**data)['decel'] == 0
+
+
+@pytest.mark.parametrize('source', ['vturn', 'route'])
+def test_hidden_curve_cannot_mask_other_pending_information(source):
+  data = inputs(source, cap=100, final=50)
+  data['longitudinal_plan'].cruiseTarget = 120  # Curve not yet applied by the planner.
+  data['carrot_man'].decelerationCandidates.append(NS(source='cam', speedKph=250, targetKph=80, distanceM=300))
+  assert payload_from_messages(**data)['decel'] == SOURCE_IDS['cam'] * 4 + 1
+
+
+@pytest.mark.parametrize('source', ['vturn', 'route'])
+def test_curve_application_completion_and_release(source):
+  for cap, final, phase in [(160, 80, 0), (110, 80, 2), (90, 0, 2), (80, 80, 3), (160, 160, 0)]:
+    assert payload_from_messages(**inputs(source, cap, final))['decel'] == (SOURCE_IDS[source] * 4 + phase if phase else 0)
 
 
 def test_wire_ids_are_stable_and_exclude_unproduced_legacy_reasons():

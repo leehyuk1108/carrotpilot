@@ -1,5 +1,8 @@
 # C4 deceleration badge phases
 
+VTURN/ROUTE preparation and unused-completion behavior below is superseded by
+`curve_applied_only_20261030.md`. Other reasons retain the original phases.
+
 ## Scope
 
 Source changes on the WIP-FR publishing checkout, based on

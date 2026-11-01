@@ -1,5 +1,9 @@
 # Navdy Deceleration Badge
 
+VTURN/ROUTE preparation and unused-completion behavior below is superseded by
+the sender filter in `curve_applied_only_20261030.md`. The original APK's 300 ms
+white completion confirmation is separate from hiding unapplied curves.
+
 ## Contract
 
 The Navdy badge sits to the right of ACC set speed. It uses the same pure
