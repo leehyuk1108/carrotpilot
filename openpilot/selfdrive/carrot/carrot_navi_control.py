@@ -59,6 +59,7 @@ class NaviSpeedControl:
   section_speed_limit_kph: int = 0
   section_remaining_distance_m: int = 0
   received_mono_time_ns: int = 0
+  section_session_id: str = ""
 
 
 @dataclass(frozen=True)

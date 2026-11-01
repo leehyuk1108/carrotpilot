@@ -231,6 +231,9 @@ class CarrotServ:
     self.carrot_navi_off_route = False
     self.carrot_navi_traffic_active = False
     self.carrot_navi_control = None
+    self.navdy_section_limit = 0
+    self.navdy_section_distance = 0
+    self._navdy_section_hazard = None
 
     self.debugText = ""
 
@@ -932,6 +935,8 @@ class CarrotServ:
 
   def _reset_carrot_navi_sequences(self, session_id):
     self.rear_camera_events = []
+    self.navdy_section_limit = self.navdy_section_distance = 0
+    self._navdy_section_hazard = None
     self.model_guidance_current = self.model_guidance_next = None
     self.carrot_navi_session_id = session_id
     self.carrot_navi_speed_sequence = -1
@@ -985,14 +990,38 @@ class CarrotServ:
     self.szPosRoadName = ""
     self._clear_carrot_navi_traffic()
 
+  def _apply_navdy_section(self, speed, preserve_distance):
+    hazard = ((speed.section_session_id, speed.section_speed_limit_kph, speed.section_remaining_distance_m)
+              if speed.section_active else None)
+    if hazard is None:
+      self.navdy_section_limit = self.navdy_section_distance = 0
+    else:
+      self.navdy_section_limit = speed.section_speed_limit_kph
+      if not preserve_distance or hazard != getattr(self, '_navdy_section_hazard', None):
+        self.navdy_section_distance = speed.section_remaining_distance_m
+    self._navdy_section_hazard = hazard
+
+  def _navdy_section_speed(self, delta_dist):
+    self.navdy_section_distance = max(0, getattr(self, 'navdy_section_distance', 0) - max(0, delta_dist))
+    if (self.accepts_navigation(NAVI_SOURCE_NAVDY) and self.external_navigation_active
+        and self.active_carrot > 0 and not self.carrot_navi_off_route
+        and self.autoNaviSpeedCtrlMode > 0 and self.navdy_section_distance > 0):
+      limit = getattr(self, 'navdy_section_limit', 0) * self.autoNaviSpeedSafetyFactor
+      if limit > 0:
+        return limit
+    return 250.0
+
   def _apply_carrot_navi_speed(self, navi: CarrotNaviControl, *, preserve_navdy_distance=False):
     speed = navi.speed
+    navdy_selected = self.accepts_navigation(NAVI_SOURCE_NAVDY)
+    if navdy_selected:
+      self._apply_navdy_section(speed, preserve_navdy_distance)
     previous_distance = self.xSpdDist
     self.carrot_navi_road_limit_valid = speed.road_limit_kph is not None
     if speed.road_limit_kph is not None:
       self.nRoadLimitSpeed = speed.road_limit_kph
 
-    if speed.section_active:
+    if speed.section_active and not navdy_selected:
       self.nSdiType = 4
       self.nSdiSpeedLimit = speed.section_speed_limit_kph
       self.nSdiDist = speed.section_remaining_distance_m
@@ -1042,7 +1071,7 @@ class CarrotServ:
           hazard = ("secondary", self.nSdiPlusType, self.nSdiPlusSpeedLimit, self.nSdiPlusDist,
                     self.nSdiPlusBlockType, self.nSdiPlusBlockSpeed, self.nSdiPlusBlockDist)
         else:
-          hazard = ("primary", speed.section_active, self.nSdiType, self.nSdiSpeedLimit, self.nSdiDist,
+          hazard = ("primary", self.nSdiType, self.nSdiSpeedLimit, self.nSdiDist,
                     self.nSdiSection, self.nSdiBlockType, self.nSdiBlockSpeed, self.nSdiBlockDist)
         hazard = (hazard, self.xSpdType, self.xSpdLimit)
       if preserve_navdy_distance and hazard is not None and hazard == getattr(self, "_navdy_speed_hazard", None):
@@ -1538,6 +1567,10 @@ class CarrotServ:
     sdi_speed = min(sdi_speed, rear_camera_speed)
     if rear_camera_holding:
       self.active_carrot = 3
+    section_speed = self._navdy_section_speed(delta_dist)
+    section_selected = section_speed < 250 and section_speed <= sdi_speed
+    if section_selected:
+      self.active_carrot = 4
     sdi_source = ("cam" if rear_camera_holding else "bump" if self.xSpdType == 22 else "section" if self.xSpdType == 4 else
                   "police" if self.xSpdType == 100 else
                   "waze" if self.xSpdType == 101 else "cam")
@@ -1551,6 +1584,8 @@ class CarrotServ:
       (vehicle_section_zone_speed, "hda_section"),
       (limit_speed, "road"),
     ]
+    if section_speed < 250:
+      speed_n_sources.insert(0, (section_speed, "section"))
     if self.turnSpeedControlMode in [1,2]:
       speed_n_sources.append((max(abs(vturn_speed), self.autoCurveSpeedLowerLimit), "vturn"))
 
@@ -1572,6 +1607,8 @@ class CarrotServ:
         display_targets['atc2'] = atc_speed_next
     if legacy_sdi_active or rear_camera_holding:
       display_targets[sdi_source] = rear_camera_speed if rear_camera_holding else self.xSpdLimit
+    if section_speed < 250:
+      display_targets['section'] = section_speed
     if vehicle_speed_camera_active:
       display_targets['hda'] = CS.speedLimit * self.autoNaviSpeedSafetyFactor
     if vehicle_bump_active:
@@ -1586,6 +1623,8 @@ class CarrotServ:
     display_targets['route'] = max(route_target * self.mapTurnSpeedFactor, self.autoCurveSpeedLowerLimit) if route_target > 0 else 0.0
     display_distances = {'atc': self.xDistToTurn, 'atc2': self.xDistToTurnNext,
                          sdi_source: rear_camera_remaining if rear_camera_holding else max(0.0, self.xSpdDist)}
+    if section_speed < 250:
+      display_distances['section'] = self.navdy_section_distance
     if CS is not None:
       display_distances.update(hda=CS.speedLimitDistance, hda_bump=CS.speedBumpDistance)
     display_candidates = deceleration_candidates(speed_n_sources, display_targets, display_distances)
@@ -1604,7 +1643,7 @@ class CarrotServ:
     speed_countdown_rearmed = False
     turn_countdown_rearmed = False
     if self.autoNaviCountDownMode > 0:
-      speed_countdown_distance = self._speed_countdown_distance(CS)
+      speed_countdown_distance = self.navdy_section_distance if section_selected else self._speed_countdown_distance(CS)
       left_spd_sec, self.speed_countdown_distance_last, speed_countdown_rearmed = self._countdown_channel(
         speed_countdown_distance, self.speed_countdown_distance_last, self.left_spd_sec, v_ego,
       )
@@ -1637,9 +1676,9 @@ class CarrotServ:
       self.carrot_navi_active and self.carrot_navi_has_control if navdy_selected else self.external_navigation_active)
     msg.carrotMan.routeTrafficTotalMeters = self.route_traffic_total
     msg.carrotMan.routeTrafficSegments = [{'endM': end, 'status': status} for end, status in self.route_traffic_segments]
-    msg.carrotMan.xSpdType = int(self.xSpdType)
-    msg.carrotMan.xSpdLimit = int(self.xSpdLimit)
-    msg.carrotMan.xSpdDist = int(self.xSpdDist)
+    msg.carrotMan.xSpdType = 4 if section_selected else int(self.xSpdType)
+    msg.carrotMan.xSpdLimit = int(section_speed if section_selected else self.xSpdLimit)
+    msg.carrotMan.xSpdDist = int(self.navdy_section_distance if section_selected else self.xSpdDist)
     msg.carrotMan.xSpdCountDown = int(left_spd_sec)
     msg.carrotMan.xTurnInfo = int(self.xTurnInfo)
     msg.carrotMan.xDistToTurn = int(self.xDistToTurn)
@@ -1672,7 +1711,7 @@ class CarrotServ:
 
     msg.carrotMan.nGoPosDist = self.nGoPosDist
     msg.carrotMan.nGoPosTime = self.nGoPosTime
-    description_type = 22 if self.xSpdType == 22 else self.nSdiType
+    description_type = 4 if section_selected else 22 if self.xSpdType == 22 else self.nSdiType
     msg.carrotMan.szSdiDescr = self._get_sdi_descr(-1 if description_type == 0 and self.nSdiDist == 0 else description_type)
     if rear_camera_holding and source == "cam":
       label = {"ko": "후면단속 속도 유지", "en": "Rear camera speed hold", "zh": "后向测速限速保持"}.get(self.lang, "Rear camera speed hold")

@@ -14,6 +14,7 @@ from openpilot.selfdrive.carrot.carrot_navi_control import (
 )
 from openpilot.selfdrive.navdy.model_navigation import ModelNavigationTracker
 from openpilot.selfdrive.navdy.feedback import is_no_observation
+from openpilot.selfdrive.navdy.section import SectionTracker
 
 FEEDBACK_PATH = Path('/dev/shm/navdy-feedback.json')
 STATUS_PATH = Path('/dev/shm/navdy-status.json')
@@ -67,6 +68,7 @@ class FeedbackTracker:
     self.extended = False
     self.speed_signature = None
     self.speed_sequence = 0
+    self.section = SectionTracker()
 
   def _component(self, name, value, received_at):
     if value is None:
@@ -100,10 +102,19 @@ class FeedbackTracker:
     if (not isinstance(packet, dict) or is_no_observation(packet) or number(received_at, 0, now) is None
         or now - received_at > LINK_TTL or received_at <= self.received_at):
       return False
+    if received_at - self.received_at >= LINK_TTL:
+      self.section.clear()
     self.received_at = received_at
     self.extended = 'navigationFeedback' in packet
     self._component('road', packet.get('roadPreview'), received_at)
+    old_session = self.sequences.get('guidance', ('',))[0]
     self._component('guidance', packet.get('navigationFeedback'), received_at)
+    if self.sequences.get('guidance', ('',))[0] != old_session:
+      self.section.clear()
+      self.section.supported = False
+    raw_guidance, captured, deadline = self.components.get('guidance', (None, received_at, received_at))
+    self.section.accept(raw_guidance.get('guidance') if raw_guidance else None,
+                        received_at - captured, deadline, received_at)
     speed = packet.get('cameraSpeedKph')
     distance = camera_distance(packet.get('cameraDistance'))
     kind_value = packet.get('cameraType')
@@ -129,6 +140,7 @@ class FeedbackTracker:
 
   def snapshot(self, now):
     if not 0 <= now - self.received_at < LINK_TTL:
+      self.section.clear()
       return None
     road, _ = self._fresh('road', now)
     raw_guidance, age = self._fresh('guidance', now)
@@ -139,6 +151,13 @@ class FeedbackTracker:
     if type(road_limit) is not int or not 10 <= road_limit <= 200 or road_limit % 10:
       road_limit = None
     camera = self.camera
+    section = self.section.snapshot(now)
+    if not guidance:
+      self.section.clear()
+      section = None
+    # An upgraded source owns section validity, including its explicit clear.
+    if self.section.supported and camera is not None and camera[0] == 4:
+      camera = None
     revision = self.revisions['guidance']
     sdi = guidance.get('sdi')
     bump_distance = None
@@ -150,7 +169,7 @@ class FeedbackTracker:
     if not bump_selected and guidance and road and road.get('guidance') is True:
       bump_distance = number(road.get('bumpDistanceM'), 1, 2000)
     # A route/road heartbeat must not rewind Carrot's ego-motion distance estimate.
-    signature = (road_limit, camera, bump_distance)
+    signature = (road_limit, camera, bump_distance, section)
     if signature != self.speed_signature:
       self.speed_signature = signature
       self.speed_sequence += 1
@@ -177,11 +196,15 @@ class FeedbackTracker:
       if lamp and remaining > 0:
         traffic = NaviTrafficControl(True, revision, True, int(number(guidance.get('primaryDistanceMeters'), 0, 100000) or 0),
                                      'navdy', lamp, remaining)
-    speed = NaviSpeedControl(road_limit is not None or camera is not None or bump_distance is not None, self.speed_sequence, road_limit,
+    speed = NaviSpeedControl(road_limit is not None or camera is not None or bump_distance is not None or section is not None,
+                            self.speed_sequence, road_limit,
                             sdi_present=camera is not None, sdi_type=camera[0] if camera else -1,
                             sdi_speed_limit_kph=camera[1] if camera else 0, sdi_distance_m=camera[2] if camera else 0,
                             secondary_sdi_present=bump_distance is not None, secondary_sdi_type=22 if bump_distance is not None else -1,
-                            secondary_sdi_distance_m=int(bump_distance or 0))
+                            secondary_sdi_distance_m=int(bump_distance or 0),
+                            section_active=section is not None, section_session_id=section[0] if section else '',
+                            section_speed_limit_kph=section[1] if section else 0,
+                            section_remaining_distance_m=section[2] if section else 0)
     current, upcoming = turn('primary'), turn('secondary')
     traffic_total, traffic_segments = route_traffic(guidance)
     route = NaviRouteControl(bool(guidance), revision,
