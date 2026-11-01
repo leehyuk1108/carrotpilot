@@ -151,6 +151,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"NetworkAddress", {CLEAR_ON_MANAGER_START, STRING}},
     {"ScreenRecord", {CLEAR_ON_MANAGER_START | CLEAR_ON_OFFROAD_TRANSITION, BOOL} },
     {"CarrotNaviSource", {PERSISTENT, INT, "0"}},
+    {"NavdyConnectionMode", {PERSISTENT, INT, "0"}},
     {"CarrotNaviDebug", {CLEAR_ON_MANAGER_START, STRING} },
     {"CarrotNaviImage", {CLEAR_ON_MANAGER_START, STRING} },
     {"CarrotNaviWebBootstrapRequest", {CLEAR_ON_MANAGER_START, STRING} },

@@ -106,6 +106,20 @@ test("a select announces that it opens a dialog", () => {
   assert.equal(refs.selectInput.getAttribute("aria-label"), "모델 주행속도");
 });
 
+test("Navdy connection mode uses the existing select control in every locale", () => {
+  const catalog = JSON.parse(readFileSync(new URL("../../../carrot_settings.json", import.meta.url), "utf8"));
+  const setting = catalog.params.find((item) => item.name === "NavdyConnectionMode");
+  assert.equal(setting.control, "select");
+  for (const field of ["title", "etitle", "ctitle"]) {
+    const refs = build(setting.control, { label: setting[field] });
+    assert.equal(refs.selectInput.type, "button");
+    assert.equal(refs.selectInput.getAttribute("aria-haspopup"), "dialog");
+    assert.equal(refs.selectInput.getAttribute("aria-label"), setting[field]);
+    assert.equal(refs.toggleInput, null);
+    assert.equal(refs.sliderInput, null);
+  }
+});
+
 // The value sits between the buttons, which the stylesheet's grid relies on.
 test("a stepper places the value between the two arrows", () => {
   const refs = build("stepper", { previousLabel: "이전 값", nextLabel: "다음 값" });

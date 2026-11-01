@@ -521,6 +521,7 @@ def test_reader_real_null_model_is_not_discard(tmp_path):
   write_feedback(path, model_packet(), 10.)
   reader = NavigationReader(path)
   assert reader.model_read(10.) is not None
-  path.write_text(json.dumps({'receivedAt': 10.2, 'feedback': {**packet(), 'modelNavigation': None}}))
+  # Match the real writer's inode replacement even on coarse-timestamp filesystems.
+  bridge.atomic_json(path, {'receivedAt': 10.2, 'feedback': {**packet(), 'modelNavigation': None}})
   assert reader.model_read(10.2) is None
   assert reader.model_tracker.received == 10.2

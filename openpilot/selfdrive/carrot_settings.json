@@ -248,6 +248,7 @@
                 "VehicleSpeedCameraControlMode",
                 "VehicleSpeedCameraDistanceTime",
                 "CarrotNaviSource",
+                "NavdyConnectionMode",
                 "AutoNaviSpeedCtrlMode",
                 "AutoNaviSpeedCtrlEnd",
                 "AutoNaviRearCameraHoldDistance",
@@ -3596,17 +3597,51 @@
       "group": "감속제어",
       "name": "CarrotNaviSource",
       "title": "내비 입력 선택",
-      "descr": "0: 기존 네트워크\n1: Navdy USB (직접 연결 우선, 등록된 Jetson 경유 지원)\n콤마 재부팅 후 적용됩니다. Navdy 선택 시 네트워크 내비 안내는 사용하지 않습니다. 회전 안내·신호등은 Navdy 피드백 확장 APK가 필요합니다. 음악 전송·시간 동기화는 유지됩니다.",
+      "descr": "0: 기존 네트워크\n1: Navdy (Navdy 연결 방식 설정에 따른 USB 또는 Bluetooth)\n콤마 재부팅 후 적용됩니다. Navdy 선택 시 네트워크 내비 안내는 사용하지 않습니다. 회전 안내·신호등은 Navdy 피드백 확장 APK가 필요합니다. 음악 전송·시간 동기화는 유지됩니다.",
       "egroup": "SPEED",
       "etitle": "Navigation Input",
-      "edescr": "0: Network\n1: Navdy USB, direct first or via a paired Jetson\nRestart comma to apply. Network guidance is excluded in Navdy mode. Turns and traffic lights require the extended Navdy feedback APK. Music and time sync remain available.",
+      "edescr": "0: Network\n1: Navdy (USB or Bluetooth according to Navdy Connection Mode)\nRestart comma to apply. Network guidance is excluded in Navdy mode. Turns and traffic lights require the extended Navdy feedback APK. Music and time sync remain available.",
       "cgroup": "速度控制",
       "ctitle": "导航输入选择",
-      "cdescr": "0: 网络\n1: Navdy USB，优先直连或通过已配对的 Jetson\n重启后生效。Navdy 模式不接收网络导航。转向和信号灯需要更新 Navdy APK。音乐和时间同步不受影响。",
+      "cdescr": "0: 网络\n1: Navdy（根据 Navdy 连接方式设置使用 USB 或 Bluetooth）\n重启后生效。Navdy 模式不接收网络导航。转向和信号灯需要更新 Navdy APK。音乐和时间同步不受影响。",
       "min": 0,
       "max": 1,
       "default": 0,
       "unit": 1
+    },
+    {
+      "group": "감속제어",
+      "name": "NavdyConnectionMode",
+      "title": "Navdy 연결 방식",
+      "descr": "0: 기존 설정 유지 (자동 또는 Bluetooth 전용 설정 유지)\n1: 유선 USB만 사용 (콤마 직접 연결 또는 등록된 Jetson 경유, 콤마 Bluetooth로 대체 연결하지 않음)\n2: 무선 Bluetooth만 사용 (USB 진단 기능은 유지)\n변경 시 연결이 잠시 끊길 수 있으므로 주차 중 변경을 권장합니다. 설정은 약 5초 주기로 확인하며, 진행 중인 연결 시도에 따라 적용이 늦어질 수 있습니다. 내비 입력 선택은 바꾸지 않습니다.",
+      "egroup": "SPEED",
+      "etitle": "Navdy Connection Mode",
+      "edescr": "0: Keep existing configuration (preserves auto or Bluetooth-only configuration)\n1: Wired USB only (direct comma connection or via a paired Jetson; no comma Bluetooth fallback)\n2: Wireless Bluetooth only (USB diagnostics remain available)\nChanging modes may briefly interrupt the connection; change this while parked. The setting is checked about every 5 seconds, but an in-progress connection attempt may delay application. Navigation Input is unchanged.",
+      "cgroup": "速度控制",
+      "ctitle": "Navdy 连接方式",
+      "cdescr": "0: 保留现有配置（自动或仅 Bluetooth 配置不变）\n1: 仅有线 USB（直连 comma 或通过已配对的 Jetson，不回退到 comma Bluetooth）\n2: 仅无线 Bluetooth（仍可使用 USB 诊断）\n切换时连接可能短暂中断，建议停车后更改。约每 5 秒检查设置，正在进行的连接尝试可能延迟应用。不改变导航输入选择。",
+      "min": 0,
+      "max": 2,
+      "default": 0,
+      "unit": 1,
+      "control": "select",
+      "options": {
+        "ko": [
+          "기존 설정",
+          "유선 USB",
+          "무선 Bluetooth"
+        ],
+        "en": [
+          "Existing configuration",
+          "Wired USB",
+          "Wireless Bluetooth"
+        ],
+        "zh": [
+          "现有配置",
+          "有线 USB",
+          "无线 Bluetooth"
+        ]
+      }
     },
     {
       "group": "감속제어",

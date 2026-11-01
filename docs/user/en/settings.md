@@ -21,6 +21,14 @@ An accelerometer-detected suspected horizontal impact of at least 1.5g displays 
 
 ## Connecting to Carrot Web
 
+**Speed & Decel > Speed Camera > Navdy Connection Mode** selects the existing
+configuration, wired USB, or wireless Bluetooth. Wired mode uses direct Comma USB
+or a paired Jetson's USB relay, without Bluetooth fallback. Wireless mode leaves
+USB available for diagnostics. Phone reconnection, ambient BLE and Navigation
+Input are unchanged. Change modes while parked because navigation briefly stops
+during handover. The first update needs a native build and fresh manager; later
+changes are checked every five seconds plus any in-progress connection attempt.
+
 1. Connect the comma device and your phone or computer to the same network.
 2. Open `http://DEVICE-IP:7000` in a browser.
 3. Select **Settings** from the top menu.

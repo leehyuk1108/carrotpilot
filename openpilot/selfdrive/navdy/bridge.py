@@ -24,6 +24,7 @@ from openpilot.selfdrive.navdy.diagnostics import LinkDiagnostics, public_error
 from openpilot.selfdrive.navdy.feedback import is_no_observation
 from openpilot.selfdrive.navdy.journal import CONNECT_TIMINGS, LocalJournal, sanitize
 from openpilot.selfdrive.navdy.vehicles import VehicleOverlay
+from openpilot.selfdrive.navdy.policy import read_transport_mode, transport_policy
 
 MAINTENANCE_STATE = Path('/data/hl-jetson')
 JETSON_PYTHON = '/opt/carrot-jetlink/venv/bin/python'
@@ -230,6 +231,9 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
     bluetooth_connect = None
     peer = None
     bluetooth_only = False
+    legacy_bluetooth_only = False
+    policy = None
+    connection_mode = 0
     config_error = ''
     config_checked = -math.inf
     usb_probe = UsbProbe(AdbTransport)
@@ -254,17 +258,23 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
         sequence += 1
         if tick - config_checked >= 5:
           config_checked = tick
-          old_policy = bluetooth_only
+          old_policy = policy
           try:
-            peer, bluetooth_only = configured_connection(bluetooth_config)
+            peer, legacy_bluetooth_only = configured_connection(bluetooth_config)
             config_error = ''
           except (OSError, ValueError) as error:
             peer, config_error = None, str(error)[:160]
-          if transport is not None and (old_policy != bluetooth_only or
-                                        (transport_name == 'bluetooth' and peer != transport.peer)):
+          try:
+            connection_mode = read_transport_mode()
+            policy = transport_policy(connection_mode, legacy_bluetooth_only)
+          except (OSError, ValueError) as error:
+            connection_mode, policy, config_error = None, 'invalid', str(error)[:160]
+          bluetooth_only = policy == 'bluetooth_only'
+          if old_policy != policy or (transport is not None and transport_name == 'bluetooth' and peer != transport.peer):
             diagnostics.record('policy_changed', transport=transport_name, bluetoothOnly=bluetooth_only)
-            transport.close()
-            diagnostics.record('transport_closed', transport=transport_name)
+            if transport is not None:
+              transport.close()
+              diagnostics.record('transport_closed', transport=transport_name)
             transport = None
             bluetooth_reconnect.reset_session()
             usb_probe.close()
@@ -274,6 +284,10 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
             model_navigation.clear('model_link_changed')
             model_route_cache.update(model_navigation)
             next_attempt, failures, candidate_index = 0.0, 0, 0
+            if old_policy is not None:
+              atomic_json(status, {'updatedAt': time.monotonic(), 'connected': False,
+                                   'transportPolicy': policy, 'connectionMode': connection_mode,
+                                   'reason': 'connection_mode_changed'})
         if not bluetooth_only and transport_name in ('bluetooth', 'jetson') and transport is not None:
           ready = usb_probe.poll(tick)
           if ready is not None:
@@ -304,6 +318,8 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
           if transport is None:
             vehicles.clear()
             bluetooth_reconnect.reset_session()
+            if policy == 'invalid':
+              raise ValueError(config_error)
             transport_name = 'bluetooth' if bluetooth_only else 'usb'
             diagnostics.record('connect_attempt', transport=transport_name)
             try:
@@ -326,9 +342,11 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
               if bluetooth_only:
                 raise
               hosts = jetson_candidates()
-              options = ([('bluetooth', peer)] if peer else [])
+              options = ([('bluetooth', peer)] if peer and policy != 'usb_only' else [])
               options.extend(('jetson', host) for host in hosts)
               if not options:
+                if policy == 'usb_only':
+                  raise ConnectionError('Navdy USB not found; no paired Jetson relay (wired mode)') from None
                 raise ConnectionError(config_error or 'Navdy USB not found; no paired Jetson or enabled Bluetooth peer') from None
               transport_name, target = options[candidate_index % len(options)]
               candidate_index += 1
@@ -432,7 +450,7 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
                                'ambient': {'doorOpen': payload['doorOpen'], 'gmDoorMonitor': doors.gm, 'error': doors.error},
                                'lastDisplayDropout': last_display_dropout,
                                'lastHandover': last_handover, 'wirelessConfigured': peer is not None,
-                               'transportPolicy': 'bluetooth_only' if bluetooth_only else 'usb_first',
+                               'transportPolicy': policy, 'connectionMode': connection_mode,
                                'wireless': getattr(transport, 'last_exchange', None),
                                'bluetoothConnect': bluetooth_connect,
                                'modelNavigation': {'routeReady': bool(model_navigation.points),
@@ -468,7 +486,7 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
           retry_delay = BLUETOOTH_FAST_RETRY if fast_retry else min(10, 2 ** min(failures, 4))
           diagnostics.record('retry_scheduled', transport=transport_name, retryInSeconds=retry_delay, fastRetry=fast_retry)
           atomic_json(status, {'updatedAt': time.monotonic(), 'connected': False, 'transport': transport_name,
-                               'transportPolicy': 'bluetooth_only' if bluetooth_only else 'usb_first',
+                               'transportPolicy': policy, 'connectionMode': connection_mode,
                                'retryInSeconds': retry_delay, 'wirelessConfigured': peer is not None,
                                'bluetoothConnect': bluetooth_connect,
                                'diagnostics': diagnostics.snapshot(),

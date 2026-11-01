@@ -93,6 +93,9 @@ async def api_param_set(request: web.Request) -> web.Response:
   if name == "CarrotNaviSource" and (type(value) not in (int, str) or str(value) not in ("0", "1")):
     return web.json_response({"ok": False, "error": "CarrotNaviSource must be 0 (network) or 1 (Navdy)"}, status=400)
 
+  if name == "NavdyConnectionMode" and (type(value) not in (int, str) or str(value) not in ("0", "1", "2")):
+    return web.json_response({"ok": False, "error": "NavdyConnectionMode must be 0 (existing configuration), 1 (USB), or 2 (Bluetooth)"}, status=400)
+
   try:
     value = validate_vehicle_spec(name, value)
   except ValueError as exc:
