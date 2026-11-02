@@ -497,7 +497,6 @@ def make_pedal_speed_helper(auto_cruise, speed=50, enabled=False):
   ('gas_release', 50, False, 50, 1),
   ('gas_signal', 50, False, 50, -1),
   ('gas_tap_off', 90, False, 90, 1),
-  ('gas_tap_on', 50, True, 90, 0),
 ])
 def test_pedal_release_speed_changes_require_auto_cruise(auto_cruise, scenario, speed, enabled, auto_speed, activation):
   helper, CS, CC = make_pedal_speed_helper(auto_cruise, speed, enabled)
@@ -513,6 +512,67 @@ def test_pedal_release_speed_changes_require_auto_cruise(auto_cruise, scenario, 
 
   assert helper._update_cruise_state(CS, CC, 80) == (auto_speed if auto_cruise else 80)
   assert helper._activate_cruise == (activation if auto_cruise else 0)
+
+
+@pytest.mark.parametrize('auto_cruise', [0, 1, 2, 3])
+@pytest.mark.parametrize('set_speed,step,expected', [(80, 10, 90), (85, 10, 90), (90, 10, 100), (80, 5, 85)])
+def test_engaged_gas_tap_changes_speed_without_automatic_activation(auto_cruise, set_speed, step, expected):
+  helper, CS, CC = make_pedal_speed_helper(auto_cruise, 50, True)
+  helper._cruise_speed_unit = step
+  CS.gasPressed, CS.gas = True, 0.1
+  for _ in range(20):
+    helper._prepare_brake_gas(CS, CC)
+    assert helper._update_cruise_state(CS, CC, set_speed) == set_speed
+
+  CS.gasPressed, CS.gas = False, 0
+  helper._prepare_brake_gas(CS, CC)
+  assert helper._gas_tok
+  assert helper._update_cruise_state(CS, CC, set_speed) == expected
+  assert helper._activate_cruise == 0
+
+  for _ in range(3):
+    helper._prepare_brake_gas(CS, CC)
+    assert not helper._gas_tok
+    assert helper._update_cruise_state(CS, CC, expected) == expected
+    assert helper._activate_cruise == 0
+
+
+@pytest.mark.parametrize('pressed_frames', [0, 1, 20, 39, 40, 41, 100])
+def test_engaged_gas_tap_keeps_existing_duration_boundary(pressed_frames):
+  helper, CS, CC = make_pedal_speed_helper(0, 50, True)
+  CS.gasPressed, CS.gas = True, 0.1
+  for _ in range(pressed_frames):
+    helper._prepare_brake_gas(CS, CC)
+    assert helper._update_cruise_state(CS, CC, 80) == 80
+  CS.gasPressed, CS.gas = False, 0
+  helper._prepare_brake_gas(CS, CC)
+  is_tap = 0 < pressed_frames < helper._gas_tok_timer
+  assert helper._gas_tok == is_tap
+  assert helper._update_cruise_state(CS, CC, 80) == (90 if is_tap else 80)
+  assert helper._activate_cruise == 0
+
+
+@pytest.mark.parametrize('auto_cruise', [0, 1, 2, 3])
+@pytest.mark.parametrize('block', ['camera_skip', 'disengage_on_accelerator', 'below_start_speed'])
+def test_engaged_gas_tap_preserves_speed_change_gates(auto_cruise, block):
+  helper, CS, CC = make_pedal_speed_helper(auto_cruise, 50, True)
+  helper.speedcam_gas_tok_consumed = block == 'camera_skip'
+  helper.disengage_on_accelerator = block == 'disengage_on_accelerator'
+  helper.autoGasTokSpeed = 60 if block == 'below_start_speed' else 0
+  helper._gas_pressed_count = 20
+  helper._prepare_brake_gas(CS, CC)
+  assert helper._update_cruise_state(CS, CC, 80) == 80
+  assert helper._activate_cruise == 0
+
+
+def test_gas_tap_does_not_reactivate_or_change_speed_after_disengagement():
+  helper, CS, CC = make_pedal_speed_helper(0, 90, True)
+  helper._gas_pressed_count = 20
+  CC.enabled = helper.enabled_last = False
+  helper._prepare_brake_gas(CS, CC)
+  assert helper._gas_tok
+  assert helper._update_cruise_state(CS, CC, 80) == 80
+  assert helper._activate_cruise == 0
 
 
 @pytest.mark.parametrize('button,expected', [(ButtonType.accelCruise, 80), (ButtonType.decelCruise, 50)])

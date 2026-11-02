@@ -890,7 +890,7 @@ class VCruiseCarrot:
     self._cruise_control(1, -1, "Cruise on (soft hold)", allow_cancel_state=self.soft_hold_on_cancel)
 
   def _update_cruise_state(self, CS, CC, v_cruise_kph):
-    # Disabling automatic activation must also disable its pedal-release speed selection.
+    # Disabling automatic activation also disables its re-engagement speed selection.
     auto_cruise_enabled = self.autoCruiseControl != 0
     if not CC.enabled:
       #self._pause_auto_speed_up = False
@@ -915,7 +915,8 @@ class VCruiseCarrot:
         self._cruise_control(1, -1, "Cruise on (gas tok)")
         if auto_cruise_enabled and self.v_ego_kph_set > v_cruise_kph:
           v_cruise_kph = self.v_ego_kph_set
-      elif auto_cruise_enabled:
+      else:
+        # An engaged gas tap is a manual speed request, not automatic engagement.
         v_cruise_kph = self._v_cruise_desired(CS, v_cruise_kph)
     elif self._gas_pressed_count == -1:
       if 0 < self.d_rel < CS.vEgo * 0.8:
