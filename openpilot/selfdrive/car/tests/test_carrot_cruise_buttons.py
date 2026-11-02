@@ -23,6 +23,7 @@ def make_cruise_helper(button_kph, cruise_button_mode, carrot_cruise_active, cru
   helper._cancel_timer = 0
   helper.autoCruiseControl = 1
   helper.button_cnt = 0
+  helper._resume_button_active = False
   helper.autoCruiseControl_cancel_timer = 0
   helper._cruise_cancel_state = False
   helper._lat_enabled = False
@@ -199,6 +200,108 @@ def make_remote_helper(action, enabled=False):
   CS.canValid = CS.cruiseState.available = True
   CS.gearShifter = 'drive'
   return helper, CS, CC
+
+
+@pytest.mark.parametrize('mode', [0, 1, 2, 3])
+@pytest.mark.parametrize('held_frames', [3, 55, 130])
+@pytest.mark.parametrize('enable_frame', [1, 2, None])
+def test_gm_resume_press_does_not_also_increase_speed(mode, held_frames, enable_frame):
+  from opendbc.car.gm.carstate import CarState
+
+  helper, CS, CC = make_remote_helper(None)
+  helper._cruise_button_mode = mode
+  helper._cruise_speed_unit_basic = 5
+  helper._cruise_speed_table = [80, 90, 100]
+  gm = SimpleNamespace(CP=SimpleNamespace(pcmCruise=False))
+  speed = 80
+
+  for frame in range(held_frames + 1):
+    CS.buttonEvents = ([{'type': 'accelCruise', 'pressed': True}] if frame == 0 else
+                       [{'type': 'accelCruise', 'pressed': False}] if frame == held_frames else [])
+    CS.buttonEnable = CarState.update_button_enable(gm, CS.buttonEvents)
+    CC.enabled = enable_frame is not None and frame >= enable_frame
+    speed = helper._update_cruise_buttons(CS, CC, speed)
+    assert speed == 80, (frame, CS.buttonEnable, CC.enabled)
+
+  # A separate press after engagement still increases the speed normally.
+  CC.enabled = True
+  CS.buttonEvents = [{'type': 'accelCruise', 'pressed': True}]
+  CS.buttonEnable = CarState.update_button_enable(gm, CS.buttonEvents)
+  assert helper._update_cruise_buttons(CS, CC, speed) == 80
+  CS.buttonEvents = [{'type': 'accelCruise', 'pressed': False}]
+  CS.buttonEnable = CarState.update_button_enable(gm, CS.buttonEvents)
+  assert helper._update_cruise_buttons(CS, CC, speed) == (85 if mode == 0 else 90)
+
+
+@pytest.mark.parametrize('initialized,saved,expected', [(True, 0, 80), (True, 95, 95), (False, 0, 70)])
+def test_gm_resume_selects_speed_before_enabled_feedback(monkeypatch, initialized, saved, expected):
+  from opendbc.car.gm.carstate import CarState
+  from openpilot.selfdrive.car import cruise
+  from openpilot.selfdrive.car.tests.test_toyota_pcm_mode0 import MemoryParams, MemoryReader, SubMaster
+
+  monkeypatch.setattr(cruise, 'Params', MemoryParams)
+  monkeypatch.setattr(cruise, 'CommandReader', MemoryReader)
+  CP = car.CarParams(brand='gm', carFingerprint='CHEVROLET_TRAVERSE',
+                    pcmCruise=False, openpilotLongitudinalControl=True)
+  helper = VCruiseCarrot(CP)
+  helper.cruise_state_available_last = True
+  helper.v_cruise_kph = helper.v_cruise_cluster_kph = 80
+  helper._cruise_speed_initialized = initialized
+  helper._v_cruise_kph_at_brake = saved
+  helper._gas_pressed_count = helper._brake_pressed_count = -2
+  CS = car.CarState(canValid=True, gearShifter='drive', vEgo=70 / 3.6, vEgoCluster=70 / 3.6,
+                    cruiseState={'available': True})
+  sm = SubMaster(CS)
+  sm['carControl'].enabled = False
+  gm = SimpleNamespace(CP=CP)
+
+  for frame in range(56):
+    CS.buttonEvents = ([{'type': 'accelCruise', 'pressed': True}] if frame == 0 else
+                       [{'type': 'accelCruise', 'pressed': False}] if frame == 55 else [])
+    CS.buttonEnable = CarState.update_button_enable(gm, CS.buttonEvents)
+    sm['carControl'].enabled = frame > 0
+    helper.update_v_cruise(CS, sm, True)
+    assert helper.v_cruise_kph == expected, frame
+    assert helper.v_cruise_cluster_kph == expected
+    assert helper._v_cruise_kph_at_brake == 0
+    assert helper._cruise_speed_initialized
+
+
+def test_gm_resume_gesture_does_not_reengage_after_intervening_disengagement():
+  helper, CS, CC = make_remote_helper(None)
+  CS.buttonEvents = [{'type': 'accelCruise', 'pressed': True}]
+  CS.buttonEnable = True
+  assert helper._update_cruise_buttons(CS, CC, 80) == 80
+  CS.buttonEvents = []
+  CS.buttonEnable = False
+  CC.enabled = True
+  assert helper._update_cruise_buttons(CS, CC, 80) == 80
+
+  CC.enabled = False
+  helper._cruise_cancel_state = True
+  helper.autoCruiseControl_cancel_timer = 100
+  calls = []
+  helper._cruise_control = lambda *args, **kwargs: calls.append(args)
+  for _ in range(120):
+    assert helper._update_cruise_buttons(CS, CC, 80) == 80
+    assert helper._cruise_cancel_state
+    assert helper.autoCruiseControl_cancel_timer == 100
+  CS.buttonEvents = [{'type': 'accelCruise', 'pressed': False}]
+  assert helper._update_cruise_buttons(CS, CC, 80) == 80
+  assert helper._cruise_cancel_state
+  assert helper.autoCruiseControl_cancel_timer == 100
+  assert calls == []
+
+  # After releasing the resume gesture, an engaged long RES retains its +10 step.
+  CC.enabled = True
+  CS.buttonEvents = [{'type': 'accelCruise', 'pressed': True}]
+  speed = helper._update_cruise_buttons(CS, CC, 80)
+  CS.buttonEvents = []
+  for _ in range(51):
+    speed = helper._update_cruise_buttons(CS, CC, speed)
+  assert speed == 90
+  CS.buttonEvents = [{'type': 'accelCruise', 'pressed': False}]
+  assert helper._update_cruise_buttons(CS, CC, speed) == 90
 
 
 @pytest.mark.parametrize('physical', ['setCruise', 'resumeCruise', 'accelCruise', 'decelCruise'])

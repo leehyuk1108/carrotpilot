@@ -178,6 +178,7 @@ class VCruiseCarrot:
     self.button_prev = ButtonType.unknown
     self.button_long_time = 40
     self.button_big_step = False  # VW stage-2 (swipe) press -> immediate +10 (round) on release
+    self._resume_button_active = False
 
     self.is_metric = True
 
@@ -597,7 +598,20 @@ class VCruiseCarrot:
       CS.gearShifter == GearShifter.drive and not CS.buttonEvents and self.button_cnt == 0))
     if getattr(self.bluetooth_commands, 'is_repeat', False) and not CC.enabled:
       remote = None  # Holding a remote must never re-engage after disengagement.
+    resume_on_press = False
+    if any(b.type == ButtonType.accelCruise and b.pressed for b in CS.buttonEvents):
+      self._resume_button_active = not CC.enabled and CS.buttonEnable
+      resume_on_press = self._resume_button_active
     button_kph, button_type, long_pressed = self._prepare_buttons(CS, v_cruise_kph, remote)
+    # GM engages on RES press, before release/hold speed handling sees enabled=True.
+    # Select the resume speed once, then consume the rest of that physical gesture.
+    if self._resume_button_active and remote is None:
+      if resume_on_press:
+        button_type, long_pressed = ButtonType.accelCruise, False
+      elif button_type == ButtonType.accelCruise:
+        button_type = 0
+      if any(b.type == ButtonType.accelCruise and not b.pressed for b in CS.buttonEvents):
+        self._resume_button_active = False
     remote_enable = remote in ('accelCruise', 'decelCruise', 'accelCruiseLong', 'decelCruiseLong') and not CC.enabled
     # SET during soft hold retains its existing cancel behavior.
     if remote == 'decelCruise' and self._soft_hold_active > 0:
