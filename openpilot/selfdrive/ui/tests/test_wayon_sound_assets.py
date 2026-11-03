@@ -165,3 +165,16 @@ def test_urgent_alert_interrupts_one_shot_without_reusing_dm_gain(player):
   np.testing.assert_allclose(obj.get_sound_data(len(samples)), samples)
   obj.update_alert(AudibleAlert.stopStop, 'fcw/permanent')
   np.testing.assert_allclose(obj.get_sound_data(len(samples)), samples * .2)
+
+
+def test_cutin_text_duration_does_not_repeat_its_chime(player):
+  obj, routes, *_ = player
+  assert routes[AudibleAlert.radarCutin][:2] == ('prompt.wav', 1)
+  samples = obj.loaded_sounds[AudibleAlert.radarCutin]
+  outputs = []
+  for _ in range(40):  # Two seconds of repeated 20 Hz UI state publications.
+    obj.update_alert(AudibleAlert.radarCutin, 'radarCutin/warning')
+    outputs.append(obj.get_sound_data(2400))
+  actual = np.concatenate(outputs)
+  np.testing.assert_allclose(actual[:len(samples)], samples * .2)
+  np.testing.assert_array_equal(actual[len(samples):], 0)

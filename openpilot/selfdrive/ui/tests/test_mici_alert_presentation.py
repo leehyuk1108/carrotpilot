@@ -155,11 +155,18 @@ class TestMiciAlertLayout(unittest.TestCase):
     renderer._draw_text(alert, layout)
     self.assertEqual(renderer._text_layout_key, key)
 
-  def test_traffic_stopping_keeps_each_line_unwrapped_in_both_c4_layouts(self):
+  def test_short_notices_keep_each_line_unwrapped_in_both_c4_layouts(self):
     m = load_events()
-    events = m.Events()
-    events.add(m.EventName.trafficStopping)
-    alert, = events.create_alerts([m.ET.WARNING], callback_args())
+    for event, title, subtitle, title_size in (
+      (m.EventName.trafficStopping, "정지합니다", "전방 신호 감지됨.", 60),
+      (m.EventName.radarCutin, "끼어드는 차량 감지", "전방 차량을 확인하세요", 48),
+    ):
+      events = m.Events()
+      events.add(event)
+      alert, = events.create_alerts([m.ET.WARNING], callback_args())
+      self.check_short_notice_layout(alert, title, subtitle, title_size)
+
+  def check_short_notice_layout(self, alert, title_text, subtitle_text, title_size):
     for width in (476, 536):
       with self.subTest(width=width):
         renderer, ns = load_layout()
@@ -170,8 +177,8 @@ class TestMiciAlertLayout(unittest.TestCase):
         layout = renderer._icon_helper(ui_alert)
         renderer._draw_text(ui_alert, layout)
         title, subtitle = renderer._alert_text1_label, renderer._alert_text2_label
-        self.assertEqual((title.font_size, subtitle.font_size), (60, 30))
-        for label, text in ((title, "정지합니다"), (subtitle, "전방 신호 감지됨.")):
+        self.assertEqual((title.font_size, subtitle.font_size), (title_size, 30))
+        for label, text in ((title, title_text), (subtitle, subtitle_text)):
           self.assertEqual(label.text, text)
           self.assertEqual(label._cached_wrapped_lines, [text])
           self.assertLessEqual(label.text_width, layout.text_rect.width)

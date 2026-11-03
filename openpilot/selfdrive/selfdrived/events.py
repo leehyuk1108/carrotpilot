@@ -1149,7 +1149,11 @@ EVENTS: dict[int, dict[str, Alert | AlertCallbackType]] = {
      ET.WARNING: EngagementAlert(AudibleAlert.prompt),
   },
   EventName.radarCutin: {
-     ET.WARNING: EngagementAlert(AudibleAlert.radarCutin),
+    ET.WARNING: Alert(
+      "끼어드는 차량 감지",
+      "전방 차량을 확인하세요",
+      AlertStatus.normal, AlertSize.small,
+      Priority.LOWER, VisualAlert.none, AudibleAlert.radarCutin, 2.),
   },
   EventName.phoneLeadClosing: {
     ET.WARNING: Alert(

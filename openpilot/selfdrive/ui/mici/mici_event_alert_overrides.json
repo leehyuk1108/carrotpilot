@@ -848,6 +848,15 @@
       "titleFontPx": 60,
       "subtitleFontPx": 30
     },
+    "EVENTS.radarCutin.WARNING": {
+      "eventName": "radarCutin",
+      "eventType": "WARNING",
+      "source": "EVENTS",
+      "title": "끼어드는 차량 감지",
+      "subtitle": "전방 차량을 확인하세요",
+      "titleFontPx": 48,
+      "subtitleFontPx": 30
+    },
     "EVENTS.driverDistracted2.PERMANENT": {
       "eventName": "driverDistracted2",
       "eventType": "PERMANENT",
