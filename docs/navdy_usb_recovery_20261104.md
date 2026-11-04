@@ -30,10 +30,12 @@ that software has eliminated the unresolved physical/driver failure.
   Unknown server state never authorizes a competing server or a USB reset.
 - For one previously verified, exact Navdy USB device that remains offline,
   attempt a targeted ADB reconnect after 10 seconds. After 30 seconds, permit a
-  device-only reset only with fresh ignition-OFF/offroad evidence. No controller,
+  device-only reset with fresh, recognized runtime evidence, both onroad and
+  offroad. Ignition OFF is not required for recovery. No controller,
   Panda, Bluetooth, phone pairing, app, OS or vehicle-control reset is performed.
 - Recheck ADB ownership/state and USB identity immediately before recovery. The
-  reset child independently checks fresh device/panda messages and `IsOnroad=0`,
+  reset child independently checks fresh device/panda messages and a valid
+  `IsOnroad` value (0 or 1),
   including after opening the exact character device. Unknown or empty panda
   data does not authorize recovery. Online/unauthorized/ambiguous targets fail
   closed.
@@ -52,7 +54,38 @@ that software has eliminated the unresolved physical/driver failure.
 Wired/Bluetooth selection, phone auto-reconnection, installed Navdy APK,
 navigation freshness and vehicle control are unchanged.
 
+## Onroad recovery follow-up
+
+The user explicitly requested recovery without turning the ignition off.
+The initial deployment below restricted the additional targeted reconnect and
+USB reset to offroad; normal reconnect already operated onroad. Runtime now
+uses `RecoveryGuard`, which requires fresh valid device/panda messages and a
+recognized, nonempty panda list but permits started/ignition-ON states. The
+independent reset child uses the same policy. `ParkedGuard` remains stricter
+for installation checks; deploying software is not allowed merely because
+runtime display recovery is allowed.
+
+Exact Navdy identity, offline-only owner checks before/after opening the node,
+mode/cancellation checks, two-attempt boot budget and five-minute cooldown are
+unchanged. No host controller, Panda or vehicle-control process is reset. This
+does not fabricate fresh navigation values while the display is disconnected.
+Unplugged, unpowered or physically failing hardware cannot be guaranteed to
+recover. Budget exhaustion stops device resets, not ordinary reconnect attempts.
+
+Local focused regression: **95 passed**. Added tests cover onroad reconnect and
+reset dispatch without ignition changes, default helper guard selection,
+onroad/offroad transitions during device open, separate parked installation
+policy, stale/future/invalid timestamps and unchanged identity/cancellation
+refusals. The ioctl is mocked in these tests, not exercised while driving.
+The isolated native full suite passed **1479 tests in 109.03 seconds**. The
+actual candidate helper imports correctly, reuses ADB 5038 and refuses a healthy
+online USB target. Independent static review found no actionable issue in this
+diff. Installed follow-up results are recorded after execution.
+
 ## Verification
+
+This section and the initial installed validation below describe the earlier
+offroad-only revision, before the explicitly requested onroad follow-up.
 
 Guarded deployment and bounded installed soak are recorded separately below.
 Final local focused suite: 69 passed. Final native full suite: **1453 passed in

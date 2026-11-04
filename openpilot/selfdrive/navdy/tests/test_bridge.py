@@ -51,10 +51,10 @@ def test_offroad_without_car_messages_keeps_ambient_heartbeat(sm):
   assert bridge.live_payload(sm, 2, door_open=False)['ambientState'] == 'offroad'
 
 
-@pytest.mark.parametrize('condition,expected', [('offroad', True), ('onroad', False), ('ignition', False),
+@pytest.mark.parametrize('condition,expected', [('offroad', True), ('onroad', True), ('ignition', True),
                                               ('stale_device', False), ('stale_panda', False), ('invalid_panda', False),
                                               ('empty_panda', False), ('unknown_panda', False)])
-def test_usb_recovery_requires_fresh_offroad_and_ignition_off(sm, condition, expected):
+def test_usb_recovery_allows_onroad_but_requires_fresh_known_state(sm, condition, expected):
   sm.update = lambda _: None
   sm.data['deviceState'].started = condition == 'onroad'
   sm.data['pandaStates'] = [NS(pandaType='tres', ignitionLine=False, ignitionCan=False)]

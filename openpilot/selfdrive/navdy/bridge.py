@@ -26,7 +26,7 @@ from openpilot.selfdrive.navdy.feedback import is_no_observation
 from openpilot.selfdrive.navdy.journal import CONNECT_TIMINGS, LocalJournal, sanitize
 from openpilot.selfdrive.navdy.vehicles import VehicleOverlay
 from openpilot.selfdrive.navdy.policy import read_transport_mode, transport_policy
-from openpilot.selfdrive.navdy.usb_health import ParkedGuard, UsbHealth, parked_messages
+from openpilot.selfdrive.navdy.usb_health import RecoveryGuard, UsbHealth, recovery_messages
 from openpilot.selfdrive.navdy.usb_faults import UsbFaultRecorder
 
 MAINTENANCE_STATE = Path('/data/hl-jetson')
@@ -176,7 +176,7 @@ def display_sources(sm):
 
 def usb_recovery_allowed(sm):
   sm.update(0)
-  return parked_messages(sm, time.monotonic())
+  return recovery_messages(sm, time.monotonic())
 
 
 def live_payload(sm, sequence, *, sources=None, door_open=False, ambient_override=None, vehicles=None):
@@ -262,7 +262,7 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
         recovery_events.put_nowait((args, kwargs))
       except queue.Full:
         pass
-    usb_health = UsbHealth(status.with_suffix('.usb-recovery.json'), ParkedGuard(), record_recovery)
+    usb_health = UsbHealth(status.with_suffix('.usb-recovery.json'), RecoveryGuard(), record_recovery)
     def usb_transport():
       candidate = AdbTransport()
       candidate.usb_health = usb_health

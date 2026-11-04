@@ -1,4 +1,4 @@
-"""Navdy-only, parked recovery of a verified USB device. No controller resets."""
+"""Navdy-only USB recovery, onroad or offroad. Never reset a host controller."""
 from __future__ import annotations
 
 import argparse
@@ -24,18 +24,24 @@ MAX_RESETS = 2
 USBDEVFS_RESET = 0x5514
 
 
-def parked_messages(sm, now):
+def recovery_messages(sm, now):
   for service in ('deviceState', 'pandaStates'):
     if (not sm.valid[service] or not 0 <= now - sm.recv_time[service] < 1.5
         or not 0 <= now - sm.logMonoTime[service] / 1e9 < 1.5):
       return False
   pandas = sm['pandaStates']
-  return (not sm['deviceState'].started and bool(pandas)
-          and all(str(p.pandaType) not in ('unknown', '0') and not p.ignitionLine and not p.ignitionCan for p in pandas))
+  return bool(pandas) and all(str(p.pandaType) not in ('unknown', '0') for p in pandas)
 
 
-class ParkedGuard:
+def parked_messages(sm, now):
+  return (recovery_messages(sm, now) and not sm['deviceState'].started
+          and all(not p.ignitionLine and not p.ignitionCan for p in sm['pandaStates']))
+
+
+class RecoveryGuard:
   """Each worker owns its subscriber; never consume the bridge's live messages."""
+  messages_allowed = staticmethod(recovery_messages)
+
   def __init__(self):
     self.local = threading.local()
 
@@ -55,7 +61,12 @@ class ParkedGuard:
       while time.monotonic() < deadline and not all(sm.seen.values()):
         sm.update(100)
     sm.update(0)
-    return parked_messages(sm, time.monotonic())
+    return self.messages_allowed(sm, time.monotonic())
+
+
+class ParkedGuard(RecoveryGuard):
+  """Stricter guard for installation checks, not runtime display recovery."""
+  messages_allowed = staticmethod(parked_messages)
 
 
 def navdy_devices(root=SYSFS):
@@ -84,12 +95,12 @@ def reset_verified(path, identity, *, root=SYSFS, dev_root=Path('/dev/bus/usb'),
   """Open the checked node before final checks, so address reuse cannot retarget the ioctl."""
   if not re.fullmatch(r'\d+-\d+(?:\.\d+)*', path):
     raise ValueError('Invalid USB device path')
-  can_recover = can_recover or ParkedGuard()
+  can_recover = can_recover or RecoveryGuard()
   offline = offline or offline_owners
   matches = [d for d in navdy_devices(root) if d['path'] == path and d['identity'] == identity]
-  if (len(matches) != 1 or (params / 'IsOnroad').read_bytes().strip() != b'0' or not can_recover()
+  if (len(matches) != 1 or (params / 'IsOnroad').read_bytes().strip() not in (b'0', b'1') or not can_recover()
       or not offline(matches[0]['serial']) or not still_allowed()):
-    raise ValueError('USB recovery identity or offroad guard failed')
+    raise ValueError('USB recovery identity or runtime guard failed')
   device = matches[0]
   node = dev_root / f"{device['bus']:03d}" / f"{device['number']:03d}"
   fd = os.open(node, os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC)
@@ -98,7 +109,7 @@ def reset_verified(path, identity, *, root=SYSFS, dev_root=Path('/dev/bus/usb'),
     if (not stat.S_ISCHR(info.st_mode) or os.major(info.st_rdev) != 189
         or os.minor(info.st_rdev) != (device['bus'] - 1) * 128 + device['number'] - 1
         or device not in navdy_devices(root) or not offline(device['serial']) or not can_recover()
-        or (params / 'IsOnroad').read_bytes().strip() != b'0' or not still_allowed()):
+        or (params / 'IsOnroad').read_bytes().strip() not in (b'0', b'1') or not still_allowed()):
       raise ValueError('USB recovery device changed')
     fcntl.ioctl(fd, USBDEVFS_RESET, 0)
   finally:
@@ -213,7 +224,7 @@ class UsbHealth:
       self.record('unverified', now)
       return
     if not transport.recovery_allowed() or not self.can_recover():
-      self.record('not_parked', now)
+      self.record('guard_blocked', now)
       return
     elapsed = now - self.failed_since
     if elapsed < 10:
@@ -225,7 +236,7 @@ class UsbHealth:
       self.record('changed', now)
       return
     if not self.can_recover() or not transport.recovery_allowed():
-      self.record('not_parked', now)
+      self.record('guard_blocked', now)
       return
     if not self.reconnected and states:
       self.reconnected = True
