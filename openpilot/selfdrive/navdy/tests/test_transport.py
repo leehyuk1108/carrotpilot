@@ -8,6 +8,13 @@ import pytest
 from openpilot.selfdrive.navdy.transport import AdbTransport, LineReader, MAX_FRAME_BYTES, encode_frame
 
 
+@pytest.fixture(autouse=True)
+def no_real_adb_server(monkeypatch):
+  def missing(_):
+    raise ConnectionRefusedError()
+  monkeypatch.setattr('openpilot.selfdrive.navdy.transport.existing_adb_devices', missing)
+
+
 class FragmentSocket:
   def __init__(self, chunks):
     self.chunks = iter(chunks)
@@ -113,3 +120,57 @@ def test_cold_start_timeout_propagates_without_reset_or_retry():
     AdbTransport(adb='adb', command=run).discover()
   assert failure.value.timeout == 15
   assert calls == [['adb', '-P', '5038', 'devices', '-l']]
+
+
+@pytest.mark.parametrize('owner', [5037, 5038])
+def test_reuse_existing_owner_without_spawning_competing_server(owner):
+  calls = []
+  def inventory(port):
+    if port != owner:
+      raise ConnectionRefusedError()
+    return 'navdy device usb:3-1\n'
+  def run(cmd, **kw):
+    calls.append(cmd)
+    return SimpleNamespace(stdout='package:/base.apk')
+  transport = AdbTransport(adb='adb', command=run, inventory=inventory)
+  assert transport.discover() == 'navdy'
+  assert transport.server_port == owner
+  assert len(calls) == 1 and calls[0][1:3] == ['-P', str(owner)]
+  assert 'devices' not in calls[0]
+
+
+def test_default_server_owns_target_after_dedicated_server_lost_it():
+  transport = AdbTransport(adb='adb', command=lambda *a, **kw: SimpleNamespace(stdout='package:/base.apk'),
+                           inventory=lambda port: '' if port == 5038 else 'navdy device usb:3-1')
+  assert transport.discover() == 'navdy'
+  assert transport.server_port == 5037
+
+
+def test_existing_offline_server_is_observed_not_replaced():
+  seen = []
+  def inventory(port):
+    return 'navdy offline' if port == 5037 else ''
+  transport = AdbTransport(adb='adb', command=lambda *a, **kw: pytest.fail('no new server'), inventory=inventory)
+  transport.usb_health = SimpleNamespace(unavailable=lambda servers, link: seen.append(servers))
+  with pytest.raises(ConnectionError, match='not found'):
+    transport.discover()
+  assert seen == [[(5038, ''), (5037, 'navdy offline')]]
+
+
+def test_forward_cleanup_uses_selected_owner():
+  calls = []
+  transport = AdbTransport(adb='adb', command=lambda cmd, **kw: calls.append(cmd) or SimpleNamespace(stdout=''))
+  transport.server_port, transport.serial, transport.port = 5037, 'navdy', 12345
+  transport.close()
+  assert calls == [['adb', '-P', '5037', '-s', 'navdy', 'forward', '--remove', 'tcp:12345']]
+
+
+@pytest.mark.parametrize('error', [TimeoutError(), ValueError(), ConnectionResetError()])
+def test_unresponsive_existing_server_does_not_start_a_competitor(error):
+  def inventory(port):
+    if port == 5038:
+      raise ConnectionRefusedError()
+    raise error
+  transport = AdbTransport(adb='adb', command=lambda *a, **kw: pytest.fail('must not start server'), inventory=inventory)
+  with pytest.raises(ConnectionError, match='inventory unavailable'):
+    transport.discover()

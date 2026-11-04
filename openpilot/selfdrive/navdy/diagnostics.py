@@ -24,6 +24,7 @@ PUBLIC_ERRORS = frozenset((
   'Navdy requires an encrypted paired link', 'Configured Navdy is not paired; pairing is never automatic',
   'Native Bluetooth RFCOMM is unavailable on this OS', 'Navdy closed its socket',
   'Navdy USB not found', 'Multiple Navdy USB devices', 'Navdy service failed to start',
+  'ADB inventory unavailable',
   'Jetson Navdy relay response timed out', 'Jetson Navdy relay write timed out',
 ))
 ERROR_TYPES = (TimeoutError, ConnectionResetError, ConnectionAbortedError, ConnectionRefusedError, BrokenPipeError,

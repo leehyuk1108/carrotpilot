@@ -51,7 +51,7 @@ SCHEMA = {
   'runId': 'uuid', 'eventSeq': 'number', 'at': 'number', 'wallTime': 'number',
   'kind': frozenset(('bridge_started', 'bridge_stopped', 'policy_changed', 'usb_handover', 'connect_attempt',
                      'connect_failed', 'transport_open', 'transport_closed', 'failure', 'retry_scheduled',
-                     'source_baseline', 'source_changed', 'receiver_baseline', 'receiver_changed', 'periodic_status')),
+                     'source_baseline', 'source_changed', 'receiver_baseline', 'receiver_changed', 'periodic_status', 'usb_recovery')),
   'phase': frozenset(PHASES), 'transport': TRANSPORT, 'connected': 'bool', 'bluetoothOnly': 'bool',
   'connectedAt': 'number', 'receivedAt': 'number', 'sourceAt': 'number', 'receiverAt': 'number',
   'phaseMs': 'number', 'roundTripMs': 'number', 'retryInSeconds': 'number', 'fastRetry': 'bool',
@@ -59,6 +59,9 @@ SCHEMA = {
   'state': SOURCE, 'sourceState': SOURCE, 'receiver': RECEIVER, 'previous': RECEIVER, 'current': RECEIVER,
   'wireless': METRICS, 'batchLatestWireless': METRICS,
   'connectTimings': CONNECT_TIMINGS,
+  'usbRecovery': {'action': frozenset(('absent_or_ambiguous', 'not_offline', 'no_adb_owner', 'unverified', 'not_parked',
+                                      'waiting', 'reconnect', 'budget', 'changed', 'reset', 'reset_failed')),
+                  'failureAge': 'number', 'resetCount': 'number'},
   'timings': dict.fromkeys(PHASES, dict.fromkeys(('count', 'totalMs', 'maxMs'), 'number')),
   'exchanges': 'number', 'replies': 'number',
   'feedback': {kind: dict.fromkeys(('count', 'lastReceivedAt'), 'number')

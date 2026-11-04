@@ -9,12 +9,46 @@ import shutil
 import socket
 import subprocess
 import sys
+import time
 
 MAX_FRAME_BYTES = 32768
 ADB_PORT = 5038
 ADB_DISCOVERY_TIMEOUT = 15
 ADB_COMMAND_TIMEOUT = 3
 SERVICE = 'com.navdy.hud.app/.openpilot.OpenpilotStateService'
+
+
+def existing_adb_devices(port):
+  """Query only an existing local server; unlike `adb devices`, never start one."""
+  deadline = time.monotonic() + 0.4
+  with socket.create_connection(('127.0.0.1', port), timeout=0.4) as conn:
+    def read(size):
+      result = b''
+      while len(result) < size:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+          raise TimeoutError('ADB inventory deadline')
+        conn.settimeout(remaining)
+        chunk = conn.recv(size - len(result))
+        if not chunk:
+          raise ConnectionError('ADB inventory closed')
+        result += chunk
+      return result
+
+    request = b'host:devices-l'
+    conn.sendall(f'{len(request):04x}'.encode() + request)
+    if read(4) != b'OKAY':
+      raise ConnectionError('ADB inventory rejected')
+    size = int(read(4), 16)
+    if size > 32768:
+      raise ValueError('ADB inventory too large')
+    return read(size).decode('utf-8')
+
+
+def adb_devices(raw):
+  return [(fields[0], fields[1]) for line in raw.splitlines()
+          if len(fields := line.split()) >= 2 and re.fullmatch(r'[A-Za-z0-9_.-]{1,128}', fields[0])
+          and fields[1] in ('device', 'offline', 'unauthorized', 'no')]
 
 
 def parse_response(raw):
@@ -68,9 +102,14 @@ class LineReader:
 
 
 class AdbTransport:
-  def __init__(self, adb=None, command=subprocess.run):
+  def __init__(self, adb=None, command=subprocess.run, inventory=None):
     self.adb = adb or shutil.which('adb')
     self.command = command
+    self.inventory = inventory or existing_adb_devices
+    self.server_port = ADB_PORT
+    self.usb_health = None
+    self.recovery_allowed = lambda: True
+    self.recovery_fd = None
     self.serial = None
     self.port = None
     self.conn = None
@@ -80,7 +119,7 @@ class AdbTransport:
     if not self.adb:
       raise FileNotFoundError('ADB is not installed')
     target = serial or self.serial
-    cmd = [self.adb, '-P', str(ADB_PORT)]
+    cmd = [self.adb, '-P', str(self.server_port)]
     if target:
       cmd += ['-s', target]
     # Discovery can start the dedicated server; cold startup exceeds 3 s on AGNOS.
@@ -89,21 +128,41 @@ class AdbTransport:
     return result.stdout.strip()
 
   def discover(self):
-    candidates = []
-    for line in self.run(['devices', '-l']).splitlines():
-      fields = line.split()
-      if len(fields) < 2 or fields[1] != 'device' or not re.fullmatch(r'[A-Za-z0-9_.-]{1,128}', fields[0]):
-        continue
-      # Verify the installed HUD package; never start services on an arbitrary phone.
+    servers = []
+    unknown_server = False
+    for port in (ADB_PORT, 5037):
       try:
-        package = self.run(['shell', 'pm', 'path', 'com.navdy.hud.app'], serial=fields[0])
-        if package.startswith('package:'):
-          candidates.append(fields[0])
-      except (OSError, subprocess.SubprocessError):
-        continue
-    if len(candidates) != 1:
-      raise ConnectionError('Navdy USB not found' if not candidates else 'Multiple Navdy USB devices')
-    return candidates[0]
+        servers.append((port, self.inventory(port)))
+      except ConnectionRefusedError:
+        pass
+      except (OSError, ValueError):
+        unknown_server = True
+    if not servers:
+      if unknown_server:
+        raise ConnectionError('ADB inventory unavailable')
+      self.server_port = ADB_PORT
+      servers = [(ADB_PORT, self.run(['devices', '-l']))]
+    candidates = []
+    for port, raw in servers:
+      self.server_port = port
+      for serial, state in adb_devices(raw):
+        if state != 'device':
+          continue
+        # Verify the installed HUD package; never start services on an arbitrary phone.
+        try:
+          package = self.run(['shell', 'pm', 'path', 'com.navdy.hud.app'], serial=serial)
+          if package.startswith('package:'):
+            candidates.append((serial, port))
+        except (OSError, subprocess.SubprocessError):
+          continue
+    if len({serial for serial, _ in candidates}) == 1:
+      serial, self.server_port = candidates[0]
+      if self.usb_health is not None:
+        self.usb_health.verified(serial)
+      return serial
+    if not candidates and not unknown_server and self.usb_health is not None:
+      self.usb_health.unavailable(servers, self)
+    raise ConnectionError('Navdy USB not found' if not candidates else 'Multiple Navdy USB devices')
 
   def connect(self):
     self.serial = self.discover()

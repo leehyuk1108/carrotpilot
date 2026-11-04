@@ -8,6 +8,7 @@ import json
 import math
 import os
 from pathlib import Path
+import queue
 import select
 import shlex
 import signal
@@ -25,6 +26,8 @@ from openpilot.selfdrive.navdy.feedback import is_no_observation
 from openpilot.selfdrive.navdy.journal import CONNECT_TIMINGS, LocalJournal, sanitize
 from openpilot.selfdrive.navdy.vehicles import VehicleOverlay
 from openpilot.selfdrive.navdy.policy import read_transport_mode, transport_policy
+from openpilot.selfdrive.navdy.usb_health import ParkedGuard, UsbHealth, parked_messages
+from openpilot.selfdrive.navdy.usb_faults import UsbFaultRecorder
 
 MAINTENANCE_STATE = Path('/data/hl-jetson')
 JETSON_PYTHON = '/opt/carrot-jetlink/venv/bin/python'
@@ -171,6 +174,11 @@ def display_sources(sm):
   return sources
 
 
+def usb_recovery_allowed(sm):
+  sm.update(0)
+  return parked_messages(sm, time.monotonic())
+
+
 def live_payload(sm, sequence, *, sources=None, door_open=False, ambient_override=None, vehicles=None):
   from openpilot.selfdrive.navdy.display import payload_from_messages, resolve_operating_state
   sources = display_sources(sm) if sources is None else sources
@@ -236,7 +244,6 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
     connection_mode = 0
     config_error = ''
     config_checked = -math.inf
-    usb_probe = UsbProbe(AdbTransport)
     last_handover = None
     last_connected_transport = None
     previous_available = False
@@ -249,11 +256,30 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
     vehicles = VehicleOverlay()
     doors = DoorMonitor()
     diagnostics = LinkDiagnostics(cloudlog.event, journal=LocalJournal())
+    recovery_events = queue.Queue(maxsize=32)
+    def record_recovery(*args, **kwargs):
+      try:
+        recovery_events.put_nowait((args, kwargs))
+      except queue.Full:
+        pass
+    usb_health = UsbHealth(status.with_suffix('.usb-recovery.json'), ParkedGuard(), record_recovery)
+    def usb_transport():
+      candidate = AdbTransport()
+      candidate.usb_health = usb_health
+      return candidate
+    usb_probe = UsbProbe(usb_transport)
+    usb_faults = UsbFaultRecorder()
     try:
       diagnostics.record('bridge_started')
       doors.start()
       while duration is None or time.monotonic() - start < duration:
         tick = time.monotonic()
+        for _ in range(32):
+          try:
+            args, kwargs = recovery_events.get_nowait()
+          except queue.Empty:
+            break
+          diagnostics.record(*args, **kwargs)
         sm.update(0)
         sequence += 1
         if tick - config_checked >= 5:
@@ -278,7 +304,7 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
             transport = None
             bluetooth_reconnect.reset_session()
             usb_probe.close()
-            usb_probe = UsbProbe(AdbTransport)
+            usb_probe = UsbProbe(usb_transport)
             feedback.unlink(missing_ok=True)
             extended_feedback = False
             model_navigation.clear('model_link_changed')
@@ -295,8 +321,10 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
             transport.close()
             diagnostics.record('transport_closed', transport=transport_name)
             usb_probe.close()
-            usb_probe = UsbProbe(AdbTransport)
+            usb_probe = UsbProbe(usb_transport)
             transport = ready
+            transport.usb_health = usb_health
+            usb_health.verified(getattr(transport, 'serial', None))
             bluetooth_reconnect.reset_session()
             feedback.unlink(missing_ok=True)
             extended_feedback = False
@@ -328,12 +356,13 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
                   raise ConnectionError(config_error or 'Bluetooth-only mode requires an enabled paired peer')
                 transport = BluetoothTransport(peer)
               else:
-                transport = AdbTransport()
+                transport = usb_transport()
               transport.connect()
-            except (OSError, ValueError, subprocess.SubprocessError):
+            except (OSError, ValueError, subprocess.SubprocessError) as connect_error:
               if transport_name == 'bluetooth':
                 bluetooth_connect = getattr(transport, 'connect_diagnostics', None)
               diagnostics.record('connect_failed', transport=transport_name,
+                                  reason=public_error(connect_error),
                                   phaseMs=(time.monotonic() - diagnostics.phase_started) * 1000,
                                   connectTimings=connect_timings(bluetooth_connect) if transport_name == 'bluetooth' else None)
               if transport is not None:
@@ -459,6 +488,8 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
                                'reason': ''})
           diagnostics.end_phase()
         except (OSError, ValueError, subprocess.SubprocessError) as error:
+          if transport_name == 'usb' and phase == 'exchange':
+            usb_faults.capture(getattr(transport, 'serial', None))
           if transport_name == 'bluetooth' and transport is not None and phase == 'connect':
             bluetooth_connect = getattr(transport, 'connect_diagnostics', None)
             # The USB-first fallback bypasses the initial connect_failed handler.
@@ -473,7 +504,7 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
           diagnostics.end_phase()
           if transport_name in ('bluetooth', 'jetson'):
             usb_probe.close()
-            usb_probe = UsbProbe(AdbTransport)
+            usb_probe = UsbProbe(usb_transport)
           if transport is not None:
             transport.close()
             diagnostics.record('transport_closed', transport=transport_name)
@@ -497,6 +528,7 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
       # Every cleanup runs even if an earlier resource or status write fails.
       # Journal close is last and only joins its daemon for a bounded interval.
       with ExitStack() as cleanup:
+        cleanup.callback(usb_faults.close)
         cleanup.callback(diagnostics.close)
         cleanup.callback(lambda: atomic_json(status, {'updatedAt': time.monotonic(), 'connected': False, 'reason': 'bridge_stopped',
                                                       'bluetoothConnect': bluetooth_connect,

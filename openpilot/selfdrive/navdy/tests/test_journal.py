@@ -59,6 +59,19 @@ def test_boot_change_is_distinct_from_run_restart(tmp_path, monkeypatch):
   assert {row['bootId'] for row in records(directory)} == {'b' * 32, 'c' * 32}
 
 
+def test_usb_recovery_and_original_connect_failure_are_retained_without_identity(tmp_path):
+  sink = journal.LocalJournal(tmp_path.resolve() / 'logs')
+  diagnostics = LinkDiagnostics(lambda *args, **kwargs: None, journal=sink)
+  diagnostics.record('usb_recovery', local_only=True, transport='usb', usbRecovery={
+    'action': 'reset', 'failureAge': 31., 'resetCount': 1, 'serial': 'PRIVATE'})
+  diagnostics.record('connect_failed', transport='usb', reason='Navdy USB not found')
+  sink.close()
+  saved = records(tmp_path / 'logs')
+  assert saved[0]['usbRecovery'] == {'action': 'reset', 'failureAge': 31., 'resetCount': 1}
+  assert saved[1]['reason'] == 'Navdy USB not found'
+  assert 'PRIVATE' not in json.dumps(saved)
+
+
 def test_feedback_counters_survive_sanitizer_and_disk_without_payloads(tmp_path):
   sink = journal.LocalJournal(tmp_path.resolve() / 'logs')
   diagnostics = LinkDiagnostics(lambda *a, **kw: None, journal=sink)

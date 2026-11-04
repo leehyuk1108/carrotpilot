@@ -51,6 +51,28 @@ def test_offroad_without_car_messages_keeps_ambient_heartbeat(sm):
   assert bridge.live_payload(sm, 2, door_open=False)['ambientState'] == 'offroad'
 
 
+@pytest.mark.parametrize('condition,expected', [('offroad', True), ('onroad', False), ('ignition', False),
+                                              ('stale_device', False), ('stale_panda', False), ('invalid_panda', False),
+                                              ('empty_panda', False), ('unknown_panda', False)])
+def test_usb_recovery_requires_fresh_offroad_and_ignition_off(sm, condition, expected):
+  sm.update = lambda _: None
+  sm.data['deviceState'].started = condition == 'onroad'
+  sm.data['pandaStates'] = [NS(pandaType='tres', ignitionLine=False, ignitionCan=False)]
+  if condition == 'ignition':
+    sm.data['pandaStates'][0].ignitionLine = True
+  elif condition == 'empty_panda':
+    sm.data['pandaStates'] = []
+  elif condition == 'unknown_panda':
+    sm.data['pandaStates'][0].pandaType = 'unknown'
+  elif condition == 'stale_device':
+    sm.delay('deviceState', 2)
+  elif condition == 'stale_panda':
+    sm.delay('pandaStates', 2)
+  elif condition == 'invalid_panda':
+    sm.valid['pandaStates'] = False
+  assert bridge.usb_recovery_allowed(sm) is expected
+
+
 @pytest.mark.parametrize('service', ['deviceState', 'pandaStates'])
 def test_unknown_power_cannot_request_sleep(sm, service):
   sm.data['deviceState'].started = False
