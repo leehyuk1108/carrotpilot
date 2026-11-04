@@ -2898,6 +2898,9 @@ async function renderItems(group, options = {}) {
 
     async function commitSettingValue(next, commitOptions = {}) {
       try {
+        if (name === "FcwWarningTest" && profile) {
+          throw new Error("FCW test is a live diagnostic, not a saved profile setting.");
+        }
         if (profile) {
           const nextValues = { ...(profile.values || {}), [name]: next };
           const nextProfile = await saveSettingProfile(profile.id, { values: nextValues });
@@ -2915,6 +2918,25 @@ async function renderItems(group, options = {}) {
           cacheSettingValue(name, next, group);
           if (originGroup !== group) cacheSettingValue(name, next, originGroup);
           refreshSettingHistory();
+        }
+        if (name === "FcwWarningTest") {
+          // Read the controller acknowledgement, never leave a timed test ON in the UI.
+          for (const delay of [250, 1000, 2250, 3000]) {
+            window.setTimeout(async () => {
+              if (!el.isConnected) return;
+              try {
+                const values = await bulkGet([name]);
+                const actual = Number(values[name]) === 1 ? 1 : 0;
+                syncSettingControlState(el, actual);
+                val.dataset.committedValue = String(actual);
+                cacheSettingValue(name, actual, group);
+              } catch (_) {
+                syncSettingControlState(el, 0);
+                val.dataset.committedValue = "0";
+                cacheSettingValue(name, 0, group);
+              }
+            }, delay);
+          }
         }
       } catch (e) {
         showAppToast((UI_STRINGS[LANG].set_failed || "set failed: ") + e.message, { tone: "error" });

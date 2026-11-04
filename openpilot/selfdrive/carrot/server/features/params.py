@@ -4,6 +4,7 @@ import os
 
 from aiohttp import web
 from openpilot.common.vehicle_dynamics import validate_vehicle_spec
+from openpilot.common import fcw_warning_test
 
 from ..config import PARAMS_BACKUP_PATH
 from ..services.param_changes import (
@@ -35,6 +36,34 @@ from ..services.params import (
 )
 from ..services.settings import get_settings_cached
 from .system import is_drive_engaged
+from .remote_support import validate_request
+
+FCW_TEST_LOCK = web.AppKey("fcw_test_lock", asyncio.Lock)
+
+
+async def set_fcw_warning_test(request, value, source):
+  validate_request(request, mutate=True)
+  if type(value) not in (int, str) or str(value) not in ("0", "1"):
+    return web.json_response({"ok": False, "error": "FCW test requires 0 or 1."}, status=400)
+  value = int(value)
+  if value and source != "web_ui":
+    return web.json_response({"ok": False, "error": "FCW test cannot run from a profile, restore, or undo."}, status=403)
+  async with request.app[FCW_TEST_LOCK]:
+    try:
+      fcw_warning_test.request_test(value)
+      if value:
+        # Only report ON once the running controller acknowledges the request.
+        for _ in range(15):
+          await asyncio.sleep(0.02)
+          if fcw_warning_test.current_status()["active"]:
+            break
+        else:
+          fcw_warning_test.request_test(0)
+          raise ValueError("FCW test was not accepted by the controller. No queued retry.")
+      return web.json_response({"ok": True, "name": fcw_warning_test.KEY, "value": value},
+                               headers={"Cache-Control": "no-store"})
+    except (OSError, ValueError) as error:
+      return web.json_response({"ok": False, "error": str(error)}, status=409)
 
 
 async def api_params_bulk(request: web.Request) -> web.Response:
@@ -69,7 +98,7 @@ async def api_params_bulk(request: web.Request) -> web.Response:
   # can explain them. Restricted to catalog settings, so synthetic keys like
   # GitPullTime and hardware values like DeviceType -- which change on every
   # read -- never appear in the change history.
-  observe_param_values(values, allowed=set(by_name))
+  observe_param_values(values, allowed=set(by_name) - {fcw_warning_test.KEY})
   return web.json_response({"ok": True, "values": values})
 
 
@@ -85,6 +114,8 @@ async def api_param_set(request: web.Request) -> web.Response:
 
   if not name:
     return web.json_response({"ok": False, "error": "missing name"}, status=400)
+  if name == fcw_warning_test.KEY:
+    return await set_fcw_warning_test(request, value, source)
   if name in INTERNAL_SESSION_PARAMS:
     return web.json_response({"ok": False, "error": "driver monitoring is controlled by the vehicle CANCEL gesture"}, status=403)
   if name in READ_ONLY_PARAMS:
@@ -171,7 +202,7 @@ async def api_param_fingerprint(request: web.Request) -> web.Response:
   def build() -> dict:
     _data, _groups, by_name, _groups_list = get_settings_cached()
     values = get_param_values(
-      list(by_name),
+      [name for name in by_name if name != fcw_warning_test.KEY],
       {name: meta.get("default", 0) for name, meta in by_name.items()},
     )
     result = param_fingerprint(values)
@@ -200,7 +231,7 @@ async def api_param_fingerprint_baseline(request: web.Request) -> web.Response:
   def build() -> dict:
     _data, _groups, by_name, _groups_list = get_settings_cached()
     values = get_param_values(
-      list(by_name),
+      [name for name in by_name if name != fcw_warning_test.KEY],
       {name: meta.get("default", 0) for name, meta in by_name.items()},
     )
     fingerprint = param_fingerprint(values)["fingerprint"]
@@ -323,6 +354,7 @@ async def api_params_restore_json(request: web.Request) -> web.Response:
 
 
 def register(app: web.Application) -> None:
+  app[FCW_TEST_LOCK] = asyncio.Lock()
   app.router.add_get("/api/params_bulk", api_params_bulk)
   app.router.add_post("/api/param_set", api_param_set)
   app.router.add_get("/api/param_changes", api_param_changes)

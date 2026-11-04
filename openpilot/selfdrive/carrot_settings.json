@@ -638,7 +638,8 @@
           "params": [
             "SoundLanguageSetting",
             "SoundVolumeAdjust",
-            "SoundVolumeAdjustEngage"
+            "SoundVolumeAdjustEngage",
+            "FcwWarningTest"
           ]
         },
         {
@@ -654,6 +655,24 @@
     }
   ],
   "params": [
+    {
+      "group": "사운드",
+      "name": "FcwWarningTest",
+      "title": "FCW 경고 테스트",
+      "descr": "0: 테스트 해제 / 1: 최대 2초 경고 요청 후 자동 해제\n트래버스 개인 시험용. 시동 ON·P/D/L단·가속페달 해제·순정 ACC와 오파 해제 상태에서 콤마의 로컬 IP로 실행합니다. 정지 여부와 무관하며, 인게이지·CAN 오류 시 자동 취소합니다. 다음 시험은 5초 뒤 가능합니다. 이동 중에는 통제된 시험장에서 동승자가 조작하고 운전자는 운전에 집중해야 합니다. 시트 전용 신호가 아니며 경고음·표시·진동의 실물 반응은 미검증입니다. 0은 실제 충돌 경고를 차단하지 않습니다.",
+      "egroup": "SOUND",
+      "etitle": "FCW warning test",
+      "edescr": "0: cancel test / 1: request a warning for up to 2 seconds, then automatically clear.\nPrivate Traverse test: ignition ON, P/D/L, accelerator released, stock ACC and openpilot OFF, comma LAN IP only. Movement is allowed; engagement or CAN failure cancels the test. Wait 5 seconds between tests. Moving tests require a controlled test area and a passenger operating the UI, never the driver. This is not a seat-only command; physical sound, display and vibration remain unverified. Cancel does not suppress real collision warnings.",
+      "cgroup": "声音",
+      "ctitle": "FCW 警告测试",
+      "cdescr": "0: 取消测试 / 1: 最多请求2秒警告后自动关闭。\n仅供Traverse私人测试：点火开启、P/D/L挡、松开油门、原车ACC和openpilot关闭，仅限局域网IP。允许车辆移动，接管启用或CAN异常时自动取消，两次测试间隔5秒。移动测试仅在受控测试场地由乘客操作，驾驶员不得操作界面。不是座椅专用指令，声音、显示和振动尚未实车验证。取消不会屏蔽真实碰撞警告。",
+      "min": 0,
+      "max": 1,
+      "default": 0,
+      "unit": 1,
+      "control": "select",
+      "options": {"ko": ["0 해제", "1 테스트"], "en": ["0 Off", "1 Test"], "zh": ["0 关闭", "1 测试"]}
+    },
     {
       "group": "조향일반",
       "name": "PathOffset",

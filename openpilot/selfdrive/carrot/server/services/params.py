@@ -10,6 +10,7 @@ import threading
 import zlib
 from typing import Any, Dict, List, Optional
 from openpilot.common.vehicle_dynamics import SPEC_LIMITS, resolve_stored_vehicle_spec, validate_vehicle_spec
+from openpilot.common import fcw_warning_test
 
 try:
   import brotli
@@ -187,6 +188,8 @@ def _read_param_value(params: "Params", name: str, default: Any) -> Any:
 # Single-key get/set (used by features/params and tools)
 # -----------------------
 def get_param_value(name: str, default: Any) -> Any:
+  if name == fcw_warning_test.KEY:
+    return int(fcw_warning_test.current_status()["active"])
   # 'GitPullTime' is a synthetic key backed by services/git_state.py.
   # Imported lazily to avoid a circular import at module load.
   from .git_state import read_custom_meta_value
@@ -203,6 +206,10 @@ def get_param_value(name: str, default: Any) -> Any:
 
 def get_param_values(names: list[str], defaults: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
   defaults = defaults or {}
+  if fcw_warning_test.KEY in names:
+    values = get_param_values([name for name in names if name != fcw_warning_test.KEY], defaults)
+    values[fcw_warning_test.KEY] = int(fcw_warning_test.current_status()["active"])
+    return values
 
   # Imported lazily to avoid a circular import at module load.
   from .git_state import read_custom_meta_value
@@ -380,7 +387,7 @@ def put_typed(params: "Params", key: str, value: Any, p: Optional[Dict[str, Any]
     params.put(key, str(value))
 
 
-INTERNAL_SESSION_PARAMS = frozenset({"DriverMonitoringSessionDisabled", "JetsonLegacyUpdatePending"})
+INTERNAL_SESSION_PARAMS = frozenset({"DriverMonitoringSessionDisabled", "JetsonLegacyUpdatePending", fcw_warning_test.KEY})
 READ_ONLY_PARAMS = frozenset({"ClusterHudBrightness"})
 BACKUP_EXCLUDED_PARAMS = frozenset({"DriverMonitoringEnabled"})
 

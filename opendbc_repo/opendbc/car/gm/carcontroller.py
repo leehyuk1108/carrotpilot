@@ -1,4 +1,5 @@
 from openpilot.common.params import Params
+from openpilot.common.fcw_warning_test import FcwWarningTest
 from openpilot.common.filter_simple import FirstOrderFilter
 
 import numpy as np
@@ -54,6 +55,11 @@ class CarController(CarControllerBase):
 
     self.params = CarControllerParams(self.CP)
     self.params_ = Params() # kans: button spam
+    self.fcw_warning_test = FcwWarningTest() if (
+      CP.carFingerprint == CAR.CHEVROLET_TRAVERSE and CP.openpilotLongitudinalControl
+      and CP.networkLocation == NetworkLocation.fwdCamera
+      and CP.safetyConfigs and CP.safetyConfigs[0].safetyParam & GMSafetyFlags.HW_SDGM
+    ) else None
 
     self.packer_pt = CANPacker(DBC[self.CP.carFingerprint][Bus.pt])
     self.packer_obj = CANPacker(DBC[self.CP.carFingerprint][Bus.radar])
@@ -89,6 +95,7 @@ class CarController(CarControllerBase):
     return pedal_gas, press_regen_paddle
 
   def update(self, CC, CS, now_nanos):
+    test_fcw = self.fcw_warning_test.update(CS.out, CC) if self.fcw_warning_test is not None else False
 
     if self.frame % 50 == 0:
       params = Params()
@@ -273,7 +280,7 @@ class CarController(CarControllerBase):
                                                                idx, CC.enabled, near_stop, at_full_stop, self.CP))
 
           # Send dashboard UI commands (ACC status)
-          send_fcw = hud_alert == VisualAlert.fcw
+          send_fcw = hud_alert == VisualAlert.fcw or test_fcw
           dashboard_speed_kph = get_acc_dashboard_speed_kph(self.CP, hud_v_cruise * CV.MS_TO_KPH)
           can_sends.append(gmcan.create_acc_dashboard_command(self.packer_pt, CanBus.POWERTRAIN, CC.enabled,
                                                               dashboard_speed_kph, hud_control, send_fcw))
