@@ -71,3 +71,46 @@ production helper now uses module invocation, and native candidate entry was
 verified separately. These tests are not a reproduction of the original EPROTO.
 
 First-incident evidence, raw device logs and test receipts remain private, outside Git.
+
+## Installed validation
+
+Runtime commit `966653359f947ea699acef6da6d561671870f5c0` was pushed to
+`leehyuk1108/carrotpilot:WIP-FR` and fast-forwarded on the parked C4 after a
+rollback archive, current-state checks and exact candidate/Git hash comparison.
+Only `navdy_bridge` was restarted. The boot ID, Navdy main/phone-service PIDs,
+Bluetooth configuration, wired-mode parameter and unrelated generated DBC hashes
+remained unchanged. The first fetch failed before installation; a subsequent
+fetch and all preflight checks succeeded.
+
+The **installed** full Navdy suite passed **1453 tests in 108.97 seconds** with
+isolated Params and no vehicle publication. The actual installed `python -m`
+reset helper imported correctly and rejected a healthy online target. Its
+diagnostic collector wrote 64 bounded rows (11429 bytes). Recovery state retained
+the verified device identity with automatic-reset count zero.
+
+The old finalized update is not installed: the launch script's exact
+`.git`-newer-than-`.overlay_init` guard blocks that older overlay. No staging or
+update policy was deleted or changed, and no full device reboot was performed.
+
+A 300-second installed observation returned **599/599 connected USB samples**,
+with **1497 additional navigation-feedback responses**, maximum status/response
+age **0.2283 seconds**, no new bridge failure and the same run/boot throughout.
+This overlapped the low-priority installed regression suite. Wired replies do
+not carry the Bluetooth receiver diagnostics: the first collector's null USB
+counters and `receiverFresh=false` were missing evidence, not a measured receiver
+failure. Navdy's logcat ring had already overwritten that observation window;
+receiver application therefore needs its separate concurrent capture, not an
+inference from host connection status.
+
+That follow-up **65-second concurrent capture** confirmed 129/129 host samples
+connected by USB and 12 native Navdy diagnostic samples all fresh/USB-owned.
+Between the first/last receiver samples, **277 received updates were all applied**;
+there were **zero new clears, rejects, clear failures or display-actuator
+failures**. The host stayed on the same run with maximum status age 0.2159 seconds.
+Navdy's offroad display remained asleep as intended; counters are not optical
+onroad-display validation.
+
+New reset qualification, guard races, IPC failure and budget exhaustion are
+synthetic tests. The earlier physical reset restored this device, but the new
+automatic reset path has not encountered the original physical failure again.
+No live driving, optical screen, or newly induced phone reconnect was tested.
