@@ -80,7 +80,28 @@ refusals. The ioctl is mocked in these tests, not exercised while driving.
 The isolated native full suite passed **1479 tests in 109.03 seconds**. The
 actual candidate helper imports correctly, reuses ADB 5038 and refuses a healthy
 online USB target. Independent static review found no actionable issue in this
-diff. Installed follow-up results are recorded after execution.
+diff.
+
+Runtime commit `31eda60b48546b15e8a6b9e2b3f187d003a7153a` was pushed to personal
+`WIP-FR` and selectively installed after another fresh parked check, rollback
+archive and candidate/Git/installed hash comparison. Only the Navdy bridge was
+restarted. Boot ID, wired selection, Bluetooth configuration, unrelated dirty
+files and Navdy main/phone-service PIDs remained unchanged.
+
+The **installed** full suite passed **1479 tests in 104.58 seconds**. Its real
+module-mode helper again denied resetting the healthy online device. A separate
+65-second simultaneous host/receiver observation recorded **129/129 connected
+USB host samples**, 12 fresh USB-owned receiver samples, and **278 received =
+278 applied updates**, with zero new clears, rejects, clear failures or actuator
+failures. Maximum host status age was 0.2058 seconds; the bridge run stayed the
+same. Automatic reset count remained zero, as expected for a healthy connection.
+The launch guard still blocks the older finalized update; no staged update or
+global updater policy was changed.
+
+Onroad state and the USB ioctl remain simulated in regression tests. No actual
+onroad fault was injected, no fresh phone reconnection was induced, and optical
+screen output was not inspected. Neither these bounded observations nor the
+new recovery policy proves that the original physical USB error cannot recur.
 
 ## Verification
 
