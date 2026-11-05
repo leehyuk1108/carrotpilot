@@ -28,6 +28,7 @@ from openpilot.selfdrive.car.cruise import VCruiseCarrot
 from openpilot.selfdrive.car.car_specific import MockCarState
 from openpilot.selfdrive.car.openpilot_toggle import CruiseMainOpenpilotToggle
 from openpilot.selfdrive.car.stock_lane_markings import TraverseStockLaneMarkings, UNKNOWN_LANES, lane_boottime_ns
+from openpilot.selfdrive.car.outside_air_temp import TraverseOutsideAirTemp
 from openpilot.selfdrive.controls.lib.lateral_readiness import LateralStartupGate
 from openpilot.selfdrive.carrot.xiaoge.xiaoge_vision import (
   XiaogeVisionResult,
@@ -190,6 +191,7 @@ class Car:
     self.card_diag_can_timeouts = 0
     self.xiaoge_vision_result: XiaogeVisionResult | None = None
     self.stock_lane_markings = TraverseStockLaneMarkings() if self.CP.carFingerprint == GM_CAR.CHEVROLET_TRAVERSE else None
+    self.outside_air_temp = TraverseOutsideAirTemp() if self.CP.carFingerprint == GM_CAR.CHEVROLET_TRAVERSE else None
     self.xiaoge_blindspot_sources = (False, False, False, False)
     self.xiaoge_blindspot_sources_published = None
     self.xiaoge_blindspot_sources_published_ns = 0
@@ -254,6 +256,12 @@ class Car:
       if (stock.left, stock.right) != UNKNOWN_LANES:
         # In replay, preserve CAN sample age in the current publisher clock.
         stock.sampleMonoTime = self.stock_lane_markings.publisher_sample_ns(input_ns, publisher_ns)
+    if self.outside_air_temp is not None:
+      oat_now_ns = can_list[-1][0] if REPLAY and can_list else lane_boottime_ns()
+      celsius = self.outside_air_temp.update(can_list, oat_now_ns)
+      oat = CS.outsideAirTemp
+      oat.valid = celsius is not None and CS.canValid and not CS.canTimeout
+      oat.celsius = celsius if oat.valid else 0.0
     #self.t1 = time.monotonic()
 
     can_rcv_valid = len(can_strs) > 0

@@ -293,6 +293,13 @@ struct CarState {
     sampleMonoTime @3 :UInt64; # camera CAN receive timestamp in the publisher's boot clock
   }
 
+  outsideAirTemp @106 :OutsideAirTemp; # display-only ECM outside air temperature (the value the cluster shows)
+
+  struct OutsideAirTemp {
+    valid @0 :Bool;     # false: unsupported car, no fresh frame, or CAN invalid
+    celsius @1 :Float32;
+  }
+
   struct VehicleGps {
     available @0 :Bool;
     valid @1 :Bool; # receive/continuity checks, not a decoded satellite fix flag

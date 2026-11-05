@@ -12,6 +12,7 @@ from itertools import islice
 import math
 from typing import Any
 
+from openpilot.selfdrive.car.outside_air_temp import outside_air_temp_c
 from openpilot.selfdrive.car.stock_lane_markings import stock_lane_codes
 from openpilot.selfdrive.navdy.deceleration import badge_code
 
@@ -335,6 +336,10 @@ def payload_from_messages(*, car_state: Any = None, selfdrive_state: Any = None,
     "navVehicles": [],
     "decel": 0,
   }
+  outside_c = outside_air_temp_c(car_state) if car_valid else None
+  if outside_c is not None:
+    # Absent key keeps the HUD on its own OBD 0x46 reading.
+    payload['outsideTempC'] = rounded(outside_c, 1)
   if payload['longActive'] and payload['alertSize'] == 'none' and payload['alertStatus'] == 'normal':
     payload['decel'] = badge_code(car_state, selfdrive_state, car_control, longitudinal_plan, carrot_man)
   if active:
