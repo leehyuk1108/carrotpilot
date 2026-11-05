@@ -19,6 +19,7 @@ from opendbc.car.can_definitions import CanData, CanRecvCallable, CanSendCallabl
 from opendbc.car.carlog import carlog
 from opendbc.car.fw_versions import ObdCallback
 from opendbc.car.car_helpers import get_car
+from opendbc.car.gm.values import CAR as GM_CAR
 from opendbc.car.interfaces import CarInterfaceBase
 from openpilot.selfdrive.pandad import can_capnp_to_list, can_list_to_can_capnp
 from openpilot.selfdrive.car.alternative_experience import get_alternative_experience
@@ -26,6 +27,7 @@ from openpilot.selfdrive.car.card_diagnostics import should_log_card_diagnostics
 from openpilot.selfdrive.car.cruise import VCruiseCarrot
 from openpilot.selfdrive.car.car_specific import MockCarState
 from openpilot.selfdrive.car.openpilot_toggle import CruiseMainOpenpilotToggle
+from openpilot.selfdrive.car.stock_lane_markings import TraverseStockLaneMarkings, UNKNOWN_LANES, lane_boottime_ns
 from openpilot.selfdrive.controls.lib.lateral_readiness import LateralStartupGate
 from openpilot.selfdrive.carrot.xiaoge.xiaoge_vision import (
   XiaogeVisionResult,
@@ -187,6 +189,7 @@ class Car:
     self.card_diag_slow_process = 0
     self.card_diag_can_timeouts = 0
     self.xiaoge_vision_result: XiaogeVisionResult | None = None
+    self.stock_lane_markings = TraverseStockLaneMarkings() if self.CP.carFingerprint == GM_CAR.CHEVROLET_TRAVERSE else None
     self.xiaoge_blindspot_sources = (False, False, False, False)
     self.xiaoge_blindspot_sources_published = None
     self.xiaoge_blindspot_sources_published_ns = 0
@@ -241,6 +244,16 @@ class Car:
     CS.rightBlindspotOnnx = right_vision
     CS.blindspotSplitSourcesValid = True
     apply_xiaoge_vision_result(CS, self.xiaoge_vision_result, sm_done_ns)
+    if self.stock_lane_markings is not None:
+      publisher_ns = lane_boottime_ns()
+      input_ns = can_list[-1][0] if REPLAY and can_list else publisher_ns
+      lane_codes = self.stock_lane_markings.update(can_list, input_ns)
+      stock = CS.stockLaneMarkings
+      stock.supported = True
+      stock.left, stock.right = lane_codes if CS.canValid and not CS.canTimeout else UNKNOWN_LANES
+      if (stock.left, stock.right) != UNKNOWN_LANES:
+        # In replay, preserve CAN sample age in the current publisher clock.
+        stock.sampleMonoTime = self.stock_lane_markings.publisher_sample_ns(input_ns, publisher_ns)
     #self.t1 = time.monotonic()
 
     can_rcv_valid = len(can_strs) > 0

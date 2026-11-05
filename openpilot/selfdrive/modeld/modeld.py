@@ -20,6 +20,7 @@ from openpilot.common.realtime import config_realtime_process, DT_MDL
 from openpilot.common.transformations.camera import DEVICE_CAMERAS
 from openpilot.system.camerad.cameras.nv12_info import get_nv12_info
 from openpilot.common.transformations.model import get_warp_matrix
+from openpilot.selfdrive.car.stock_lane_markings import stock_lane_sample_fresh
 from openpilot.selfdrive.controls.lib.desire_helper import DesireHelper
 from openpilot.selfdrive.controls.lib.drive_helpers import get_accel_from_plan, smooth_value, get_curvature_from_plan
 from openpilot.selfdrive.modeld.parse_model_outputs import Parser
@@ -570,7 +571,10 @@ def main(demo=False):
       l_lane_change_prob = desire_state[log.Desire.laneChangeLeft]
       r_lane_change_prob = desire_state[log.Desire.laneChangeRight]
       lane_change_prob = l_lane_change_prob + r_lane_change_prob
-      DH.update(sm['carState'], modelv2_send.modelV2, sm['carControl'].latActive, lane_change_prob, sm['carrotMan'], sm['radarState'])
+      car_state = sm['carState']
+      stock_sample_fresh = sm.valid['carState'] and sm.alive['carState'] and stock_lane_sample_fresh(car_state)
+      DH.update(car_state, modelv2_send.modelV2, sm['carControl'].latActive, lane_change_prob,
+                sm['carrotMan'], sm['radarState'], stock_sample_fresh=stock_sample_fresh)
       modelv2_send.modelV2.meta.laneChangeState = DH.lane_change_state
       modelv2_send.modelV2.meta.laneChangeDirection = DH.lane_change_direction
       modelv2_send.modelV2.meta.desireLog = DH.desireLog #carrot

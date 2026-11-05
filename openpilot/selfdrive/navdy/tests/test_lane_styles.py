@@ -193,6 +193,21 @@ def test_real_capnp_fields_round_trip_into_string_styles():
     assert styles(payload(car_state=car_reader, model=model_reader)) == ("solid", "dashed")
 
 
+@pytest.mark.parametrize("stock,expected", [
+  ((1, 0), ("solid", "dashed")), ((0, 1), ("dashed", "solid")),
+  ((-1, 1), ("unknown", "solid")), ((-1, -1), ("unknown", "unknown")),
+])
+def test_stock_lanes_override_onnx_on_existing_wire_fields_only(stock, expected):
+  cs = car(leftLaneLine=0, rightLaneLine=1)
+  m = model()
+  previous = payload(car_state=cs, model=m)
+  cs.stockLaneMarkings = NS(supported=True, left=stock[0], right=stock[1])
+  result = payload(car_state=cs, model=m)
+  assert styles(result) == expected
+  assert {k: v for k, v in result.items() if k not in STYLE_KEYS} == {k: v for k, v in previous.items() if k not in STYLE_KEYS}
+  encode_frame(result)
+
+
 @pytest.mark.parametrize("codes", [(0, 1), (20, 24), (-1, -1), (True, "0")])
 def test_all_other_payload_values_order_and_wire_bytes_are_unchanged(codes):
   m = model()

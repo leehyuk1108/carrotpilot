@@ -12,6 +12,7 @@ from itertools import islice
 import math
 from typing import Any
 
+from openpilot.selfdrive.car.stock_lane_markings import stock_lane_codes
 from openpilot.selfdrive.navdy.deceleration import badge_code
 
 KPH_PER_MS = 3.6
@@ -342,7 +343,9 @@ def payload_from_messages(*, car_state: Any = None, selfdrive_state: Any = None,
     if geometry:
       payload.update(navdy_lead_geometry(model, radar_state, longitudinal_plan))
       probs = _items(getattr(model, "laneLineProbs", None), 3)
-      for index, side in ((1, "Left"), (2, "Right")):
-        payload[f"navLane{side}Type"] = _lane_type(getattr(car_state, f"{side.lower()}LaneLine", None),
-                                                 probs[index] if index < len(probs) else None)
+      left_code, right_code = stock_lane_codes(car_state) or (
+        getattr(car_state, "leftLaneLine", None), getattr(car_state, "rightLaneLine", None),
+      )
+      for index, side, code in ((1, "Left", left_code), (2, "Right", right_code)):
+        payload[f"navLane{side}Type"] = _lane_type(code, probs[index] if index < len(probs) else None)
   return payload

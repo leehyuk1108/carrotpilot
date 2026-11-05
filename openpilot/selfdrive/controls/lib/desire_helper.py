@@ -2,6 +2,7 @@ from openpilot.cereal import log
 from openpilot.common.constants import CV
 from openpilot.common.realtime import DT_MDL
 from openpilot.common.params import Params
+from openpilot.selfdrive.car.stock_lane_markings import UNKNOWN_LANES, stock_lane_codes
 from openpilot.selfdrive.carrot.bluetooth.model import CommandReader
 
 from openpilot.selfdrive.controls.lib.desire_lib.constants import (
@@ -43,6 +44,7 @@ class DesireHelper:
     # per-side states
     self.left = SideState("left")
     self.right = SideState("right")
+    self.previous_stock_lane_codes: tuple[int, int] | None = None
 
     # blinker/ATC state (원본 변수들 유지)
     self.blinker_ignore = False
@@ -194,7 +196,7 @@ class DesireHelper:
   # ─────────────────────────────────────────────
   # per-side processing (핵심: 좌/우 모두 매 프레임 계산)
   # ─────────────────────────────────────────────
-  def _process_sides(self, carstate, modeldata, radarState):
+  def _process_sides(self, carstate, modeldata, radarState, stock_codes=None):
     # geometry (좌/우)
     # left: outer laneLines[0], current laneLines[1], edge[0], cur_prob laneLineProbs[1]
     self.left.update_lane_geometry(
@@ -211,9 +213,13 @@ class DesireHelper:
       cur_prob=modeldata.laneLineProbs[2],
     )
 
-    # lane line info (HUD용 raw는 기존대로 leftLaneLine/rightLaneLine)
-    self.left.update_lane_line_info(carstate.leftLaneLine)
-    self.right.update_lane_line_info(carstate.rightLaneLine)
+    # Leave the legacy fields untouched for HUD and other vehicle ports.
+    left_code, right_code = stock_codes if stock_codes is not None else (carstate.leftLaneLine, carstate.rightLaneLine)
+    self.left.update_lane_line_info(left_code)
+    self.right.update_lane_line_info(right_code)
+    if stock_codes is not None:
+      # An OEM marking transition is a classification, not a maneuver request.
+      self.left.lane_line_info_edge_detect = self.right.lane_line_info_edge_detect = False
 
     # BSD 설정
     ignore_bsd = (self.laneChangeBsd < 0)
@@ -226,7 +232,9 @@ class DesireHelper:
                                 bsd_hold_sec=2.0, radar_objects=radarState.leadsRight)
 
     # compute available (include BSD+object)
-    if self.laneLineCheck >= 1:
+    if stock_codes is not None:
+      left_line_ok, right_line_ok = (left_code == 0, right_code == 0)
+    elif self.laneLineCheck >= 1:
       left_line_ok = self.left.lane_line_info_mod in (0, 5)
       right_line_ok = self.right.lane_line_info_mod in (0, 5)
     else:
@@ -235,6 +243,13 @@ class DesireHelper:
       right_line_ok = self.right.lane_line_info_raw // 10 != 2
     self.left.compute_lane_change_available(lane_line_info_lt_20=left_line_ok, ignore_bsd=ignore_bsd)
     self.right.compute_lane_change_available(lane_line_info_lt_20=right_line_ok, ignore_bsd=ignore_bsd)
+    if stock_codes is not None:
+      # Keep radar/BSM release handling on a stable dashed marking, but don't
+      # generate that trigger when only the marking becomes usable again.
+      for side, previous in zip((self.left, self.right), self.previous_stock_lane_codes or UNKNOWN_LANES, strict=True):
+        if previous != 0:
+          side.lane_change_available_released = False
+    self.previous_stock_lane_codes = stock_codes
 
     self.left.update_triggers()
     self.right.update_triggers()
@@ -253,7 +268,7 @@ class DesireHelper:
   # ─────────────────────────────────────────────
   # main update
   # ─────────────────────────────────────────────
-  def update(self, carstate, modeldata, lateral_active, lane_change_prob, carrotMan, radarState):
+  def update(self, carstate, modeldata, lateral_active, lane_change_prob, carrotMan, radarState, *, stock_sample_fresh=False):
     self.frame += 1
     self._update_params_periodic()
 
@@ -269,7 +284,10 @@ class DesireHelper:
     lever_decided_turn = False
 
     # per-side compute (좌/우 모두)
-    self._process_sides(carstate, modeldata, radarState)
+    stock_codes = stock_lane_codes(carstate) if self.laneLineCheck >= 1 else None
+    if stock_codes is not None and (not stock_sample_fresh or not carstate.canValid or getattr(carstate, "canTimeout", False)):
+      stock_codes = UNKNOWN_LANES
+    self._process_sides(carstate, modeldata, radarState, stock_codes=stock_codes)
     if trailer_maneuver_blocked:
       self.left.lane_change_available = False
       self.right.lane_change_available = False
@@ -464,6 +482,16 @@ class DesireHelper:
                                     not atc_lane_change_retry_line_blocked
               start_gate = (side.lane_change_available_geom and self.lane_change_delay == 0) or \
                            side.lane_line_info_edge_detect or solid_line_blocked or block_released_auto or atc_line_release
+              if stock_codes is not None:
+                stock_line = stock_codes[0 if blinker_state == BLINKER_LEFT else 1]
+                # Neither ATC nor an availability transition can bypass the
+                # stock marking gate or the configured delay. Mode 2 retains
+                # the intentional driver torque override on a known solid.
+                if stock_line != 0:
+                  atc_line_release = False
+                  start_gate = (stock_line == 1 and solid_line_blocked and driver_enabled and
+                                torque_applied and side_clear_without_line)
+                start_gate = start_gate and self.lane_change_delay == 0
               if start_gate and not lever_undecided:
                 if solid_line_blocked:
                   if atc_line_release or (torque_applied and not (bsd_active and block_lanechange_bsd)):

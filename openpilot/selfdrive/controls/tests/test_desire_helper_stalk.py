@@ -21,7 +21,7 @@ class TestDesireHelperStalkRequest:
       reader.return_value.read.return_value = None
       self.helper = DesireHelper()
     self.helper._update_params_periodic = lambda: None
-    self.helper._process_sides = lambda car, model, radar: None
+    self.helper._process_sides = lambda car, model, radar, **kwargs: None
     self.helper._check_desire_state = lambda model, car, maneuver: None
     self.helper.laneChangeNeedTorque = 0
     self.helper.laneChangeBsd = 0

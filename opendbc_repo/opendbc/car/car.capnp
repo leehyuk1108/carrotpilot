@@ -284,6 +284,15 @@ struct CarState {
   blinkerLamp @103 :UInt8;            # turn-signal lamp right now (no hold): 0 dark, 1 left lit, 2 right lit
 
   vehicleGps @104 :VehicleGps;
+  stockLaneMarkings @105 :StockLaneMarkings; # stock camera types, separate from legacy color/ONNX fields
+
+  struct StockLaneMarkings {
+    supported @0 :Bool;
+    left @1 :Int16 = -1;  # -1: unknown, 0: dashed, 1: solid
+    right @2 :Int16 = -1;
+    sampleMonoTime @3 :UInt64; # camera CAN receive timestamp in the publisher's boot clock
+  }
+
   struct VehicleGps {
     available @0 :Bool;
     valid @1 :Bool; # receive/continuity checks, not a decoded satellite fix flag
