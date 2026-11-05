@@ -1,9 +1,14 @@
-"""CAN subset stream for the phone live-view app (/ws/viz_can).
+"""Data streams for the phone live-view app. The phone renders everything; the comma only forwards data.
 
-The phone renders everything; this endpoint only forwards the GM frames the live view needs that are not in any cereal
-service (front-camera object tracks and types, lead brake/turn lamps, stock lane-marking types, raw radar targets,
-ACC gap, outside temperature). It runs only while a client is connected: it then subscribes to `can` (not conflated),
-drains it every 100 ms and sends one binary frame:
+/ws/viz      one socket with everything the app needs, multiplexed like /ws/raw_multiplex:
+             [len(name)][name utf-8][payload]
+             - cereal services as raw Event capnp, read from conflated sockets once per 100 ms tick
+               (carState/modelV2/radarState 10 Hz, carControl 5 Hz, selfdriveState 2.5 Hz; the app smooths lanes).
+             - name "vizCan": the CAN batch below.
+/ws/viz_can  the CAN batch alone.
+
+CAN batch: the GM frames the live view needs that are not in any cereal service (front-camera object tracks and types,
+lead brake/turn lamps, stock lane-marking types, raw radar targets, ACC gap, outside temperature), every 100 ms:
 
   b'VC' u8 version=2, u16 count (LE), then count x 14-byte records:
   u8 bus, u16 addr LE, u16 age_ms LE, u8 len, data[8] (zero padded; frames longer than 8 bytes are not sent)
@@ -11,8 +16,13 @@ drains it every 100 ms and sends one binary frame:
 CPU (measured on the comma with a stored drive log, 5,100 frames/s): touching every frame through pycapnp costs
 3.2 % of one core at 50 ms batches. pack_raw() reads the drained `can` events' capnp bytes directly with a handful of
 numpy calls per batch (bus/address of all frames at once, data only for wanted frames): 1.5 % at 50 ms, 0.9 % at the
-100 ms used here. Any layout it does not expect falls back to pycapnp. Read-only: never publishes cereal messages and
-never sends CAN.
+100 ms used here. Any layout it does not expect falls back to pycapnp.
+
+Wakeups dominate on the comma CPU: an asyncio task that only sleeps 50 ms costs 1.3 % of one core there. So all work
+shares one 100 ms tick. After 2 s without any data (car off) the tick slows to 500 ms, CAN is not read at all and only
+the latest carState is checked to notice the car starting. The shared raw hub, by
+contrast, polls carState at 60 Hz and retries silent services every 10 ms (+3.2 % with the car off).
+Everything runs only while a client is connected. Read-only: never publishes cereal messages and never sends CAN.
 """
 from __future__ import annotations
 
@@ -26,7 +36,12 @@ import numpy as np
 from aiohttp import WSMsgType, web
 
 VERSION = 2
-INTERVAL_S = 0.1                 # 10 Hz batches: per-batch overhead dominates on the comma CPU; camera objects come at 25 Hz
+INTERVAL_S = 0.1                 # CAN batch period = tick; camera objects come at 25 Hz
+TICK_S = 0.1
+IDLE_TICK_S = 0.5
+IDLE_AFTER_S = 2.0
+SERVICE_INTERVALS = {'carState': 0.1, 'modelV2': 0.1, 'radarState': 0.1, 'carControl': 0.2, 'selfdriveState': 0.4}
+CAN_NAME = 'vizCan'
 MAX_FRAMES = 4000
 WANTED: dict[int, frozenset[int]] = {
   # bus 1 (object/camera): lane info 0x350-0x356, camera objects 0x420-0x42C / 0x440-0x44C, radar 0x460-0x47F, LHT 0x135
@@ -186,50 +201,107 @@ def pack_raw(raws: list[bytes], log_module: Any, now_ns: int) -> bytes | None:
   return payload if ok else pack_records(extract(raws, log_module), now_ns)
 
 
-class VizCanHub:
-  def __init__(self) -> None:
-    self.clients: set[web.WebSocketResponse] = set()
-    self.task: asyncio.Task | None = None
+def _release(sock: Any) -> None:
+  """msgq SubSocket has no close(); dropping the last reference frees it. Call close() only where it exists."""
+  close = getattr(sock, 'close', None)
+  if close is not None:
+    try:
+      close()
+    except Exception:
+      pass
 
-  async def register(self, ws: web.WebSocketResponse) -> None:
-    self.clients.add(ws)
+
+def mux(name: str, payload: bytes) -> bytes:
+  raw = name.encode()
+  return bytes([len(raw)]) + raw + payload
+
+
+class VizHub:
+  """One poll loop shared by all live-view clients; it exists only while a client is connected."""
+
+  def __init__(self, messaging: Any = None, log_module: Any = None) -> None:
+    self.clients: dict[Any, str] = {}            # ws -> 'viz' (services + CAN) | 'can' (CAN batch only)
+    self.task: asyncio.Task | None = None
+    self._messaging, self._log = messaging, log_module
+
+  async def register(self, ws: Any, kind: str) -> None:
+    self.clients[ws] = kind
     if self.task is None or self.task.done():
       self.task = asyncio.create_task(self._loop())
 
-  def unregister(self, ws: web.WebSocketResponse) -> None:
-    self.clients.discard(ws)
+  def unregister(self, ws: Any) -> None:
+    self.clients.pop(ws, None)
+
+  async def _send(self, kind: str, data: bytes) -> None:
+    for ws, k in list(self.clients.items()):
+      if k != kind:
+        continue
+      if ws.closed:
+        self.clients.pop(ws, None)
+        continue
+      try:
+        await ws.send_bytes(data)
+      except Exception:
+        self.clients.pop(ws, None)
 
   async def _loop(self) -> None:
-    import openpilot.cereal.messaging as messaging
-    from openpilot.cereal import log
-    sock = messaging.sub_sock('can', conflate=False)
+    messaging, log = self._messaging, self._log
+    if messaging is None:
+      import openpilot.cereal.messaging as messaging
+    if log is None:
+      from openpilot.cereal import log
+    socks: dict[str, Any] = {}
+    next_read: dict[str, float] = {}
+    can_sock = None
+    last_data = time.monotonic()
     try:
       while self.clients:
-        raws = messaging.drain_sock_raw(sock)
-        payload = pack_raw(raws, log, time.monotonic_ns()) if raws else None
-        if payload:
-          for ws in list(self.clients):
-            if ws.closed:
-              self.clients.discard(ws)
-              continue
-            try:
-              await ws.send_bytes(payload)
-            except Exception:
-              self.clients.discard(ws)
-        await asyncio.sleep(INTERVAL_S)
+        now = time.monotonic()
+        idle = now - last_data > IDLE_AFTER_S
+        got = False
+        want_services = any(k == 'viz' for k in self.clients.values())
+        for svc, interval in SERVICE_INTERVALS.items():
+          # car off: only the latest carState is checked (cheap, conflated) to notice the car starting
+          if (not want_services and svc != 'carState') or (idle and svc != 'carState') or now < next_read.get(svc, 0.0):
+            continue
+          next_read[svc] = now + interval - 0.02       # fixed cadence even when the service is silent
+          sock = socks.get(svc)
+          if sock is None:
+            sock = socks[svc] = messaging.sub_sock(svc, conflate=True)
+          payload = sock.receive(non_blocking=True)
+          if payload:
+            got = True
+            if want_services:
+              await self._send('viz', mux(svc, payload))
+        if idle and not got:
+          if can_sock is not None:                     # stop reading CAN entirely while the car is off
+            _release(can_sock); can_sock = None
+        else:
+          if can_sock is None:
+            can_sock = messaging.sub_sock('can', conflate=False)
+          raws = messaging.drain_sock_raw(can_sock)
+          payload = pack_raw(raws, log, time.monotonic_ns()) if raws else None
+          if payload:
+            got = True
+            await self._send('can', payload)
+            await self._send('viz', mux(CAN_NAME, payload))
+        if got:
+          last_data = now
+        tick = IDLE_TICK_S if now - last_data > IDLE_AFTER_S else TICK_S
+        await asyncio.sleep(max(0.005, tick - (time.monotonic() - now)))
     finally:
-      try:
-        sock.close()
-      except Exception:
-        pass
+      for sock in [can_sock, *socks.values()]:
+        if sock is not None:
+          _release(sock)
+      socks.clear(); can_sock = None
 
 
-async def ws_viz_can(request: web.Request) -> web.WebSocketResponse:
-  hub: VizCanHub = request.app['viz_can_hub']
+async def _serve(request: web.Request, kind: str, hello: dict) -> web.WebSocketResponse:
+  hub: VizHub = request.app['viz_hub']
   ws = web.WebSocketResponse(heartbeat=20, compress=False)
   await ws.prepare(request)
-  await ws.send_str(json.dumps({'type': 'hello', 'stream': 'viz_can', 'version': VERSION, 'intervalMs': int(INTERVAL_S * 1000)}))
-  await hub.register(ws)
+  await ws.send_str(json.dumps(hello))
+  await hub.register(ws, kind)
   try:
     async for msg in ws:
       if msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.ERROR):
@@ -239,6 +311,16 @@ async def ws_viz_can(request: web.Request) -> web.WebSocketResponse:
   return ws
 
 
+async def ws_viz(request: web.Request) -> web.WebSocketResponse:
+  return await _serve(request, 'viz', {'type': 'hello', 'stream': 'viz', 'version': 1, 'services': SERVICE_INTERVALS,
+                                       'can': CAN_NAME, 'canVersion': VERSION, 'canIntervalMs': int(INTERVAL_S * 1000)})
+
+
+async def ws_viz_can(request: web.Request) -> web.WebSocketResponse:
+  return await _serve(request, 'can', {'type': 'hello', 'stream': 'viz_can', 'version': VERSION, 'intervalMs': int(INTERVAL_S * 1000)})
+
+
 def register(app: web.Application) -> None:
-  app['viz_can_hub'] = VizCanHub()
+  app['viz_hub'] = VizHub()
+  app.router.add_get('/ws/viz', ws_viz)
   app.router.add_get('/ws/viz_can', ws_viz_can)
