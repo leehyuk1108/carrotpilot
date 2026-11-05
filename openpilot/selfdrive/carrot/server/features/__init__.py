@@ -27,6 +27,7 @@ from . import (
   vision_diag,
   vision_test,
   web_sound,
+  viz_can,
   web_settings,
   ws,
   xiaoge,
@@ -41,6 +42,7 @@ def register_all(app: web.Application) -> None:
   stream.register(app)
   support_terminal.register(app)
   ws.register(app)
+  viz_can.register(app)
   settings.register(app)
   params.register(app)
   setting_favorites.register(app)
