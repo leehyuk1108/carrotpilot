@@ -289,7 +289,7 @@ VW MEB(ID.4 포함)에도 수동 조향비와 학습 비율이 적용됩니다. 
 | 현대·기아 | `HyundaiCameraSCC`, `IsLdwsCar`, `HapticFeedbackWhenSpeedCamera` | SCC 연결 방식, LDWS 차량과 카메라 구간 햅틱 |
 | CANFD·HDA | `CanfdHDA2`, `HyundaiCanfdClusterDirectTx`, `CanfdDebug`, `HDPuse` | HDA2 차량, 계기판 직접 송신과 CAN FD 디버그·HDP 기능 |
 | 레이더 | `EnableRadarTracks`, `RadarTrackFlip`, `EnableCornerRadar`, `CarrotRadarMode`, `CarrotRadarCutInSensitivity` | SCC 레이더, 전방 트랙 좌우 보정, 코너 레이더와 당근레이더 처리·컷인 감도 |
-| 운전자 모니터링 | `DriverMonitoringEnabled`(검색 전용), `DriverMonitoringMode`, `CarrotVisionEnabled`, `MuteDoor`, `MuteSeatbelt` | 운전자 모니터링과 일부 차량 경고음 처리 |
+| 운전자 모니터링 | `DriverMonitoringEnabled`(검색 전용), `DriverMonitoringMode`, `GmClusterTakeSteering`, `CarrotVisionEnabled`, `MuteDoor`, `MuteSeatbelt` | 운전자 모니터링, GM 계기판 핸들 경고와 일부 차량 경고음 처리 |
 | 차량 보조 | `MaxAngleFrames`, `SpeedFromPCM`, `AutoStopOff` | 최대 조향각 관련 프레임, 순정 SCC 속도 제어 방식과 트래버스 오토스톱 자동 끄기 |
 | 기기 하드웨어 | `HardwareC3xLite` | 스피커가 없는 C3X Lite의 알림음과 프로세스 구성 |
 
@@ -314,6 +314,7 @@ Bosch MRRevo14F 수신을 지원하는 버전에서 Bosch MRRevo14F 후보 차�
 기어와 속도에 관계없이 정차 중에도 실제 차량 CANCEL 버튼을 놓았다 다시 누르는 방식으로 3초 안에 세 번 누르면 `DriverMonitoringEnabled` 설정을 바꾸지 않고 현재 시동 구간 동안 감시를 끕니다. 기어 또는 속도가 바뀌어도 횟수를 초기화하지 않습니다. 자동 제어 CANCEL 반사와 BT CANCEL은 세지 않습니다. 다른 차량 버튼의 누름 또는 놓음 신호, 무효·오래된 차량 상태, 입력 스트림 끊김이나 시간 초과는 횟수를 초기화하며, 실제 입력과 구분할 수 없는 순정 ACC 속도 버튼 반사도 보수적으로 초기화할 수 있습니다. 다음 시동을 켜거나 manager/기기를 재시작하면 임시 꺼짐 상태만 해제하므로, 저장된 설정이 켜짐일 때만 감시가 다시 켜집니다. `DriverMonitoringMode`와 `CarrotVisionEnabled`는 바꾸지 않습니다.
 
 - `DriverMonitoringMode`: 운전자 감시가 켜져 있을 때 적용됩니다. 기본값 0은 카메라 사용 시 콤마 순정 감시 기준이며, 카메라 미장착·고장 시에는 15·30·45초 조작 감시로 전환합니다. 1은 빈 도로 시간 완화와 조작 후 카메라 경고 유예를 적용하는 시험 전용 실험 모드입니다. 공통 예외로 P단·완전 정차·인게이지 해제가 유효한 신호로 1초간 확인되면 재사용 제한을 초기화합니다. 모드 변경은 재부팅 없이 약 0.5초 주기로 적용됩니다. 전환해도 누적 감시시간·경고 횟수·재사용 제한은 초기화되지 않으며, 이전 조작 유예와 전방주시 연속 판정은 종료됩니다. [운전자 감시와 실험 모드 조건](driver-monitoring.md)을 확인하세요. 현대·기아·제네시스 CAN-FD의 검증된 원본 `STEER_TOUCH_2AF` 수신 신호를 차종명 제한 없이 처리하며 카메라·모드에 따라 유지와 새 접촉을 구분합니다.
+- **GM 계기판 핸들 경고 (실험)** (`GmClusterTakeSteering`): GM 카메라 하네스 차량 전용이며 트래버스에서 시험 중입니다. 기본값 `0`은 끔입니다. 오픈파일럿은 평소 순정 카메라에 손이 핸들에 있다고 알려 순정 'Take Steering' 경고를 숨깁니다. `1`은 경고음이 나는 운전자 감시 경고(2단계 이상)부터, `2`는 첫 감시 경고(1단계)부터, 경고가 떠 있는 동안만 손을 뗐다고 알려 순정 카메라가 계기판에 핸들 경고를 띄우게 합니다. 조향 명령, 운전자 감시 판단과 실제 핸들 토크 신호는 바뀌지 않습니다. 순정 카메라의 반응 시간, 경고음, 순정 차선유지 설정 필요 여부와 다른 계기판 메시지는 실차에서 확인되지 않았습니다. 약 0.5초 안에 재부팅 없이 적용됩니다.
 - `CarrotVisionEnabled`: 운전자 감시와 별도로 웹 도로 영상을 켭니다. `DisableDM`은 이관 전용이며, 기존 `DisableDM=2`의 영상 기능만 최초 전환 시 `CarrotVisionEnabled`로 승계합니다.
 - `SpeedFromPCM`: 기본값은 `2`(커브·카메라 감속)이며, PCM 차량의 버튼 스패밍과 속도 선택에 영향을 줍니다. `3`에서 토요타·렉서스는 순정 설정속도를 사용하며 가감속 제어 방식은 바뀌지 않습니다. `TOYOTA_RAV4_TSS2_2022`의 PCM 직접 가감속에서는 `0`도 유효한 순정 설정속도 변경·크루즈 재개를 반영하며 낮은 감속 목표를 유지합니다. [버튼 전송 상세](buttons-presets.md#button-spam)를 참고하세요.
 - `AutoStopOff`: 기본값은 `0`(사용 안 함)입니다. `1`이면 시동마다 엔진 오토스톱을 자동으로 끕니다. 트래버스에서 오픈파일럿 롱컨을 쓸 때만 동작하는 시험 기능입니다.

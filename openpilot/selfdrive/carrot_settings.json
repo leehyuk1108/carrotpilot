@@ -453,6 +453,7 @@
           "params": [
             "DriverMonitoringEnabled",
             "DriverMonitoringMode",
+            "GmClusterTakeSteering",
             "SimulationIgnorePhoneDM",
             "CarrotVisionEnabled",
             "MuteDoor",
@@ -2154,6 +2155,40 @@
         ]
       },
       "risk": "high"
+    },
+    {
+      "group": "시작",
+      "name": "GmClusterTakeSteering",
+      "title": "GM 계기판 핸들 경고 (실험)",
+      "descr": "GM 카메라 하네스 차량 전용 실험 기능입니다(트래버스에서 시험 중). 오픈파일럿은 평소 순정 카메라에 손이 핸들에 있다고 알려 순정 'Take Steering' 경고를 숨깁니다. 이 설정을 켜면 오픈파일럿의 운전자 감시 경고가 떠 있는 동안만 손을 뗐다고 알려 순정 카메라가 계기판에 핸들 경고를 띄우게 합니다.\n0: 끔(기본)\n1: 경고음이 나는 감시 경고(2단계 이상)부터\n2: 첫 감시 경고(1단계)부터\n조향 명령과 운전자 감시 판단은 바뀌지 않고, 실제 핸들 토크 신호도 그대로입니다. 순정 카메라의 반응 시간, 경고음, 순정 차선유지 설정 필요 여부와 다른 계기판 메시지는 실차에서 확인되지 않았습니다. 약 0.5초 안에 재부팅 없이 적용됩니다.",
+      "egroup": "START",
+      "etitle": "GM cluster Take Steering alert (experimental)",
+      "edescr": "Experimental, GM camera-harness cars only (being tested on a Traverse). openpilot normally tells the stock camera that hands are on the wheel, which hides the stock 'Take Steering' alert. When enabled, it reports hands off only while openpilot's own driver-monitoring alert is up, so the stock camera can show its steering alert on the instrument cluster.\n0: Off (default)\n1: From the audible monitoring alert (level 2 and above)\n2: From the first monitoring alert (level 1)\nSteering commands, driver-monitoring decisions and the real steering torque signal are unchanged. The camera's delay, chime, whether stock Lane Keep Assist must be on, and any other cluster messages are not yet verified in the car. Applies within about 0.5 seconds without rebooting.",
+      "cgroup": "启动设置",
+      "ctitle": "GM 仪表盘握方向盘警告（实验）",
+      "cdescr": "仅限 GM 摄像头线束车辆的实验功能（正在 Traverse 上测试）。openpilot 平时告诉原厂摄像头双手在方向盘上，从而隐藏原厂“Take Steering”警告。开启后，仅在 openpilot 驾驶员监控警告显示期间报告双手离开，让原厂摄像头在仪表盘上显示握方向盘警告。\n0：关闭（默认）\n1：从有提示音的监控警告（2级及以上）开始\n2：从第一次监控警告（1级）开始\n转向指令、驾驶员监控判断和实际方向盘扭矩信号均不变。摄像头的反应时间、提示音、是否需要开启原厂车道保持以及其他仪表信息尚未在实车验证。约0.5秒内生效，无需重启。",
+      "min": 0,
+      "max": 2,
+      "default": 0,
+      "unit": 1,
+      "control": "select",
+      "options": {
+        "ko": [
+          "끔",
+          "경고음 단계부터",
+          "첫 경고부터"
+        ],
+        "en": [
+          "Off",
+          "From audible alert",
+          "From first alert"
+        ],
+        "zh": [
+          "关闭",
+          "从提示音警告开始",
+          "从第一次警告开始"
+        ]
+      }
     },
     {
       "group": "시작",

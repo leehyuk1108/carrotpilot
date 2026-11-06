@@ -73,3 +73,16 @@ test("Carrot Vision accepts typed booleans from Params and raw legacy values", (
     assert.equal(context.CARROT_DEVICE_RUNTIME_STATE.carrotVisionEnabled, 0);
   }
 });
+
+test("GM cluster Take Steering alert is an off-by-default DM menu select", () => {
+  const setting = catalog.params.find((item) => item.name === "GmClusterTakeSteering");
+  assert.equal(setting.default, 0);
+  assert.equal(setting.min, 0);
+  assert.equal(setting.max, 2);
+  assert.equal(setting.control, "select");
+  for (const lang of ["ko", "en", "zh"]) assert.equal(setting.options[lang].length, 3);
+  const findGroup = (groups, id) => groups.find((group) => group.id === id)
+    || groups.map((group) => findGroup(group.groups || [], id)).find(Boolean);
+  const driverMonitor = findGroup(catalog.menu, "VEH_DM");
+  assert.ok(driverMonitor.params.includes(setting.name));
+});

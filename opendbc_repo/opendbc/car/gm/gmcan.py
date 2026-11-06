@@ -41,7 +41,10 @@ def create_buttons(packer, bus, idx, button, park_brake=None, auto_stop_off=None
   return packer.make_can_msg("ASCMSteeringButton", bus, values)
 
 
-def create_pscm_status(packer, bus, pscm_status):
+def create_pscm_status(packer, bus, pscm_status, hands_off=False):
+  # Copy of the EPS status for the camera with the hands-on bit forced: 1 hides the camera's
+  # "Take Steering" alert, 0 (hands_off) lets the camera raise it. The bit sits in byte 2
+  # (0x20), which the 10-bit checksum sums byte-wise, so the checksum moves by the same amount.
   values = {s: pscm_status[s] for s in [
     "HandsOffSWDetectionMode",
     "HandsOffSWlDetectionStatus",
@@ -52,9 +55,10 @@ def create_pscm_status(packer, bus, pscm_status):
     "RollingCounter",
     "PSCMStatusChecksum",
   ]}
-  checksum_mod = int(1 - values["HandsOffSWlDetectionStatus"]) << 5
-  values["HandsOffSWlDetectionStatus"] = 1
-  values["PSCMStatusChecksum"] += checksum_mod
+  hands_on = 0 if hands_off else 1
+  checksum_mod = (hands_on - int(values["HandsOffSWlDetectionStatus"])) << 5
+  values["HandsOffSWlDetectionStatus"] = hands_on
+  values["PSCMStatusChecksum"] = (int(values["PSCMStatusChecksum"]) + checksum_mod) & 0x3FF
   return packer.make_can_msg("PSCMStatus", bus, values)
 
 

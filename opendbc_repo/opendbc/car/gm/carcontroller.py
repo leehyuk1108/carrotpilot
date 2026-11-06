@@ -33,6 +33,15 @@ BRAKE_PITCH_FACTOR_BP = [5., 10.] # [m/s] smoothly revert to planned accel at lo
 BRAKE_PITCH_FACTOR_V = [0., 1.] # [unitless in [0,1]]; don't touch
 
 
+def cluster_take_steering_requested(mode, hud_control):
+  """GmClusterTakeSteering: 0 off, 1 while openpilot's DM alert is audible (level >= 2),
+  2 from the first DM alert (level >= 1). driverMonitoringAlert is 0 unless a fresh, enabled DM warns."""
+  if mode not in (1, 2):
+    return False
+  level = int(getattr(hud_control, "driverMonitoringAlert", 0))
+  return level >= (2 if mode == 1 else 1)
+
+
 def get_acc_dashboard_speed_kph(CP, cluster_target_kph):
   if CP.carFingerprint == CAR.CHEVROLET_TRAVERSE:
     return gm_raw_display_kph_from_cluster_display_kph(cluster_target_kph)
@@ -70,6 +79,7 @@ class CarController(CarControllerBase):
 
     self.long_pitch = False
     self.use_ev_tables = False
+    self.cluster_take_steering_mode = 0
 
     self.pitch = FirstOrderFilter(0., 0.09 * 4, DT_CTRL * 4)  # runs at 25 Hz
     self.accel_g = 0.0
@@ -120,6 +130,7 @@ class CarController(CarControllerBase):
         self.params.STEER_DELTA_UP = steerDeltaUp
       if steerDeltaDown > 0:
         self.params.STEER_DELTA_DOWN = steerDeltaDown
+      self.cluster_take_steering_mode = params.get_int("GmClusterTakeSteering")
     self.long_pitch = Params().get_bool("LongPitch")
     self.use_ev_tables = Params().get_bool("EVTable")
 
@@ -352,9 +363,12 @@ class CarController(CarControllerBase):
           can_sends.append(gmcan.create_buttons(self.packer_pt, CanBus.CAMERA, (CS.buttons_counter + 1) % 4, CruiseButtons.CANCEL))
 
     if self.CP.networkLocation == NetworkLocation.fwdCamera:
-      # Silence "Take Steering" alert sent by camera, forward PSCMStatus with HandsOffSWlDetectionStatus=1
+      # Silence "Take Steering" alert sent by camera, forward PSCMStatus with HandsOffSWlDetectionStatus=1.
+      # GmClusterTakeSteering instead reports hands-off while openpilot's own DM alert is up, so the stock
+      # camera can show its "Take Steering" message on the cluster. Steering commands are unchanged.
       if self.frame % 10 == 0:
-        can_sends.append(gmcan.create_pscm_status(self.packer_pt, CanBus.CAMERA, CS.pscm_status))
+        hands_off = cluster_take_steering_requested(self.cluster_take_steering_mode, hud_control)
+        can_sends.append(gmcan.create_pscm_status(self.packer_pt, CanBus.CAMERA, CS.pscm_status, hands_off=hands_off))
 
     if self.auto_stop_off is not None:
       self._update_auto_stop_off(CC, CS, can_sends, now_nanos)
