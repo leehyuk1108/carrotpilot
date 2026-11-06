@@ -71,6 +71,15 @@ The related settings are `AutoNaviSpeedCtrlMode`, `AutoNaviSpeedCtrlEnd`, `AutoN
 
 The event type, limit, and distance must all be valid. An average-speed zone retains its target until the end distance; mobile-camera events are used only in mode `3`.
 
+With Navdy navigation, phone navigation can briefly stop reporting the section and the road limit when it loses GPS, for example in a tunnel. The last section limit is then kept for the remaining distance, which is counted down by vehicle travel. The hold ends when:
+
+- the remaining distance is used up.
+- a time bound is exceeded: the time to cover the remaining distance at 30 km/h, times 1.5, plus 60 s. In heavy congestion this can end the hold before the distance is used up.
+- the latest navigation guidance explicitly reports that navigation stopped or the route was left. An off-route flag inside an expired section observation is not used.
+- both of these hold at the same time: the comma GPS has had a continuous fix for more than 3 s, and navigation has reported a road limit but no section for more than 3 s.
+
+Without a comma GPS fix and without an explicit report from navigation, the limit can stay for the remaining distance even if the route leaves the section road early.
+
 ### Stock-navigation CAN control
 
 When external navigation is connected, deceleration and countdowns use external navigation only. Stock cameras, bumps, sections, 30 km/h zone caps, and stock-navigation speed displays are excluded even if external navigation has no current guidance or enforcement item. After disconnection or receive timeout is detected, stock navigation becomes available again according to its settings.

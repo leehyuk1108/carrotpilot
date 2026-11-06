@@ -146,3 +146,47 @@ def test_legacy_downgrade_requires_relay_session_change():
   value['navigationFeedback']['session'] = 'restarted-hud-legacy-phone'
   tracker.accept(value, 10.2, 10.2)
   assert tracker.snapshot(10.2).speed.sdi_type == 4
+
+
+@pytest.mark.parametrize('change,expected', [
+  ('none', ''), ('suspended', ''), ('inactive', ''), ('expired', ''), ('missing', ''),
+  ('offroute', 'off_route'), ('stopped', 'stopped'),
+])
+def test_section_end_reports_only_explicit_producer_evidence(change, expected):
+  tracker = FeedbackTracker()
+  tracker.accept(section_packet(1), 10, 10)
+  value = section_packet(2)
+  section = value['navigationFeedback']['guidance']['section']
+  if change == 'suspended':
+    section['suspended'] = True
+  elif change == 'inactive':
+    section['active'] = False
+  elif change == 'expired':
+    section['ageMs'] = 4000
+  elif change == 'missing':
+    del value['navigationFeedback']['guidance']['section']
+  elif change == 'offroute':
+    section['offRoute'] = True
+  elif change == 'stopped':
+    value['navigationFeedback']['guidance']['active'] = False
+  tracker.accept(value, 10.1, 10.1)
+  tracker.snapshot(10.1)
+  assert tracker.section_end(10.1) == expected
+
+
+def test_section_end_is_unknown_without_a_fresh_link_or_guidance():
+  tracker = FeedbackTracker()
+  value = section_packet(1)
+  value['navigationFeedback']['guidance']['active'] = False
+  tracker.accept(value, 10, 10)
+  assert tracker.section_end(10) == 'stopped'
+  assert tracker.section_end(12.5) == ''  # Link TTL exceeded: no evidence either way.
+
+
+def test_off_route_flag_follows_the_latest_frame():
+  tracker = FeedbackTracker()
+  value = section_packet(1, offRoute=True)
+  tracker.accept(value, 10, 10)
+  assert tracker.section_end(10) == 'off_route'
+  tracker.accept(section_packet(2), 10.1, 10.1)
+  assert tracker.section_end(10.1) == ''
