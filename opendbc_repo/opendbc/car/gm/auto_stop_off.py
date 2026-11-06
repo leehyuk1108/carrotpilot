@@ -11,7 +11,7 @@ module sees our press frames interleaved with real "not pressed" frames. How the
 such a pattern is unknown (one press, several presses, or none), and every attempt is checked on the
 latch. The rules:
 - start only when all of these hold:
-  - the latch is fresh (against the current time) and reads 0;
+  - the latch is fresh (against the current time on the CAN clock) and reads 0;
   - the car is stopped, and cruise and openpilot are off;
   - CAN is healthy;
   - no real button has been held for 1 s;
@@ -25,12 +25,26 @@ latch. The rules:
   share a counter slot.
 """
 
+import os
+import time
+
 DT_CTRL = 0.01
 
 IDLE, PRESSING, CONFIRM, DONE, GAVE_UP = 'idle', 'pressing', 'confirm', 'done', 'gave_up'
 
 LATCH_MAX_AGE_NS = 300_000_000   # 0x1F4 is 40 Hz
 BUTTON_MAX_AGE_NS = 200_000_000  # 0x1E1 is 33 Hz
+
+
+def feature_now_ns(card_now_nanos: int) -> int:
+  """Current time on the CAN timestamp clock.
+
+  pandad stamps CAN with nanos_since_boot() (CLOCK_BOOTTIME), while card passes time.monotonic() live. The two
+  drift apart after a suspend, so use CLOCK_BOOTTIME here. Replay passes the CAN log time, so keep it.
+  """
+  if 'REPLAY' in os.environ:
+    return card_now_nanos
+  return time.clock_gettime_ns(getattr(time, 'CLOCK_BOOTTIME', time.CLOCK_MONOTONIC))
 
 
 def fresh(ts_nanos: int, now_nanos: int, max_age_ns: int) -> bool:
@@ -70,18 +84,19 @@ class AutoStopOff:
 
   def update(self, enabled: bool, latch_fresh: bool, latch: int, counter: int, standstill: bool,
              cruise_engaged: bool, op_enabled: bool, can_ok: bool, buttons_idle: bool, driver_switch: bool,
-             other_btn_recent: bool) -> bool:
+             other_btn_recent: bool, latch_zero_seen: bool = False) -> bool:
     """Call once per control frame (100 Hz). Returns True when one press frame should be sent now.
 
     counter is the rolling counter of the last real 0x1E1 frame. A press frame goes out only right after
-    a new real frame arrives, so we add at most one frame per 30 ms slot.
+    a new real frame arrives, so we add at most one frame per 30 ms slot. buttons_idle, driver_switch and
+    latch_zero_seen must cover every frame received since the last call, not just the newest one.
     """
     self.event = None
     new_real_frame = counter != self.last_counter
     self.last_counter = counter
     self.since_press += 1
     self.idle_frames = self.idle_frames + 1 if buttons_idle else 0
-    self.latch1_frames = self.latch1_frames + 1 if (latch_fresh and latch == 1) else 0
+    self.latch1_frames = self.latch1_frames + 1 if (latch_fresh and latch == 1 and not latch_zero_seen) else 0
     if latch_fresh:
       self.ready_frames += 1
 

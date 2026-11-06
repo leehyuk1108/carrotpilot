@@ -48,6 +48,7 @@ class CarState(CarStateBase):
     self.button_park_brake = 0
     self.button_auto_stop_pressed = False
     self.buttons_idle = False
+    self.auto_stop_off_zero_seen = False
     self.single_pedal_mode = False
     self.pedal_steady = 0.
     self.cruise_buttons = 0
@@ -87,9 +88,17 @@ class CarState(CarStateBase):
       btn = pt_cp.vl["ASCMSteeringButton"]
       self.button_frame_ts = pt_cp.ts_nanos["ASCMSteeringButton"]["ACCButtons"]
       self.button_park_brake = int(btn["ParkBrakeEngaged"])
-      self.button_auto_stop_pressed = bool(btn["AutoStopOffButton"])  # the driver's real switch (our TX is not parsed)
-      self.buttons_idle = (int(btn["ACCButtons"]) == CruiseButtons.UNPRESS and not btn["DistanceButton"] and
-                           not btn["LKAButton"] and not btn["DriveModeButton"] and not btn["AutoStopOffButton"])
+      # Several frames can arrive in one update; look at all of them (vl_all), not just the newest (vl).
+      # Our own TX comes back as src 128 and is not parsed here, so these reflect the real buttons only.
+      btn_all = pt_cp.vl_all["ASCMSteeringButton"]
+      self.button_auto_stop_pressed = bool(btn["AutoStopOffButton"]) or any(btn_all["AutoStopOffButton"])
+      frames = list(zip(btn_all["ACCButtons"], btn_all["DistanceButton"], btn_all["LKAButton"],
+                        btn_all["DriveModeButton"], btn_all["AutoStopOffButton"]))
+      frames.append((btn["ACCButtons"], btn["DistanceButton"], btn["LKAButton"], btn["DriveModeButton"],
+                     btn["AutoStopOffButton"]))
+      self.buttons_idle = all(int(acc) == CruiseButtons.UNPRESS and not (gap or lka or mode or aso)
+                              for acc, gap, lka, mode, aso in frames)
+      self.auto_stop_off_zero_seen = any(int(v) == 0 for v in pt_cp.vl_all["SportMode"]["AutoStopOff"])
 
     self.pscm_status = copy.copy(pt_cp.vl["PSCMStatus"])
     # GAP_DIST

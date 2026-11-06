@@ -20,7 +20,7 @@ class Sim:
     self.counter = 0
     self.state = dict(enabled=True, latch_fresh=True, latch=0, standstill=True, cruise_engaged=False,
                       op_enabled=False, can_ok=True, buttons_idle=True, driver_switch=False,
-                      other_btn_recent=False)
+                      other_btn_recent=False, latch_zero_seen=False)
     self.state.update(kw)
     self.presses = []
 
@@ -210,3 +210,23 @@ def test_sport_mode_never_affects_can_valid():
   assert traverse.message_states[0x1F4].ignore_alive
   other = CarState.get_can_parsers(_cp(CAR.CHEVROLET_BOLT_EUV))[Bus.pt]
   assert 0x1F4 not in other.message_states
+
+
+def test_latch_zero_inside_a_batch_breaks_the_settle_streak():
+  s = Sim().until_pressing()
+  s.step(1, latch=1)
+  s.step(SETTLE - 2)
+  assert s.a.state == CONFIRM
+  s.step(1, latch_zero_seen=True)  # newest value 1, but a 0 arrived in the same batch
+  s.step(5, latch_zero_seen=False)
+  assert s.a.state == CONFIRM
+  s.step(SETTLE)
+  assert s.a.state == DONE
+
+
+def test_feature_clock(monkeypatch):
+  from opendbc.car.gm.auto_stop_off import feature_now_ns
+  monkeypatch.setenv('REPLAY', '1')
+  assert feature_now_ns(123) == 123
+  monkeypatch.delenv('REPLAY')
+  assert feature_now_ns(123) > 10_000

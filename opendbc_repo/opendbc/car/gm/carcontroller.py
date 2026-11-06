@@ -8,7 +8,7 @@ from opendbc.car import Bus, DT_CTRL, apply_driver_steer_torque_limits, structs,
 from opendbc.car.gm import gmcan
 from opendbc.car.gm.auto_resume import GMAutoResume
 from opendbc.car.gm.auto_hold import GMAutoHold
-from opendbc.car.gm.auto_stop_off import AutoStopOff, BUTTON_MAX_AGE_NS, LATCH_MAX_AGE_NS, fresh
+from opendbc.car.gm.auto_stop_off import AutoStopOff, BUTTON_MAX_AGE_NS, LATCH_MAX_AGE_NS, feature_now_ns, fresh
 from openpilot.common.swaglog import cloudlog
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.gm.cluster_speed import gm_raw_display_kph_from_cluster_display_kph
@@ -392,14 +392,17 @@ class CarController(CarControllerBase):
       self.auto_stop_off_enabled = self._read_auto_stop_off()
     # Other 0x1E1 senders (auto cruise SET, auto resume RES) keep their own counters. While we press and briefly
     # after, drop their frames so no two injected frames share a counter slot; otherwise keep 1 s away from them.
-    if any(addr == 0x1E1 for addr, _, _ in can_sends):
-      if self.auto_stop_off.holds_bus():
-        dropped = [dat.hex() for addr, dat, _ in can_sends if addr == 0x1E1]
+    # CANCEL is never dropped: it stays queued and aborts our attempt instead.
+    others = [dat for addr, dat, _ in can_sends if addr == 0x1E1]
+    if others:
+      cancel = any(((dat[5] >> 4) & 0x7) == CruiseButtons.CANCEL for dat in others)
+      if self.auto_stop_off.holds_bus() and not cancel:
         can_sends[:] = [m for m in can_sends if m[0] != 0x1E1]
-        cloudlog.warning(f"[gm autostopoff] dropped other 0x1E1 while pressing: {dropped}")
+        cloudlog.warning(f"[gm autostopoff] dropped other 0x1E1 while pressing: {[d.hex() for d in others]}")
       else:
         self.last_other_btn_frame = self.frame
-    latch_fresh = fresh(CS.auto_stop_off_ts, now_nanos, LATCH_MAX_AGE_NS)
+    now = feature_now_ns(now_nanos)
+    latch_fresh = fresh(CS.auto_stop_off_ts, now, LATCH_MAX_AGE_NS)
     press = self.auto_stop_off.update(
       enabled=self.auto_stop_off_enabled,
       latch_fresh=latch_fresh,
@@ -408,10 +411,11 @@ class CarController(CarControllerBase):
       standstill=CS.out.standstill,
       cruise_engaged=CS.out.cruiseState.enabled,
       op_enabled=CC.enabled,
-      can_ok=CS.out.canValid and not CS.out.canTimeout and fresh(CS.button_frame_ts, now_nanos, BUTTON_MAX_AGE_NS),
+      can_ok=CS.out.canValid and not CS.out.canTimeout and fresh(CS.button_frame_ts, now, BUTTON_MAX_AGE_NS),
       buttons_idle=CS.buttons_idle,
       driver_switch=CS.button_auto_stop_pressed,
       other_btn_recent=(self.frame - self.last_other_btn_frame) < 100,
+      latch_zero_seen=CS.auto_stop_off_zero_seen,
     )
     if press:
       can_sends.append(gmcan.create_buttons(self.packer_pt, CanBus.POWERTRAIN, (int(CS.buttons_counter) + 1) % 4,
