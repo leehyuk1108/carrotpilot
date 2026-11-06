@@ -86,6 +86,7 @@ class CarController(CarControllerBase):
     self.auto_stop_off = AutoStopOff() if self.traverse_long and not CP.pcmCruise else None
     self._params_rw = Params()
     self.auto_stop_off_enabled = self._read_auto_stop_off()
+    self.last_other_btn_frame = -1000
 
   @staticmethod
   def calc_pedal_command(accel: float, long_active: bool, car_velocity) -> tuple[float, bool]:
@@ -387,24 +388,28 @@ class CarController(CarControllerBase):
       return False
 
   def _update_auto_stop_off(self, CC, CS, can_sends):
-    if self.frame % 100 == 0:
+    if self.frame % 10 == 0:
       self.auto_stop_off_enabled = self._read_auto_stop_off()
-    bus_busy = any(addr == 0x1E1 for addr, _, _ in can_sends)
+    # Other 0x1E1 senders (auto cruise SET, auto resume RES, CANCEL) keep their own counters, so keep 1 s apart
+    if any(addr == 0x1E1 for addr, _, _ in can_sends):
+      self.last_other_btn_frame = self.frame
     press = self.auto_stop_off.update(
       enabled=self.auto_stop_off_enabled,
-      latch_seen=CS.auto_stop_off_seen,
+      latch_fresh=CS.auto_stop_off_fresh,
       latch=CS.auto_stop_off,
       counter=int(CS.buttons_counter),
       standstill=CS.out.standstill,
       cruise_engaged=CS.out.cruiseState.enabled,
       op_enabled=CC.enabled,
-      bus_busy=bus_busy,
+      can_ok=CS.out.canValid and not CS.out.canTimeout and CS.button_frame_fresh,
+      buttons_idle=CS.buttons_idle,
+      other_btn_recent=(self.frame - self.last_other_btn_frame) < 100,
     )
     if press:
       can_sends.append(gmcan.create_buttons(self.packer_pt, CanBus.POWERTRAIN, (int(CS.buttons_counter) + 1) % 4,
                                             CruiseButtons.UNPRESS, park_brake=CS.button_park_brake, auto_stop_off=1))
     if self.auto_stop_off.event is not None:
-      cloudlog.warning(f"[gm autostopoff] {self.auto_stop_off.event} latch={CS.auto_stop_off} seen={CS.auto_stop_off_seen}")
+      cloudlog.warning(f"[gm autostopoff] {self.auto_stop_off.event} latch={CS.auto_stop_off} fresh={CS.auto_stop_off_fresh}")
 
   # 버튼 송신 (첫 송신때만 BCM 카운터를 읽고 이후 자체 증가)
   def send_btn(self, CS, can_sends, cruise_btn):

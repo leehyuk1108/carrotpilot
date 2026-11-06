@@ -43,8 +43,10 @@ class CarState(CarStateBase):
 
     self.buttons_counter = 0
     self.auto_stop_off = 0
-    self.auto_stop_off_seen = False
+    self.auto_stop_off_fresh = False
+    self.button_frame_fresh = False
     self.button_park_brake = 0
+    self.buttons_idle = False
     self.single_pedal_mode = False
     self.pedal_steady = 0.
     self.cruise_buttons = 0
@@ -76,11 +78,19 @@ class CarState(CarStateBase):
     self.distance_button = pt_cp.vl["ASCMSteeringButton"]["DistanceButton"]
     self.buttons_counter = pt_cp.vl["ASCMSteeringButton"]["RollingCounter"]
     if self.CP.carFingerprint == CAR.CHEVROLET_TRAVERSE:
-      # Auto stop off latch (0x1F4 byte2 bit1) and the EPB bit carried in 0x1E1, for AutoStopOff.
-      # Only read on the Traverse, so other GM cars do not start tracking (and timing out on) 0x1F4.
+      # AutoStopOff inputs: auto stop off latch (0x1F4 byte2 bit1), and the real 0x1E1 frame's state.
+      # 0x1F4 is registered with ignore-alive in get_can_parsers, so it never affects canValid; freshness is
+      # checked here instead. last_nonempty_nanos advances with any frame on the bus.
+      now = pt_cp.last_nonempty_nanos
+      ts_latch = pt_cp.ts_nanos["SportMode"]["AutoStopOff"]
       self.auto_stop_off = int(pt_cp.vl["SportMode"]["AutoStopOff"])
-      self.auto_stop_off_seen = pt_cp.ts_nanos["SportMode"]["AutoStopOff"] > 0
-      self.button_park_brake = int(pt_cp.vl["ASCMSteeringButton"]["ParkBrakeEngaged"])
+      self.auto_stop_off_fresh = ts_latch > 0 and (now - ts_latch) < 300_000_000
+      btn = pt_cp.vl["ASCMSteeringButton"]
+      ts_btn = pt_cp.ts_nanos["ASCMSteeringButton"]["ACCButtons"]
+      self.button_frame_fresh = ts_btn > 0 and (now - ts_btn) < 200_000_000
+      self.button_park_brake = int(btn["ParkBrakeEngaged"])
+      self.buttons_idle = (int(btn["ACCButtons"]) == CruiseButtons.UNPRESS and not btn["DistanceButton"] and
+                           not btn["LKAButton"] and not btn["DriveModeButton"] and not btn["AutoStopOffButton"])
 
     self.pscm_status = copy.copy(pt_cp.vl["PSCMStatus"])
     # GAP_DIST
@@ -242,6 +252,11 @@ class CarState(CarStateBase):
       pt_messages += [
         ("EBCMRegenPaddle", 50),
         ("EVDriveMode", float('nan')),
+      ]
+    if CP.carFingerprint == CAR.CHEVROLET_TRAVERSE:
+      # AutoStopOff feedback only; a missing 0x1F4 must not make CAN invalid (freshness is checked by the feature)
+      pt_messages += [
+        ("SportMode", float('nan')),
       ]
     loopback_messages = [
       ("ASCMLKASteeringCmd", float('nan')),
