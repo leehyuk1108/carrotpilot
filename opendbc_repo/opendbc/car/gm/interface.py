@@ -349,6 +349,7 @@ class CarInterface(CarInterfaceBase):
       ret.steerActuatorDelay = 0.2
       ret.minEnableSpeed = -1.  # engage speed is decided by pcm
       CarInterfaceBase.configure_torque_tune(candidate, ret.lateralTuning)
+      ret.startAccel = 2.0
 
     elif candidate == CAR.BUICK_BABYENCLAVE:
       ret.steerActuatorDelay = 0.2
@@ -372,7 +373,6 @@ class CarInterface(CarInterfaceBase):
     elif candidate == CAR.CHEVROLET_TRAVERSE:
       ret.steerActuatorDelay = 0.2
       CarInterfaceBase.configure_torque_tune(candidate, ret.lateralTuning)
-      ret.startAccel = 2.0
 
     elif candidate == CAR.GMC_YUKON:
       ret.steerActuatorDelay = 0.5
