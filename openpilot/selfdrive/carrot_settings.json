@@ -466,7 +466,8 @@
           "zh": "车辆辅助",
           "params": [
             "MaxAngleFrames",
-            "SpeedFromPCM"
+            "SpeedFromPCM",
+            "AutoStopOff"
           ]
         },
         {
@@ -2031,6 +2032,24 @@
       "max": 3,
       "default": 2,
       "unit": 1
+    },
+    {
+      "group": "시작",
+      "name": "AutoStopOff",
+      "title": "오토스톱 자동 끄기(트래버스)",
+      "descr": "0: 사용 안 함 / 1: 시동마다 엔진 오토스톱을 자동으로 끔\n트래버스 + 오픈파일럿 롱컨 전용 시험 기능. 시동 5초 뒤 정차 중이고 크루즈·오파가 꺼져 있을 때 오토스톱 끄기 버튼 누름(0x1E1)을 대신 보내고, 꺼짐 상태(0x1F4)가 1이 됐는지 확인합니다. 이미 꺼져 있으면 누르지 않고, 주행마다 최대 3번만 시도합니다. 실제 버튼 신호 사이에 끼워 넣는 방식이라 차에서 동작·경고 여부는 아직 미검증입니다.",
+      "egroup": "START",
+      "etitle": "Auto stop off (Traverse)",
+      "edescr": "0: off / 1: turn engine auto stop off on every ignition.\nExperimental, Traverse with openpilot longitudinal only. 5 s after start, while stopped with cruise and openpilot off, it sends the auto-stop-off switch press (0x1E1) and checks that the auto-stop-off state (0x1F4) becomes 1. It never presses when auto stop is already off and tries at most 3 times per drive. The press is added between the real button frames, so vehicle behavior and warnings are not verified yet.",
+      "cgroup": "启动设置",
+      "ctitle": "自动关闭自动启停（Traverse）",
+      "cdescr": "0: 不使用 / 1: 每次点火自动关闭发动机自动启停\n实验功能，仅限Traverse且使用openpilot纵向控制。点火5秒后，在停车且巡航和openpilot关闭时，发送自动启停关闭按键（0x1E1），并确认关闭状态（0x1F4）变为1。已关闭时不会按键，每次行驶最多尝试3次。按键插入在真实按键帧之间，实车行为和警告尚未验证。",
+      "min": 0,
+      "max": 1,
+      "default": 0,
+      "unit": 1,
+      "control": "select",
+      "options": {"ko": ["0 사용 안 함", "1 자동 끄기"], "en": ["0 Off", "1 Auto off"], "zh": ["0 关闭", "1 自动关闭"]}
     },
     {
       "group": "시작",

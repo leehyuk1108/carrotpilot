@@ -42,6 +42,9 @@ class CarState(CarStateBase):
     self.autoHoldActivated = False
 
     self.buttons_counter = 0
+    self.auto_stop_off = 0
+    self.auto_stop_off_seen = False
+    self.button_park_brake = 0
     self.single_pedal_mode = False
     self.pedal_steady = 0.
     self.cruise_buttons = 0
@@ -72,6 +75,12 @@ class CarState(CarStateBase):
     self.cruise_buttons = pt_cp.vl["ASCMSteeringButton"]["ACCButtons"]
     self.distance_button = pt_cp.vl["ASCMSteeringButton"]["DistanceButton"]
     self.buttons_counter = pt_cp.vl["ASCMSteeringButton"]["RollingCounter"]
+    if self.CP.carFingerprint == CAR.CHEVROLET_TRAVERSE:
+      # Auto stop off latch (0x1F4 byte2 bit1) and the EPB bit carried in 0x1E1, for AutoStopOff.
+      # Only read on the Traverse, so other GM cars do not start tracking (and timing out on) 0x1F4.
+      self.auto_stop_off = int(pt_cp.vl["SportMode"]["AutoStopOff"])
+      self.auto_stop_off_seen = pt_cp.ts_nanos["SportMode"]["AutoStopOff"] > 0
+      self.button_park_brake = int(pt_cp.vl["ASCMSteeringButton"]["ParkBrakeEngaged"])
 
     self.pscm_status = copy.copy(pt_cp.vl["PSCMStatus"])
     # GAP_DIST

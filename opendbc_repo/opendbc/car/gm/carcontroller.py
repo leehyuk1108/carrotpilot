@@ -8,6 +8,8 @@ from opendbc.car import Bus, DT_CTRL, apply_driver_steer_torque_limits, structs,
 from opendbc.car.gm import gmcan
 from opendbc.car.gm.auto_resume import GMAutoResume
 from opendbc.car.gm.auto_hold import GMAutoHold
+from opendbc.car.gm.auto_stop_off import AutoStopOff
+from openpilot.common.swaglog import cloudlog
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.gm.cluster_speed import gm_raw_display_kph_from_cluster_display_kph
 from opendbc.car.gm.manual_auto_hold import manual_hold_supported
@@ -80,6 +82,10 @@ class CarController(CarControllerBase):
     self.auto_resume = GMAutoResume(self.CP, self.params) if self.traverse_long else None
     self.auto_hold = GMAutoHold() if self.traverse_long else None
     self.btn_rc_pt = -1
+    # 오토스톱 자동 끄기(AutoStopOff, 기본 0). 판다는 오파 롱컨(pcmCruise=False)에서만 0x1E1 UNPRESS 송신을 허용
+    self.auto_stop_off = AutoStopOff() if self.traverse_long and not CP.pcmCruise else None
+    self._params_rw = Params()
+    self.auto_stop_off_enabled = self._read_auto_stop_off()
 
   @staticmethod
   def calc_pedal_command(accel: float, long_active: bool, car_velocity) -> tuple[float, bool]:
@@ -360,6 +366,9 @@ class CarController(CarControllerBase):
       if self.frame % 10 == 0:
         can_sends.append(gmcan.create_pscm_status(self.packer_pt, CanBus.CAMERA, CS.pscm_status))
 
+    if self.auto_stop_off is not None:
+      self._update_auto_stop_off(CC, CS, can_sends)
+
     new_actuators = actuators.as_builder()
     new_actuators.accel = accel
     new_actuators.torque = self.apply_torque_last / self.params.STEER_MAX
@@ -370,6 +379,32 @@ class CarController(CarControllerBase):
 
     self.frame += 1
     return new_actuators, can_sends
+
+  def _read_auto_stop_off(self):
+    try:
+      return self._params_rw.get_int("AutoStopOff") == 1
+    except Exception:
+      return False
+
+  def _update_auto_stop_off(self, CC, CS, can_sends):
+    if self.frame % 100 == 0:
+      self.auto_stop_off_enabled = self._read_auto_stop_off()
+    bus_busy = any(addr == 0x1E1 for addr, _, _ in can_sends)
+    press = self.auto_stop_off.update(
+      enabled=self.auto_stop_off_enabled,
+      latch_seen=CS.auto_stop_off_seen,
+      latch=CS.auto_stop_off,
+      counter=int(CS.buttons_counter),
+      standstill=CS.out.standstill,
+      cruise_engaged=CS.out.cruiseState.enabled,
+      op_enabled=CC.enabled,
+      bus_busy=bus_busy,
+    )
+    if press:
+      can_sends.append(gmcan.create_buttons(self.packer_pt, CanBus.POWERTRAIN, (int(CS.buttons_counter) + 1) % 4,
+                                            CruiseButtons.UNPRESS, park_brake=CS.button_park_brake, auto_stop_off=1))
+    if self.auto_stop_off.event is not None:
+      cloudlog.warning(f"[gm autostopoff] {self.auto_stop_off.event} latch={CS.auto_stop_off} seen={CS.auto_stop_off_seen}")
 
   # 버튼 송신 (첫 송신때만 BCM 카운터를 읽고 이후 자체 증가)
   def send_btn(self, CS, can_sends, cruise_btn):

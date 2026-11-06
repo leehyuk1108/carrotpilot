@@ -18,13 +18,19 @@ def create_brake_command(packer, bus, apply_brake, idx):
 
   return packer.make_can_msg("EBCMFrictionBrakeCmd", bus, values)
 
-def create_buttons(packer, bus, idx, button):
+def create_buttons(packer, bus, idx, button, park_brake=None, auto_stop_off=None):
   values = {
     "ACCButtons": button,
     "RollingCounter": idx,
     "ACCAlwaysOne": 1,
     "DistanceButton": 0,
   }
+  # Traverse only (signals exist in gm_global_a_powertrain_volt): mirror the real frame's EPB bit and press the
+  # auto-stop-off switch. Neither bit is covered by SteeringButtonChecksum (checked against real frames).
+  if park_brake is not None:
+    values["ParkBrakeEngaged"] = park_brake
+  if auto_stop_off is not None:
+    values["AutoStopOffButton"] = auto_stop_off
 
   checksum = 240 + int(values["ACCAlwaysOne"] * 0xf)
   checksum += values["RollingCounter"] * (0x4ef if values["ACCAlwaysOne"] != 0 else 0x3f0)

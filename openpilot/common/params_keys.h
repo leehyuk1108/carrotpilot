@@ -393,6 +393,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"CustomSteerDeltaDownLC", {PERSISTENT, INT, "0"}},
 
     {"SpeedFromPCM", {PERSISTENT, INT, "2"}},
+    {"AutoStopOff", {PERSISTENT, INT, "0"}},
     {"MaxTimeOffroadMin", {PERSISTENT, INT, "60"}},
     {"TeslaWakeOnCAN", {PERSISTENT, BOOL, "1"}},
 
