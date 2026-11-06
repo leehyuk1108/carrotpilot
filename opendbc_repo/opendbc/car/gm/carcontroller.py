@@ -8,7 +8,7 @@ from opendbc.car import Bus, DT_CTRL, apply_driver_steer_torque_limits, structs,
 from opendbc.car.gm import gmcan
 from opendbc.car.gm.auto_resume import GMAutoResume
 from opendbc.car.gm.auto_hold import GMAutoHold
-from opendbc.car.gm.auto_stop_off import AutoStopOff
+from opendbc.car.gm.auto_stop_off import AutoStopOff, BUTTON_MAX_AGE_NS, LATCH_MAX_AGE_NS, fresh
 from openpilot.common.swaglog import cloudlog
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.gm.cluster_speed import gm_raw_display_kph_from_cluster_display_kph
@@ -368,7 +368,7 @@ class CarController(CarControllerBase):
         can_sends.append(gmcan.create_pscm_status(self.packer_pt, CanBus.CAMERA, CS.pscm_status))
 
     if self.auto_stop_off is not None:
-      self._update_auto_stop_off(CC, CS, can_sends)
+      self._update_auto_stop_off(CC, CS, can_sends, now_nanos)
 
     new_actuators = actuators.as_builder()
     new_actuators.accel = accel
@@ -387,29 +387,37 @@ class CarController(CarControllerBase):
     except Exception:
       return False
 
-  def _update_auto_stop_off(self, CC, CS, can_sends):
+  def _update_auto_stop_off(self, CC, CS, can_sends, now_nanos):
     if self.frame % 10 == 0:
       self.auto_stop_off_enabled = self._read_auto_stop_off()
-    # Other 0x1E1 senders (auto cruise SET, auto resume RES, CANCEL) keep their own counters, so keep 1 s apart
+    # Other 0x1E1 senders (auto cruise SET, auto resume RES) keep their own counters. While we press and briefly
+    # after, drop their frames so no two injected frames share a counter slot; otherwise keep 1 s away from them.
     if any(addr == 0x1E1 for addr, _, _ in can_sends):
-      self.last_other_btn_frame = self.frame
+      if self.auto_stop_off.holds_bus():
+        dropped = [dat.hex() for addr, dat, _ in can_sends if addr == 0x1E1]
+        can_sends[:] = [m for m in can_sends if m[0] != 0x1E1]
+        cloudlog.warning(f"[gm autostopoff] dropped other 0x1E1 while pressing: {dropped}")
+      else:
+        self.last_other_btn_frame = self.frame
+    latch_fresh = fresh(CS.auto_stop_off_ts, now_nanos, LATCH_MAX_AGE_NS)
     press = self.auto_stop_off.update(
       enabled=self.auto_stop_off_enabled,
-      latch_fresh=CS.auto_stop_off_fresh,
+      latch_fresh=latch_fresh,
       latch=CS.auto_stop_off,
       counter=int(CS.buttons_counter),
       standstill=CS.out.standstill,
       cruise_engaged=CS.out.cruiseState.enabled,
       op_enabled=CC.enabled,
-      can_ok=CS.out.canValid and not CS.out.canTimeout and CS.button_frame_fresh,
+      can_ok=CS.out.canValid and not CS.out.canTimeout and fresh(CS.button_frame_ts, now_nanos, BUTTON_MAX_AGE_NS),
       buttons_idle=CS.buttons_idle,
+      driver_switch=CS.button_auto_stop_pressed,
       other_btn_recent=(self.frame - self.last_other_btn_frame) < 100,
     )
     if press:
       can_sends.append(gmcan.create_buttons(self.packer_pt, CanBus.POWERTRAIN, (int(CS.buttons_counter) + 1) % 4,
                                             CruiseButtons.UNPRESS, park_brake=CS.button_park_brake, auto_stop_off=1))
     if self.auto_stop_off.event is not None:
-      cloudlog.warning(f"[gm autostopoff] {self.auto_stop_off.event} latch={CS.auto_stop_off} fresh={CS.auto_stop_off_fresh}")
+      cloudlog.warning(f"[gm autostopoff] {self.auto_stop_off.event} latch={CS.auto_stop_off} fresh={latch_fresh}")
 
   # 버튼 송신 (첫 송신때만 BCM 카운터를 읽고 이후 자체 증가)
   def send_btn(self, CS, can_sends, cruise_btn):

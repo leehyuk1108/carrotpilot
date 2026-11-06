@@ -3,11 +3,12 @@ import pytest
 from opendbc.can.packer import CANPacker
 from opendbc.car import Bus, structs
 from opendbc.car.gm import gmcan
-from opendbc.car.gm.auto_stop_off import AutoStopOff, CONFIRM, DONE, GAVE_UP, IDLE, PRESSING, DT_CTRL
+from opendbc.car.gm.auto_stop_off import AutoStopOff, CONFIRM, DONE, GAVE_UP, IDLE, PRESSING, DT_CTRL, fresh
 from opendbc.car.gm.values import CAR, CruiseButtons
 
 READY = int(AutoStopOff.START_DELAY_S / DT_CTRL)
 RETRY = int(AutoStopOff.RETRY_DELAY_S / DT_CTRL)
+SETTLE = int(AutoStopOff.SETTLE_S / DT_CTRL)
 
 
 class Sim:
@@ -18,7 +19,8 @@ class Sim:
     self.frame = 0
     self.counter = 0
     self.state = dict(enabled=True, latch_fresh=True, latch=0, standstill=True, cruise_engaged=False,
-                      op_enabled=False, can_ok=True, buttons_idle=True, other_btn_recent=False)
+                      op_enabled=False, can_ok=True, buttons_idle=True, driver_switch=False,
+                      other_btn_recent=False)
     self.state.update(kw)
     self.presses = []
 
@@ -71,19 +73,63 @@ def test_presses_once_per_real_frame_then_confirms():
   assert s.a.state == CONFIRM
   assert len(s.presses) == AutoStopOff.PRESS_FRAMES[0]
   assert {b - a for a, b in zip(s.presses, s.presses[1:])} == {3}  # one press frame per real 33 Hz frame
-  s.step(20, latch=1)
+  s.step(SETTLE + 5, latch=1)
   assert s.a.state == DONE
   s.step(2000, latch=0)  # driver turns auto stop back on: leave it alone
   assert len(s.presses) == AutoStopOff.PRESS_FRAMES[0] and s.a.state == DONE
 
 
-def test_latch_one_mid_press_stops_immediately():
+def test_latch_one_mid_press_stops_pressing_but_waits_to_settle():
   s = Sim().until_pressing()
   s.step(1, latch=1)
-  assert s.a.state == DONE
+  assert s.a.state == CONFIRM and len(s.presses) == 1
+  s.step(SETTLE - 10)
+  assert s.a.state == CONFIRM  # a later press frame could still toggle it back
+  s.step(20)
+  assert s.a.state == DONE and len(s.presses) == 1
+
+
+def test_latch_flipping_back_is_not_success():
+  s = Sim().until_pressing()
+  s.step(5, latch=1)
+  s.step(int(AutoStopOff.CONFIRM_S / DT_CTRL) + 5, latch=0)
+  assert s.a.state == IDLE and s.a.attempt == 1
+
+
+def test_driver_switch_wins():
+  s = Sim().until_pressing()
+  s.step(1, driver_switch=True)
+  assert s.a.state == GAVE_UP
   sent = len(s.presses)
-  s.step(500)
-  assert len(s.presses) == sent == 1
+  s.step(3000, driver_switch=False)
+  assert len(s.presses) == sent
+
+
+def test_waits_after_real_button_release():
+  s = Sim(buttons_idle=False).step(READY + 100)
+  assert s.presses == []
+  s.step(int(AutoStopOff.IDLE_BUTTONS_S / DT_CTRL) - 5, buttons_idle=True)
+  assert s.presses == []
+  s.step(10)
+  assert s.a.state == PRESSING
+
+
+def test_holds_bus_while_pressing_and_shortly_after():
+  s = Sim()
+  assert not s.a.holds_bus()
+  s.until_pressing()
+  assert s.a.holds_bus()
+  s.step(30)
+  assert s.a.state == CONFIRM and s.a.holds_bus()
+  s.step(int(AutoStopOff.HOLD_S / DT_CTRL) + 5)
+  assert not s.a.holds_bus()
+
+
+def test_freshness_uses_current_time():
+  now = 10_000_000_000
+  assert fresh(now - 50_000_000, now, 300_000_000)
+  assert not fresh(now - 1_000_000_000, now, 300_000_000)  # whole batch a second old
+  assert not fresh(0, now, 300_000_000)
 
 
 def test_gives_up_after_all_attempts():

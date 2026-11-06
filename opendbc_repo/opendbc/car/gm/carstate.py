@@ -43,9 +43,10 @@ class CarState(CarStateBase):
 
     self.buttons_counter = 0
     self.auto_stop_off = 0
-    self.auto_stop_off_fresh = False
-    self.button_frame_fresh = False
+    self.auto_stop_off_ts = 0
+    self.button_frame_ts = 0
     self.button_park_brake = 0
+    self.button_auto_stop_pressed = False
     self.buttons_idle = False
     self.single_pedal_mode = False
     self.pedal_steady = 0.
@@ -78,17 +79,15 @@ class CarState(CarStateBase):
     self.distance_button = pt_cp.vl["ASCMSteeringButton"]["DistanceButton"]
     self.buttons_counter = pt_cp.vl["ASCMSteeringButton"]["RollingCounter"]
     if self.CP.carFingerprint == CAR.CHEVROLET_TRAVERSE:
-      # AutoStopOff inputs: auto stop off latch (0x1F4 byte2 bit1), and the real 0x1E1 frame's state.
-      # 0x1F4 is registered with ignore-alive in get_can_parsers, so it never affects canValid; freshness is
-      # checked here instead. last_nonempty_nanos advances with any frame on the bus.
-      now = pt_cp.last_nonempty_nanos
-      ts_latch = pt_cp.ts_nanos["SportMode"]["AutoStopOff"]
+      # AutoStopOff inputs: auto stop off latch (0x1F4 byte2 bit1) and the real 0x1E1 frame's state.
+      # 0x1F4 is registered with ignore-alive in get_can_parsers, so it never affects canValid. The controller
+      # checks freshness of these timestamps against the current time (same monotonic clock as CAN logMonoTime).
       self.auto_stop_off = int(pt_cp.vl["SportMode"]["AutoStopOff"])
-      self.auto_stop_off_fresh = ts_latch > 0 and (now - ts_latch) < 300_000_000
+      self.auto_stop_off_ts = pt_cp.ts_nanos["SportMode"]["AutoStopOff"]
       btn = pt_cp.vl["ASCMSteeringButton"]
-      ts_btn = pt_cp.ts_nanos["ASCMSteeringButton"]["ACCButtons"]
-      self.button_frame_fresh = ts_btn > 0 and (now - ts_btn) < 200_000_000
+      self.button_frame_ts = pt_cp.ts_nanos["ASCMSteeringButton"]["ACCButtons"]
       self.button_park_brake = int(btn["ParkBrakeEngaged"])
+      self.button_auto_stop_pressed = bool(btn["AutoStopOffButton"])  # the driver's real switch (our TX is not parsed)
       self.buttons_idle = (int(btn["ACCButtons"]) == CruiseButtons.UNPRESS and not btn["DistanceButton"] and
                            not btn["LKAButton"] and not btn["DriveModeButton"] and not btn["AutoStopOffButton"])
 
