@@ -80,6 +80,11 @@ class CarController(CarControllerBase):
     self.long_pitch = False
     self.use_ev_tables = False
     self.cluster_take_steering_mode = 0
+    # GmClusterTakeSteering is only exercised on the Traverse SDGM camera harness with openpilot longitudinal.
+    self.cluster_take_steering_supported = bool(
+      CP.carFingerprint == CAR.CHEVROLET_TRAVERSE and CP.openpilotLongitudinalControl
+      and CP.networkLocation == NetworkLocation.fwdCamera
+      and CP.safetyConfigs and CP.safetyConfigs[0].safetyParam & GMSafetyFlags.HW_SDGM)
 
     self.pitch = FirstOrderFilter(0., 0.09 * 4, DT_CTRL * 4)  # runs at 25 Hz
     self.accel_g = 0.0
@@ -367,7 +372,8 @@ class CarController(CarControllerBase):
       # GmClusterTakeSteering instead reports hands-off while openpilot's own DM alert is up, so the stock
       # camera can show its "Take Steering" message on the cluster. Steering commands are unchanged.
       if self.frame % 10 == 0:
-        hands_off = cluster_take_steering_requested(self.cluster_take_steering_mode, hud_control)
+        hands_off = self.cluster_take_steering_supported and \
+          cluster_take_steering_requested(self.cluster_take_steering_mode, hud_control)
         can_sends.append(gmcan.create_pscm_status(self.packer_pt, CanBus.CAMERA, CS.pscm_status, hands_off=hands_off))
 
     if self.auto_stop_off is not None:

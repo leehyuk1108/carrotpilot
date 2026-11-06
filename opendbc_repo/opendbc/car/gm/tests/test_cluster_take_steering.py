@@ -148,3 +148,79 @@ def test_mode_is_read_live(runtime, monkeypatch):
     bits += [(tick, hands_on_bit(d)) for a, d, b in sends if a == PSCM]
   assert all(bit == 1 for tick, bit in bits if tick < 100)
   assert all(bit == 0 for tick, bit in bits if tick >= 100)   # picked up at the next 0.5 s refresh (tick 100)
+
+
+def previous_create_pscm_status(packer, bus, pscm_status):
+  # create_pscm_status as it was before GmClusterTakeSteering (reference for the default path)
+  values = {s: pscm_status[s] for s in [
+    "HandsOffSWDetectionMode", "HandsOffSWlDetectionStatus", "LKATorqueDeliveredStatus", "LKADriverAppldTrq",
+    "LKATorqueDelivered", "LKATotalTorqueDelivered", "RollingCounter", "PSCMStatusChecksum",
+  ]}
+  checksum_mod = int(1 - values["HandsOffSWlDetectionStatus"]) << 5
+  values["HandsOffSWlDetectionStatus"] = 1
+  values["PSCMStatusChecksum"] += checksum_mod
+  return packer.make_can_msg("PSCMStatus", bus, values)
+
+
+@pytest.mark.parametrize("hands_on", [0, 1])
+def test_default_matches_previous_function_for_every_checksum(runtime, hands_on):
+  packer = runtime.CANPacker(DBC[CAR.CHEVROLET_TRAVERSE][Bus.pt])
+  values, _ = car_pscm_status(packer, 15, hands_on, .7, -.2, 1)
+  for checksum in range(1024):
+    values["PSCMStatusChecksum"] = checksum
+    snapshot = dict(values)
+    assert gmcan.create_pscm_status(packer, CanBus.CAMERA, values) == previous_create_pscm_status(packer, CanBus.CAMERA, values)
+    assert values == snapshot
+
+
+@pytest.mark.parametrize("start,end,level", [(0, 1, 2), (1, 0, 2), (1, 2, 1), (2, 1, 1), (2, 0, 1)])
+@pytest.mark.parametrize("change_tick", [1, 49, 51])
+def test_mode_change_applies_by_next_half_second(runtime, monkeypatch, start, end, level, change_tick):
+  monkeypatch.setattr(ModeParams, "mode", start)
+  monkeypatch.setattr(runtime.controller, "Params", ModeParams)
+  controller = runtime.controller.CarController(DBC[CAR.CHEVROLET_TRAVERSE], build_cp(runtime))
+  packer = runtime.CANPacker(DBC[CAR.CHEVROLET_TRAVERSE][Bus.pt])
+  state = controller_state()
+  cc = structs.CarControl(enabled=True, latActive=True)
+  cc.hudControl.driverMonitoringAlert = level
+  expect_off = (end == 1 and level >= 2) or (end == 2 and level >= 1)
+  deadline = ((change_tick + 49) // 50) * 50      # settings are read every 50 frames (0.5 s)
+  checked = 0
+  for tick in range(deadline + 11):
+    if tick == change_tick:
+      ModeParams.mode = end
+    values, _ = car_pscm_status(packer, tick % 16, 1, 0., 0., 1)
+    state.pscm_status = defaultdict(int, values)
+    _, sends = controller.update(cc.as_reader(), state, 1_000_000_000 + tick * 10_000_000)
+    if tick >= deadline:
+      for address, dat, bus in sends:
+        if address == PSCM:
+          checked += 1
+          assert hands_on_bit(dat) == (0 if expect_off else 1), tick
+  assert checked >= 1
+
+
+@pytest.mark.parametrize("candidate,alpha", [(CAR.CHEVROLET_TRAVERSE, False), (CAR.CHEVROLET_BOLT_EUV, False),
+                                             (CAR.CHEVROLET_BOLT_EUV, True)])
+def test_other_setups_keep_the_alert_hidden(runtime, monkeypatch, candidate, alpha):
+  monkeypatch.setattr(ModeParams, "mode", 2)
+  monkeypatch.setattr(runtime.controller, "Params", ModeParams)
+  cp = build_cp(runtime, candidate, alpha=alpha)
+  controller = runtime.controller.CarController(DBC[candidate], cp)
+  assert not controller.cluster_take_steering_supported
+  packer = runtime.CANPacker(DBC[candidate][Bus.pt])
+  state = controller_state()
+  cc = structs.CarControl(enabled=True, latActive=True)
+  cc.hudControl.driverMonitoringAlert = 3
+  copies = []
+  for tick in range(60):
+    values, _ = car_pscm_status(packer, tick % 16, 1, 0., 0., 1)
+    state.pscm_status = defaultdict(int, values)
+    _, sends = controller.update(cc.as_reader(), state, 1_000_000_000 + tick * 10_000_000)
+    copies += [d for a, d, b in sends if a == PSCM and b == CanBus.CAMERA]
+  assert copies and all(hands_on_bit(d) == 1 for d in copies)
+
+
+def test_traverse_sdgm_openpilot_long_is_supported(runtime):
+  controller = runtime.controller.CarController(DBC[CAR.CHEVROLET_TRAVERSE], build_cp(runtime))
+  assert controller.cluster_take_steering_supported
