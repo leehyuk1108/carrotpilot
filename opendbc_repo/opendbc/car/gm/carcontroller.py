@@ -391,26 +391,32 @@ class CarController(CarControllerBase):
       else:
         self.last_other_btn_frame = self.frame
     now = feature_now_ns(now_nanos)
-    latch_fresh = fresh(CS.auto_stop_off_ts, now, LATCH_MAX_AGE_NS)
+    # A CarState without these inputs (e.g. a test stand-in) reads as stale, so nothing is pressed.
+    latch_ts = getattr(CS, 'auto_stop_off_ts', 0)
+    latch = getattr(CS, 'auto_stop_off', 0)
+    latch_fresh = fresh(latch_ts, now, LATCH_MAX_AGE_NS)
+    can_ok = (getattr(CS.out, 'canValid', False) and not getattr(CS.out, 'canTimeout', True) and
+              fresh(getattr(CS, 'button_frame_ts', 0), now, BUTTON_MAX_AGE_NS))
     press = self.auto_stop_off.update(
       enabled=self.auto_stop_off_enabled,
       latch_fresh=latch_fresh,
-      latch=CS.auto_stop_off,
+      latch=latch,
       counter=int(CS.buttons_counter),
       standstill=CS.out.standstill,
       cruise_engaged=CS.out.cruiseState.enabled,
       op_enabled=CC.enabled,
-      can_ok=CS.out.canValid and not CS.out.canTimeout and fresh(CS.button_frame_ts, now, BUTTON_MAX_AGE_NS),
-      buttons_idle=CS.buttons_idle,
-      driver_switch=CS.button_auto_stop_pressed,
+      can_ok=can_ok,
+      buttons_idle=getattr(CS, 'buttons_idle', False),
+      driver_switch=getattr(CS, 'button_auto_stop_pressed', False),
       other_btn_recent=(self.frame - self.last_other_btn_frame) < 100,
-      latch_zero_seen=CS.auto_stop_off_zero_seen,
+      latch_zero_seen=getattr(CS, 'auto_stop_off_zero_seen', False),
     )
     if press:
       can_sends.append(gmcan.create_buttons(self.packer_pt, CanBus.POWERTRAIN, (int(CS.buttons_counter) + 1) % 4,
-                                            CruiseButtons.UNPRESS, park_brake=CS.button_park_brake, auto_stop_off=1))
+                                            CruiseButtons.UNPRESS, park_brake=getattr(CS, 'button_park_brake', 0),
+                                            auto_stop_off=1))
     if self.auto_stop_off.event is not None:
-      cloudlog.warning(f"[gm autostopoff] {self.auto_stop_off.event} latch={CS.auto_stop_off} fresh={latch_fresh}")
+      cloudlog.warning(f"[gm autostopoff] {self.auto_stop_off.event} latch={latch} fresh={latch_fresh}")
 
   # 버튼 송신 (첫 송신때만 BCM 카운터를 읽고 이후 자체 증가)
   def send_btn(self, CS, can_sends, cruise_btn):
