@@ -4,10 +4,13 @@ The HUD already obeys a manual ambient override carried in the payload (the Wayo
 override path). While NavdyAmbientDarkOff is on, the car is onroad and not in
 Park, the doors are closed and the car's light sensor has read dark for
 DARK_HOLD_S, the bridge sends a manual override with both zones disabled. When
-that ends it sends mode 'auto' until the HUD has received it RESTORE_DELIVERIES
-times and RESTORE_S has passed, so the HUD drops the override even if the link was
-down at that moment. Releasing in Park, before the ignition goes off, lets the
-HUD's own onroad-to-offroad transition (exit courtesy lighting) run unmodified.
+that ends it keeps releasing the override for RELEASE_S, the HUD's longest possible
+hold, so a release lost on a dropped link is repeated after reconnect or the HUD
+expires the override itself. The release is mode 'auto', or the user's Wayon
+profile when one is set, since the HUD drops a manual override on either.
+Releasing in Park, before the ignition goes off, lets the HUD's own
+onroad-to-offroad transition (exit courtesy lighting) run unmodified. If the link
+is down from Park until the ignition is off, that transition can still be missed.
 
 HUD behavior this relies on (AmbientLightController.setManualOverride):
 - A repeat of the active override id is ignored, so the id rotates every ROTATE_S
@@ -15,8 +18,10 @@ HUD behavior this relies on (AmbientLightController.setManualOverride):
 - expiresAt must be ISO-8601 UTC and in the future by the HUD clock (capped there at
   20 minutes). An override the HUD considers stale is dropped, leaving lights on.
 - 'auto' only clears a manual override. A user override sent afterwards is re-applied.
-- A profile command also clears the manual override, so a changed Wayon profile is
-  let through for one payload and the off override is re-applied on the next.
+- A profile command also clears the manual override (and saves the profile), so a
+  changed Wayon profile is let through for one payload and the off override is
+  re-applied on the next. If that one payload is lost, the profile still reaches
+  the HUD during the release.
 - The HUD's overspeed warning blink does not check the manual override and can still
   light zone 1 while the override is active.
 """
@@ -29,8 +34,7 @@ from pathlib import Path
 PARAM = 'NavdyAmbientDarkOff'
 DARK_HOLD_S = 5.0       # dark this long before switching off (tunnel entries, flicker)
 LIT_HOLD_S = 10.0       # bright or unknown this long before switching back on
-RESTORE_S = 3.0         # keep sending 'auto' at least this long after switching back on
-RESTORE_DELIVERIES = 3  # ... and until this many payloads carrying it reached the HUD
+RELEASE_S = 20 * 60     # HUD caps a manual override at 20 minutes from receipt
 ROTATE_S = 300          # new override id every 5 minutes
 LEASE_ROTATIONS = 3     # expiresAt lands 10-15 minutes ahead
 PARAM_REFRESH_S = 2.0
@@ -67,8 +71,7 @@ class DarkAmbient:
     self.dark_since: float | None = None   # start of the current dark run
     self.lit_since: float | None = None    # start of the current bright/unknown run
     self.active = False
-    self.restore_until: float | None = None
-    self.restore_delivered = 0
+    self.release_until: float | None = None
     self.forwarded_profile: str | None = None  # last Wayon profile the payload carried
 
   def _refresh(self, now: float) -> None:
@@ -80,10 +83,6 @@ class DarkAmbient:
     except Exception:
       self.enabled = False
 
-  def _begin_restore(self, now: float) -> None:
-    self.restore_until = now + RESTORE_S
-    self.restore_delivered = 0
-
   def update(self, *, now: float, wall: float, dark: bool | None, onroad: bool | None, door_open: bool,
              parked: bool = False, user_override=None) -> dict | None:
     """Override to send instead of the user's, or None to leave the payload alone."""
@@ -92,18 +91,13 @@ class DarkAmbient:
       self.forwarded_profile = profile_key(user_override)
     return result
 
-  def delivered(self, override) -> None:
-    """Call after a payload reached the HUD, with the ambientOverride it carried."""
-    if self.restore_until is not None and override == {'mode': 'auto'}:
-      self.restore_delivered += 1
-
   def _decide(self, now, wall, dark, onroad, door_open, parked, user_override):
     self._refresh(now)
     if not self._started:
       self._started = True
       if self.enabled:
         # A previous bridge may have left the HUD dark; clear it unless conditions hold.
-        self._begin_restore(now)
+        self.release_until = now + RELEASE_S
     if dark is True:
       self.lit_since = None
       self.dark_since = now if self.dark_since is None else self.dark_since
@@ -115,27 +109,25 @@ class DarkAmbient:
     if self.active:
       if not gated or (dark is not True and now - self.lit_since >= LIT_HOLD_S):
         self.active = False
-        self._begin_restore(now)
     elif gated and dark is True and now - self.dark_since >= DARK_HOLD_S:
       self.active = True
-      self.restore_until = None
     if self.active:
+      # The HUD can hold the last off command for up to RELEASE_S after it arrives.
+      self.release_until = now + RELEASE_S
       profile = profile_key(user_override)
       if profile is not None and profile != self.forwarded_profile:
         return None
       return off_override(wall)
-    if self.restore_until is not None:
-      if user_blocks:
-        self.restore_until = None  # the user's own manual/auto command replaces ours
-      elif now < self.restore_until or self.restore_delivered < RESTORE_DELIVERIES:
+    if self.release_until is not None:
+      if user_blocks or now >= self.release_until:
+        self.release_until = None  # the user's own manual/auto command replaces ours
+      elif profile_key(user_override) is None:
         return {'mode': 'auto'}
-      else:
-        self.restore_until = None
+      # else: the user's profile goes out unchanged and releases the HUD itself
     return None
 
   def state(self) -> dict:
-    return {'enabled': self.enabled, 'active': self.active, 'restoring': self.restore_until is not None,
-            'restoreDelivered': self.restore_delivered}
+    return {'enabled': self.enabled, 'active': self.active, 'releasing': self.release_until is not None}
 
 
 def profile_key(override) -> str | None:

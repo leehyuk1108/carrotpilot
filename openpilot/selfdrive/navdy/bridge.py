@@ -425,7 +425,6 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
             replies = [(response, received, (received - exchange_started) * 1000.)]
           received = time.monotonic()
           diagnostics.exchanged(len(replies))
-          dark_ambient.delivered(payload.get('ambientOverride'))
           phase = 'feedback'
           diagnostics.begin_phase(phase)
           latest_feedback = None
