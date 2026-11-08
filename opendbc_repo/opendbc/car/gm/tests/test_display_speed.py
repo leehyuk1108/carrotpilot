@@ -10,7 +10,7 @@ import pytest
 from opendbc.car import Bus, gen_empty_fingerprint, structs
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.gm import cluster_speed
-from opendbc.car.gm.values import CAR, DBC, GMFlags
+from opendbc.car.gm.values import CAR, DBC, GMFlags, GMSafetyFlags
 
 
 @pytest.mark.parametrize("raw,display", [(0, 0), (-2, -2), (24, 25), (25, 26), (28, 29),
@@ -226,6 +226,80 @@ def test_dashboard_only_can_difference(runtime, monkeypatch, active, accel, set_
       actual.pop("ACCSpeedSetpoint")
       before.pop("ACCSpeedSetpoint")
       assert actual == before
+
+
+@pytest.mark.parametrize("main_on,engaged,can_valid,bars,expected", [
+  (False, False, True, 2, 0),
+  (False, True, True, 2, 0),
+  (True, False, True, 1, 1),
+  (True, False, True, 2, 2),
+  (True, False, True, 3, 3),
+  (True, False, True, 4, 3),
+  (True, True, True, 2, 2),
+  (True, True, True, 4, 3),
+  (True, False, False, 2, 0),
+  (True, True, False, 2, 0),
+])
+def test_traverse_dashboard_gap_follows_acc_main(runtime, monkeypatch, main_on, engaged, can_valid, bars, expected):
+  candidate = CAR.CHEVROLET_TRAVERSE
+  cp = build_cp(runtime)
+  controller = runtime.controller.CarController(DBC[candidate], cp)
+  baseline = runtime.controller.CarController(DBC[candidate], cp)
+  state = controller_state()
+  state.out.canValid = can_valid
+  state.out.cruiseState.available = main_on
+  state.out.cruiseState.enabled = engaged
+  cc = structs.CarControl(enabled=engaged, longActive=engaged)
+  cc.actuators.longControlState = "pid" if engaged else "off"
+  cc.hudControl.setSpeed = 80 / 3.6
+  cc.hudControl.leadDistanceBars = bars
+  cc.hudControl.leadVisible = True
+  cc.hudControl.visualAlert = "fcw"
+  now = 1_000_000_000
+
+  output, sends = controller.update(cc.as_reader(), state, now)
+  encode_dashboard = runtime.controller.gmcan.create_acc_dashboard_command
+  with monkeypatch.context() as patch:
+    patch.setattr(runtime.controller.gmcan, "create_acc_dashboard_command", lambda *args, **kwargs: encode_dashboard(*args))
+    before, old_sends = baseline.update(cc.as_reader(), state, now)
+  assert output.to_dict() == before.to_dict()
+  assert [m for m in sends if m[0] != 0x370] == [m for m in old_sends if m[0] != 0x370]
+  dash, = [m for m in sends if m[0] == 0x370]
+  old_dash, = [m for m in old_sends if m[0] == 0x370]
+  assert dash[2] == old_dash[2] == 0
+  assert dash[1][:2] == old_dash[1][:2]
+  assert (dash[1][2] ^ old_dash[1][2]) & ~0x30 == 0
+  assert dash[1][3:] == old_dash[1][3:]
+  parser = runtime.CANParser(DBC[candidate][Bus.pt], [("ASCMActiveCruiseControlStatus", 25)], 0)
+  parser.update([(now, [dash])])
+  values = parser.vl["ASCMActiveCruiseControlStatus"]
+  assert values["ACCGapLevel"] == expected
+  assert values["ACCCmdActive"] == int(engaged)
+
+
+@pytest.mark.parametrize("candidate,alpha,remove_sdgm,sends_dashboard", [
+  (CAR.CHEVROLET_BOLT_EUV, True, False, True),
+  (CAR.CHEVROLET_TRAVERSE, True, True, True),
+  (CAR.CHEVROLET_TRAVERSE, False, False, False),
+])
+def test_other_gm_paths_keep_standby_gap_behavior(runtime, candidate, alpha, remove_sdgm, sends_dashboard):
+  cp = build_cp(runtime, candidate, alpha)
+  if remove_sdgm:
+    cp.safetyConfigs[0].safetyParam &= ~GMSafetyFlags.HW_SDGM.value
+  controller = runtime.controller.CarController(DBC[candidate], cp)
+  state = controller_state()
+  state.out.canValid = state.out.cruiseState.available = True
+  state.out.cruiseState.enabled = False
+  cc = structs.CarControl()
+  cc.hudControl.leadDistanceBars = 2
+  now = 1_000_000_000
+  _, sends = controller.update(cc.as_reader(), state, now)
+  dashboards = [m for m in sends if m[0] == 0x370]
+  assert len(dashboards) == int(sends_dashboard)
+  if dashboards:
+    parser = runtime.CANParser(DBC[candidate][Bus.pt], [("ASCMActiveCruiseControlStatus", 25)], 0)
+    parser.update([(now, dashboards)])
+    assert parser.vl["ASCMActiveCruiseControlStatus"]["ACCGapLevel"] == 0
 
 
 def test_non_traverse_dashboard_passthrough(runtime):
