@@ -5,7 +5,7 @@ import pytest
 
 from openpilot.selfdrive.navdy import ambient_dark as mod
 from openpilot.selfdrive.navdy.ambient_dark import (
-  DARK_HOLD_S, LIT_HOLD_S, RESTORE_S, ROTATE_S, DarkAmbient, off_override, read_enabled,
+  DARK_HOLD_S, LIT_HOLD_S, RESTORE_DELIVERIES, RESTORE_S, ROTATE_S, DarkAmbient, off_override, read_enabled,
 )
 
 WALL = 1_794_180_000.0  # 2026-11-09 04:40 KST
@@ -18,9 +18,14 @@ def driver(enabled=True):
   return ambient, state
 
 
-def step(ambient, now, *, dark=True, onroad=True, door_open=False, user_override=None, wall=None):
-  return ambient.update(now=now, wall=WALL + now if wall is None else wall, dark=dark, onroad=onroad,
-                        door_open=door_open, user_override=user_override)
+def step(ambient, now, *, dark=True, onroad=True, door_open=False, parked=False, user_override=None, wall=None,
+         delivered=True):
+  result = ambient.update(now=now, wall=WALL + now if wall is None else wall, dark=dark, onroad=onroad,
+                          door_open=door_open, parked=parked, user_override=user_override)
+  if delivered:
+    # What the bridge would send: our command, else the user's override.
+    ambient.delivered(result if result is not None else user_override)
+  return result
 
 
 def expires_in(command, wall):
@@ -31,6 +36,16 @@ def expires_in(command, wall):
 def is_off(command):
   return (command is not None and command['mode'] == 'manual'
           and command['zone1']['enabled'] is False and command['zone2']['enabled'] is False)
+
+
+def run(ambient, start, duration, **kwargs):
+  """Distinct results of 5 Hz steps over [start, start + duration]."""
+  seen = []
+  for i in range(int(round(duration / 0.2)) + 1):
+    result = step(ambient, start + i * 0.2, **kwargs)
+    if result not in seen:
+      seen.append(result)
+  return seen
 
 
 def settle(ambient, now=0.0, **kwargs):
@@ -86,8 +101,7 @@ def test_bright_needs_lit_hold_then_restores_with_auto():
   while t < start + LIT_HOLD_S - 0.01:
     assert is_off(step(ambient, t, dark=False))
     t += 0.2
-  assert step(ambient, start + LIT_HOLD_S, dark=False) == AUTO
-  assert step(ambient, start + LIT_HOLD_S + RESTORE_S - 0.1, dark=False) == AUTO
+  assert run(ambient, start + LIT_HOLD_S, RESTORE_S - 0.1, dark=False) == [AUTO]
   assert step(ambient, start + LIT_HOLD_S + RESTORE_S + 0.1, dark=False) is None
 
 
@@ -108,7 +122,7 @@ def test_lost_signal_restores_after_lit_hold():
 
 
 @pytest.mark.parametrize("change", [
-  {'door_open': True}, {'onroad': False}, {'onroad': None},
+  {'door_open': True}, {'onroad': False}, {'onroad': None}, {'parked': True},
   {'user_override': {'mode': 'manual', 'id': 'phone-1'}}, {'user_override': {'mode': 'auto'}},
 ])
 def test_door_offroad_and_user_override_restore_immediately(change):
@@ -149,7 +163,7 @@ def test_startup_restore_only_when_enabled():
   ambient, _ = driver(enabled=False)
   assert step(ambient, 0.0, dark=False) is None
   ambient, _ = driver(enabled=True)
-  assert step(ambient, 0.0, dark=False) == AUTO
+  assert run(ambient, 0.0, RESTORE_S - 0.1, dark=False) == [AUTO]
   assert step(ambient, RESTORE_S + 0.1, dark=False) is None
 
 
@@ -170,3 +184,56 @@ def test_read_enabled_reads_param_file(tmp_path, raw, expected):
 
 def test_read_enabled_missing_file_is_disabled(tmp_path):
   assert read_enabled(NS(get_param_path=lambda key: str(tmp_path / key))) is False
+
+
+def test_parked_releases_before_ignition_off_so_exit_lighting_runs():
+  ambient, _ = driver()
+  result, t = settle(ambient)
+  assert run(ambient, t, RESTORE_S - 0.1, parked=True) == [AUTO]
+  t2 = t + RESTORE_S + 0.1
+  assert step(ambient, t2, parked=True) is None  # delivered and held long enough; HUD back to normal
+  assert step(ambient, t2 + 0.2, parked=True, onroad=False) is None
+  # Never re-arms while parked, however long it stays dark.
+  assert step(ambient, t2 + 60, parked=True) is None
+
+
+def test_restore_waits_for_delivery_when_the_link_is_down():
+  ambient, _ = driver()
+  result, t = settle(ambient)
+  assert step(ambient, t, door_open=True, delivered=False) == AUTO
+  later = t + RESTORE_S + 30
+  assert step(ambient, later, door_open=True, delivered=False) == AUTO  # link was down the whole time
+  for i in range(RESTORE_DELIVERIES - 1):
+    assert step(ambient, later + 0.2 * (i + 1), door_open=True) == AUTO
+  assert step(ambient, later + 0.2 * RESTORE_DELIVERIES, door_open=True) == AUTO
+  assert step(ambient, later + 0.2 * (RESTORE_DELIVERIES + 1), door_open=True) is None
+
+
+def test_only_delivered_auto_counts_toward_restore():
+  ambient, _ = driver()
+  result, t = settle(ambient)
+  assert step(ambient, t, door_open=True, delivered=False) == AUTO
+  for _ in range(5):
+    ambient.delivered({'mode': 'profile'})
+    ambient.delivered(None)
+  assert step(ambient, t + RESTORE_S + 1, door_open=True, delivered=False) == AUTO
+
+
+def test_changed_profile_passes_once_then_off_resumes():
+  ambient, _ = driver()
+  first = {'mode': 'profile', 'profile': {'driving': {'zone1': {'brightness': 30}}}}
+  result, t = settle(ambient, user_override=first)
+  assert is_off(result)
+  assert is_off(step(ambient, t, user_override=first))
+  changed = {'mode': 'profile', 'profile': {'driving': {'zone1': {'brightness': 60}}}}
+  assert step(ambient, t + 0.2, user_override=changed) is None  # the new profile reaches the HUD
+  assert is_off(step(ambient, t + 0.4, user_override=changed))
+  assert is_off(step(ambient, t + 0.6, user_override=changed))
+
+
+def test_profile_set_for_the_first_time_while_dark_passes_once():
+  ambient, _ = driver()
+  result, t = settle(ambient)
+  profile = {'mode': 'profile', 'profile': {}}
+  assert step(ambient, t, user_override=profile) is None
+  assert is_off(step(ambient, t + 0.2, user_override=profile))

@@ -265,11 +265,20 @@ class Car:
       oat.valid = celsius is not None and CS.canValid and not CS.canTimeout
       oat.celsius = celsius if oat.valid else 0.0
     if self.ambient_light is not None:
-      light_now_ns = can_list[-1][0] if REPLAY and can_list else lane_boottime_ns()
-      dark = self.ambient_light.update(can_list, light_now_ns)
-      light = CS.ambientLight
-      light.valid = dark is not None and CS.canValid and not CS.canTimeout
-      light.dark = bool(dark) if light.valid else False
+      try:
+        light_now_ns = can_list[-1][0] if REPLAY and can_list else lane_boottime_ns()
+        dark = self.ambient_light.update(can_list, light_now_ns)
+        light = CS.ambientLight
+        light.valid = dark is not None and CS.canValid and not CS.canTimeout
+        light.dark = bool(dark) if light.valid else False
+      except Exception:
+        # Display-only field: never let it stop card. Log once, then stop decoding.
+        cloudlog.exception("ambient light decode failed; disabled for this card run")
+        self.ambient_light = None
+        try:
+          CS.ambientLight.valid = False
+        except Exception:
+          pass
     #self.t1 = time.monotonic()
 
     can_rcv_valid = len(can_strs) > 0

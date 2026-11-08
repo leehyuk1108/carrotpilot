@@ -141,6 +141,14 @@ def test_dark_ambient_gets_unknown_without_a_valid_reading(sm, state):
   assert dark.calls[0]['dark'] is None
 
 
+@pytest.mark.parametrize('gear,parked', [('park', True), ('drive', False), ('reverse', False)])
+def test_dark_ambient_gets_park_from_the_gear(sm, gear, parked):
+  sm.data['carState'] = car(ambientLight=NS(valid=True, dark=True), gearShifter=gear)
+  dark = RecordingDark(None)
+  bridge.live_payload(sm, 1, dark_ambient=dark)
+  assert dark.calls[0]['parked'] is parked
+
+
 def test_dark_ambient_offroad_and_car_door(sm):
   sm.data['carState'] = car(ambientLight=NS(valid=True, dark=True), doorOpen=True)
   dark = RecordingDark(None)

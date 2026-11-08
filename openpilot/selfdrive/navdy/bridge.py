@@ -217,7 +217,8 @@ def live_payload(sm, sequence, *, sources=None, door_open=False, ambient_overrid
   if dark_ambient is not None:
     dark = ambient_dark(car_state) if known_road is True and car_state is not None else None
     dark_override = dark_ambient.update(now=time.monotonic(), wall=time.time(), dark=dark, onroad=known_road,
-                                        door_open=door_open, user_override=ambient_override)
+                                        door_open=door_open, parked=payload['gear'] == 'park',
+                                        user_override=ambient_override)
     if dark_override is not None:
       ambient_override = dark_override
   if ambient_override is not None:
@@ -424,6 +425,7 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
             replies = [(response, received, (received - exchange_started) * 1000.)]
           received = time.monotonic()
           diagnostics.exchanged(len(replies))
+          dark_ambient.delivered(payload.get('ambientOverride'))
           phase = 'feedback'
           diagnostics.begin_phase(phase)
           latest_feedback = None
