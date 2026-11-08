@@ -348,12 +348,14 @@ The Jetson HUD shows the highest internal sensor temperature below `jetSON`, or 
 
 With `CarrotVisionEnabled` on, the external HUD and web camera view can be used together. Simultaneous video use may increase device load. See the [Carrot Web guide](carrot-web.md).
 
+`NavdyAmbientDarkOff` (Navdy ambient off when dark, default 0) turns the ambient light connected to the Navdy off while driving whenever the car reports darkness. Darkness comes from the car's auto-headlamp light sensor and is currently read only on the Chevrolet Traverse. The light turns off after 5 seconds of darkness and returns to its normal lighting after 10 seconds of brightness or no signal, so a dark stretch such as a tunnel longer than 5 seconds can turn it off too. Opening a door while driving still turns on the door lighting, and parked lighting works as before once the car is off. A manual ambient light set from the Wayon app takes priority. The Navdy app is unchanged; the comma uses its existing manual lighting command, so the light may stay on if the Navdy clock is far off. Applies within about 2 seconds without rebooting.
+
 | Group | Parameters | Purpose |
 |---|---|---|
 | Information | `ShowDebugUI`, `ShowTpms`, `ShowDateTime`, `ShowPathEnd`, `ShowDeviceState`, `ShowLaneInfo`, `ShowRadarInfo`, `ShowRouteInfo`, `ShowPlotMode` | Debug, tire, time, lane, radar, and route information |
 | Path | `ShowPathMode`, `ShowPathColor`, `ShowPathColorCruiseOff`, `ShowPathModeLane`, `ShowPathColorLane` | Path shape and color by driving state |
 | Brightness/on-road view | `ShowCustomBrightness`, `ShowModelView`, `ShowCameraWithCluster` | Brightness, camera/model composition, and the on-device camera while the external HUD is connected |
-| External HUD | `ClusterHud`, `ClusterHudBrightness`, `ClusterHudOrientation`, and related `ClusterHud*` settings | Supported TURZX HUD layout, live brightness, screen rotation, camera, radar, and encoder options |
+| External HUD | `ClusterHud`, `ClusterHudBrightness`, `ClusterHudOrientation`, and related `ClusterHud*` settings, `NavdyAmbientDarkOff` | Supported TURZX HUD layout, live brightness, screen rotation, camera, radar, and encoder options; Navdy ambient off when dark |
 
 For RAV4 2022 with the ARS display stream, `ShowRadarInfo=3` on the standard device
 driving screen also shows adjacent-lane objects separately from control leads. Modes 1/2

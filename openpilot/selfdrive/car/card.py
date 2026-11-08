@@ -29,6 +29,7 @@ from openpilot.selfdrive.car.car_specific import MockCarState
 from openpilot.selfdrive.car.openpilot_toggle import CruiseMainOpenpilotToggle
 from openpilot.selfdrive.car.stock_lane_markings import TraverseStockLaneMarkings, UNKNOWN_LANES, lane_boottime_ns
 from openpilot.selfdrive.car.outside_air_temp import TraverseOutsideAirTemp
+from openpilot.selfdrive.car.ambient_light import TraverseAmbientLight
 from openpilot.selfdrive.controls.lib.lateral_readiness import LateralStartupGate
 from openpilot.selfdrive.carrot.xiaoge.xiaoge_vision import (
   XiaogeVisionResult,
@@ -192,6 +193,7 @@ class Car:
     self.xiaoge_vision_result: XiaogeVisionResult | None = None
     self.stock_lane_markings = TraverseStockLaneMarkings() if self.CP.carFingerprint == GM_CAR.CHEVROLET_TRAVERSE else None
     self.outside_air_temp = TraverseOutsideAirTemp() if self.CP.carFingerprint == GM_CAR.CHEVROLET_TRAVERSE else None
+    self.ambient_light = TraverseAmbientLight() if self.CP.carFingerprint == GM_CAR.CHEVROLET_TRAVERSE else None
     self.xiaoge_blindspot_sources = (False, False, False, False)
     self.xiaoge_blindspot_sources_published = None
     self.xiaoge_blindspot_sources_published_ns = 0
@@ -262,6 +264,12 @@ class Car:
       oat = CS.outsideAirTemp
       oat.valid = celsius is not None and CS.canValid and not CS.canTimeout
       oat.celsius = celsius if oat.valid else 0.0
+    if self.ambient_light is not None:
+      light_now_ns = can_list[-1][0] if REPLAY and can_list else lane_boottime_ns()
+      dark = self.ambient_light.update(can_list, light_now_ns)
+      light = CS.ambientLight
+      light.valid = dark is not None and CS.canValid and not CS.canTimeout
+      light.dark = bool(dark) if light.valid else False
     #self.t1 = time.monotonic()
 
     can_rcv_valid = len(can_strs) > 0

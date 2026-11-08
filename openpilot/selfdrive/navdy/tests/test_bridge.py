@@ -4,6 +4,7 @@ from types import SimpleNamespace as NS
 import pytest
 
 from openpilot.selfdrive.navdy import bridge
+from openpilot.selfdrive.navdy.ambient_dark import DarkAmbient
 from openpilot.selfdrive.navdy.tests.test_display import car, model, selfdrive
 
 
@@ -37,6 +38,12 @@ def sm(monkeypatch):
 def no_hardware_door_thread(monkeypatch):
   monkeypatch.setattr(bridge, 'DoorMonitor', lambda: NS(start=lambda: None, close=lambda: None,
                                                      door_open=False, gm=True, error=''))
+
+
+@pytest.fixture(autouse=True)
+def dark_ambient_off(monkeypatch):
+  # The device's real NavdyAmbientDarkOff must not leak into run() payload tests.
+  monkeypatch.setattr(bridge, 'DarkAmbient', lambda: DarkAmbient(read=lambda: False))
 
 
 def test_offroad_without_car_messages_keeps_ambient_heartbeat(sm):
@@ -95,6 +102,54 @@ def test_ambient_override_is_carried_without_changing_display_state(sm):
   payload = bridge.live_payload(sm, 1, ambient_override=command)
   assert payload['ambientOverride'] == command
   assert payload['active']
+
+
+class RecordingDark:
+  def __init__(self, result):
+    self.result = result
+    self.calls = []
+
+  def update(self, **kwargs):
+    self.calls.append(kwargs)
+    return self.result
+
+
+def test_dark_ambient_override_replaces_profile_with_car_light_inputs(sm):
+  sm.data['carState'] = car(ambientLight=NS(valid=True, dark=True))
+  dark = RecordingDark({'mode': 'manual', 'id': 'carrot-dark-1'})
+  payload = bridge.live_payload(sm, 1, ambient_override={'mode': 'profile'}, dark_ambient=dark)
+  assert payload['ambientOverride'] == {'mode': 'manual', 'id': 'carrot-dark-1'}
+  call = dark.calls[0]
+  assert (call['dark'], call['onroad'], call['door_open']) == (True, True, False)
+  assert call['user_override'] == {'mode': 'profile'}
+  assert payload['active'] and payload['ambientState'] == 'onroad'
+
+
+def test_dark_ambient_without_command_keeps_user_override(sm):
+  command = {'mode': 'manual', 'id': 'phone'}
+  payload = bridge.live_payload(sm, 1, ambient_override=command, dark_ambient=RecordingDark(None))
+  assert payload['ambientOverride'] == command
+  assert 'ambientOverride' not in bridge.live_payload(sm, 2, dark_ambient=RecordingDark(None))
+
+
+@pytest.mark.parametrize('state', [car(), car(ambientLight=NS(valid=False, dark=True)),
+                                   car(ambientLight=NS(valid=True, dark=True), canValid=False)])
+def test_dark_ambient_gets_unknown_without_a_valid_reading(sm, state):
+  sm.data['carState'] = state
+  dark = RecordingDark(None)
+  bridge.live_payload(sm, 1, dark_ambient=dark)
+  assert dark.calls[0]['dark'] is None
+
+
+def test_dark_ambient_offroad_and_car_door(sm):
+  sm.data['carState'] = car(ambientLight=NS(valid=True, dark=True), doorOpen=True)
+  dark = RecordingDark(None)
+  bridge.live_payload(sm, 1, dark_ambient=dark)
+  assert dark.calls[0]['door_open'] is True
+  sm.data['deviceState'].started = False
+  sm.data['carState'] = car(ambientLight=NS(valid=True, dark=True))
+  bridge.live_payload(sm, 2, dark_ambient=dark)
+  assert (dark.calls[1]['onroad'], dark.calls[1]['dark']) == (False, None)
 
 
 @pytest.mark.parametrize('service', ['carState', 'selfdriveState'])

@@ -20,6 +20,7 @@ from openpilot.selfdrive.navdy.transport import AdbTransport, LineReader, encode
 from openpilot.selfdrive.navdy.bluetooth import BluetoothTransport, CONFIG_PATH, configured_connection
 from openpilot.selfdrive.navdy.connection import UsbProbe
 from openpilot.selfdrive.navdy.ambient import DoorMonitor, read_override, road_state
+from openpilot.selfdrive.navdy.ambient_dark import DarkAmbient
 from openpilot.selfdrive.navdy.model_navigation import ModelNavigationTracker, ModelRouteCache, age_model_feedback
 from openpilot.selfdrive.navdy.diagnostics import LinkDiagnostics, public_error
 from openpilot.selfdrive.navdy.feedback import is_no_observation
@@ -179,7 +180,8 @@ def usb_recovery_allowed(sm):
   return recovery_messages(sm, time.monotonic())
 
 
-def live_payload(sm, sequence, *, sources=None, door_open=False, ambient_override=None, vehicles=None):
+def live_payload(sm, sequence, *, sources=None, door_open=False, ambient_override=None, vehicles=None, dark_ambient=None):
+  from openpilot.selfdrive.car.ambient_light import ambient_dark
   from openpilot.selfdrive.navdy.display import payload_from_messages, resolve_operating_state
   sources = display_sources(sm) if sources is None else sources
 
@@ -212,6 +214,12 @@ def live_payload(sm, sequence, *, sources=None, door_open=False, ambient_overrid
                                                      door_open=door_open, gear=payload['gear'] if known_road else 'unknown')
   else:
     payload['ambientState'] = 'disconnected'
+  if dark_ambient is not None:
+    dark = ambient_dark(car_state) if known_road is True and car_state is not None else None
+    dark_override = dark_ambient.update(now=time.monotonic(), wall=time.time(), dark=dark, onroad=known_road,
+                                        door_open=door_open, user_override=ambient_override)
+    if dark_override is not None:
+      ambient_override = dark_override
   if ambient_override is not None:
     payload['ambientOverride'] = ambient_override
   if payload['active'] and 'navPathLeft' not in payload:
@@ -255,6 +263,7 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
     model_route_cache = ModelRouteCache(model_route_path, atomic_json)
     vehicles = VehicleOverlay()
     doors = DoorMonitor()
+    dark_ambient = DarkAmbient()
     diagnostics = LinkDiagnostics(cloudlog.event, journal=LocalJournal())
     recovery_events = queue.Queue(maxsize=32)
     def record_recovery(*args, **kwargs):
@@ -398,7 +407,7 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
           captured_ns = time.monotonic_ns()
           sources = display_sources(sm)
           payload = live_payload(sm, sequence, sources=sources, door_open=doors.door_open,
-                                 ambient_override=read_override(), vehicles=vehicles)
+                                 ambient_override=read_override(), vehicles=vehicles, dark_ambient=dark_ambient)
           payload['modelRoute'] = model_navigation.request(time.monotonic())
           car_state = sm['carState']
           diagnostics.sources(sources, payload,
@@ -476,7 +485,8 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
                                            'ambientState': payload['ambientState'], 'sources': sources,
                                            'vehicleCount': len(payload['navVehicles'])},
                                'power': payload['displayPower'],
-                               'ambient': {'doorOpen': payload['doorOpen'], 'gmDoorMonitor': doors.gm, 'error': doors.error},
+                               'ambient': {'doorOpen': payload['doorOpen'], 'gmDoorMonitor': doors.gm, 'error': doors.error,
+                                           'darkOff': dark_ambient.state()},
                                'lastDisplayDropout': last_display_dropout,
                                'lastHandover': last_handover, 'wirelessConfigured': peer is not None,
                                'transportPolicy': policy, 'connectionMode': connection_mode,

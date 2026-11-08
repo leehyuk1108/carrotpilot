@@ -300,6 +300,13 @@ struct CarState {
     celsius @1 :Float32;
   }
 
+  ambientLight @107 :AmbientLight; # display-only BCM ambient light level (the auto-headlamp light sensor)
+
+  struct AmbientLight {
+    valid @0 :Bool; # false: unsupported car, no fresh frame, or CAN invalid
+    dark @1 :Bool;
+  }
+
   struct VehicleGps {
     available @0 :Bool;
     valid @1 :Bool; # receive/continuity checks, not a decoded satellite fix flag
