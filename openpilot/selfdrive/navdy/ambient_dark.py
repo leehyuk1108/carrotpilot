@@ -119,11 +119,12 @@ class DarkAmbient:
         return None
       return off_override(wall)
     if self.release_until is not None:
-      if user_blocks or now >= self.release_until:
-        self.release_until = None  # the user's own manual/auto command replaces ours
-      elif profile_key(user_override) is None:
+      if now >= self.release_until:
+        self.release_until = None
+      elif not user_blocks and profile_key(user_override) is None:
         return {'mode': 'auto'}
-      # else: the user's profile goes out unchanged and releases the HUD itself
+      # else: the user's own command or profile goes out unchanged; the HUD drops our
+      # override on either. The window is kept in case that payload never arrives.
     return None
 
   def state(self) -> dict:

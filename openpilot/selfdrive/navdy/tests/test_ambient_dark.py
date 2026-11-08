@@ -128,15 +128,18 @@ def test_door_offroad_and_park_release_immediately(change):
 
 
 @pytest.mark.parametrize("command", [{'mode': 'manual', 'id': 'phone-1'}, {'mode': 'auto'}])
-def test_user_manual_or_auto_replaces_ours_and_ends_the_release(command):
+def test_user_manual_or_auto_goes_out_instead_but_keeps_the_release_window(command):
   ambient, _ = driver()
   result, t = settle(ambient)
   assert step(ambient, t, user_override=command) is None  # the user's command is sent instead
+  # If that command never reached the HUD and has since expired, keep releasing ours.
+  assert step(ambient, t + 90, parked=True) == AUTO
   ambient, _ = driver()
   result, t = settle(ambient)
   assert step(ambient, t, door_open=True) == AUTO
   assert step(ambient, t + 1, door_open=True, user_override=command) is None
-  assert step(ambient, t + 2, door_open=True) is None  # release dropped for good
+  assert step(ambient, t + 2, door_open=True) == AUTO
+  assert step(ambient, t + RELEASE_S + 1, door_open=True) is None
 
 
 def test_link_drop_during_release_is_covered_by_repeating_it():
