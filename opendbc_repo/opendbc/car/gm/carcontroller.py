@@ -67,11 +67,12 @@ class CarController(CarControllerBase):
 
     self.params = CarControllerParams(self.CP)
     self.params_ = Params() # kans: button spam
-    self.fcw_warning_test = FcwWarningTest() if (
+    self.traverse_sdgm_long = bool(
       CP.carFingerprint == CAR.CHEVROLET_TRAVERSE and CP.openpilotLongitudinalControl
       and CP.networkLocation == NetworkLocation.fwdCamera
       and CP.safetyConfigs and CP.safetyConfigs[0].safetyParam & GMSafetyFlags.HW_SDGM
-    ) else None
+    )
+    self.fcw_warning_test = FcwWarningTest() if self.traverse_sdgm_long else None
 
     self.packer_pt = CANPacker(DBC[self.CP.carFingerprint][Bus.pt])
     self.packer_obj = CANPacker(DBC[self.CP.carFingerprint][Bus.radar])
@@ -80,11 +81,7 @@ class CarController(CarControllerBase):
     self.long_pitch = False
     self.use_ev_tables = False
     self.cluster_take_steering_mode = 0
-    # GmClusterTakeSteering is only exercised on the Traverse SDGM camera harness with openpilot longitudinal.
-    self.cluster_take_steering_supported = bool(
-      CP.carFingerprint == CAR.CHEVROLET_TRAVERSE and CP.openpilotLongitudinalControl
-      and CP.networkLocation == NetworkLocation.fwdCamera
-      and CP.safetyConfigs and CP.safetyConfigs[0].safetyParam & GMSafetyFlags.HW_SDGM)
+    self.cluster_take_steering_supported = self.traverse_sdgm_long
 
     self.pitch = FirstOrderFilter(0., 0.09 * 4, DT_CTRL * 4)  # runs at 25 Hz
     self.accel_g = 0.0
@@ -321,8 +318,12 @@ class CarController(CarControllerBase):
           # Send dashboard UI commands (ACC status)
           send_fcw = hud_alert == VisualAlert.fcw or test_fcw
           dashboard_speed_kph = get_acc_dashboard_speed_kph(self.CP, hud_v_cruise * CV.MS_TO_KPH)
+          dashboard_gap_level = None
+          if self.traverse_sdgm_long:
+            # Request up to three display bars even in standby, without asserting ACC active.
+            dashboard_gap_level = min(hud_control.leadDistanceBars, 3) if CS.out.canValid and CS.out.cruiseState.available else 0
           can_sends.append(gmcan.create_acc_dashboard_command(self.packer_pt, CanBus.POWERTRAIN, CC.enabled,
-                                                              dashboard_speed_kph, hud_control, send_fcw))
+                                                              dashboard_speed_kph, hud_control, send_fcw, gap_level=dashboard_gap_level))
       else:
         # to keep accel steady for logs when not sending gas
         accel += self.accel_g
