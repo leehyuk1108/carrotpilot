@@ -97,11 +97,25 @@ class DarkAmbient:
       self.enabled = False
 
   def observe(self, *, now: float, dark: bool | None, onroad: bool | None, camera: int | None) -> None:
-    """Keep the camera record current on ticks without a payload (Navdy link down)."""
-    self._track_camera(now, dark, onroad, camera)
+    """Track the car on ticks without a payload (Navdy link down).
 
-  def _track_camera(self, now, dark, onroad, camera) -> None:
-    # Idempotent per tick: run() observes every loop and update() repeats it when a payload goes out.
+    Keeps the hold timers and the camera record current and applies every reason to
+    switch back on, so a stop or city lights while the link was down are not missed.
+    It never switches off by itself; update() decides that with the full inputs.
+    """
+    self._track(now, dark, onroad, camera)
+
+  def _track(self, now, dark, onroad, camera) -> bool:
+    """Shared per-tick tracking; returns whether the camera currently means "no lights".
+
+    Idempotent per tick: run() observes every loop and update() repeats it when a payload goes out.
+    """
+    if dark is True:
+      self.lit_since = None
+      self.dark_since = now if self.dark_since is None else self.dark_since
+    else:
+      self.dark_since = None
+      self.lit_since = now if self.lit_since is None else self.lit_since
     if dark is False:
       self.bright_since = now if self.bright_since is None else self.bright_since
     else:
@@ -110,6 +124,17 @@ class DarkAmbient:
       self.camera_seen = False  # a new drive or daylight: the camera has to report again
     elif dark is True and camera in (CAMERA_CITY_LIGHTS, CAMERA_HIGH_BEAM):
       self.camera_seen = True
+    no_lights = self.camera_seen and camera in (CAMERA_NONE, CAMERA_HIGH_BEAM)
+    if no_lights:
+      self.lights_since = None
+      self.no_lights_since = now if self.no_lights_since is None else self.no_lights_since
+    else:
+      self.no_lights_since = None
+      self.lights_since = now if self.lights_since is None else self.lights_since
+    if self.active and (onroad is not True or (dark is not True and now - self.lit_since >= LIT_HOLD_S)
+                        or (not no_lights and now - self.lights_since >= LIGHTS_HOLD_S)):
+      self.active = False
+    return no_lights
 
   def update(self, *, now: float, wall: float, dark: bool | None, onroad: bool | None, door_open: bool,
              parked: bool = False, user_override=None, camera: int | None = None) -> dict | None:
@@ -126,25 +151,11 @@ class DarkAmbient:
       if self.enabled:
         # A previous bridge may have left the HUD dark; clear it unless conditions hold.
         self.release_until = now + RELEASE_S
-    if dark is True:
-      self.lit_since = None
-      self.dark_since = now if self.dark_since is None else self.dark_since
-    else:
-      self.dark_since = None
-      self.lit_since = now if self.lit_since is None else self.lit_since
-    self._track_camera(now, dark, onroad, camera)
-    no_lights = self.camera_seen and camera in (CAMERA_NONE, CAMERA_HIGH_BEAM)
-    if no_lights:
-      self.lights_since = None
-      self.no_lights_since = now if self.no_lights_since is None else self.no_lights_since
-    else:
-      self.no_lights_since = None
-      self.lights_since = now if self.lights_since is None else self.lights_since
+    no_lights = self._track(now, dark, onroad, camera)
     user_blocks = isinstance(user_override, dict) and user_override.get('mode') in USER_OVERRIDE_MODES
     gated = self.enabled and onroad is True and not door_open and not parked and not user_blocks
     if self.active:
-      if (not gated or (dark is not True and now - self.lit_since >= LIT_HOLD_S)
-          or (not no_lights and now - self.lights_since >= LIGHTS_HOLD_S)):
+      if not gated:
         self.active = False
     elif (gated and dark is True and now - self.dark_since >= DARK_HOLD_S
           and no_lights and now - self.no_lights_since >= NO_LIGHTS_HOLD_S):

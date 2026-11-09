@@ -343,3 +343,37 @@ def test_observe_keeps_the_camera_record_without_payloads():
   for i in range(int(CAMERA_RESET_S / 0.2) + 1):
     ambient.observe(now=40.0 + i * 0.2, dark=False, onroad=True, camera=CITY)
   assert not ambient.state()['cameraSeen']
+
+
+def test_stop_observed_while_the_link_was_down_releases_on_reconnect():
+  ambient, _ = driver()
+  result, t = settle(ambient)
+  assert is_off(result)
+  ambient.observe(now=t + 1, dark=None, onroad=False, camera=None)  # ignition off, link down
+  assert not ambient.state()['active']
+  # Next drive, camera not judging yet: the first payload releases instead of re-sending off.
+  assert step(ambient, t + 30, camera=NONE) == AUTO
+  assert not any(is_off(r) for r in run(ambient, t + 30.2, 30, camera=NONE))
+
+
+def test_city_lights_observed_while_the_link_was_down_restart_the_no_lights_hold():
+  ambient, _ = driver()
+  assert run(ambient, 0.0, 4.8) == [AUTO]  # 5 s of "no lights", payloads going out
+  for i in range(100):
+    ambient.observe(now=5.0 + i * 0.2, dark=True, onroad=True, camera=CITY)
+  start = 25.0
+  assert run(ambient, start, NO_LIGHTS_HOLD_S - 0.2, camera=NONE) == [AUTO]
+  assert is_off(step(ambient, start + NO_LIGHTS_HOLD_S, camera=NONE))
+
+
+def test_observe_applies_releases_but_never_switches_off():
+  ambient, _ = driver()
+  for i in range(100):
+    ambient.observe(now=i * 0.2, dark=True, onroad=True, camera=HIGH_BEAM)
+  assert not ambient.state()['active']
+  assert is_off(step(ambient, 20.0))  # conditions held through the gap: off on the first payload
+  result, t = settle(ambient, 21.0)
+  for i in range(int(LIGHTS_HOLD_S / 0.2) + 1):
+    ambient.observe(now=t + i * 0.2, dark=True, onroad=True, camera=CITY)
+  assert not ambient.state()['active']
+  assert step(ambient, t + LIGHTS_HOLD_S + 0.4, camera=CITY) == AUTO
