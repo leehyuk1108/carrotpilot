@@ -63,6 +63,29 @@ def test_4hz_counter_sampled_at_10hz_keeps_heavy_fuel_flow():
   assert tracker.used_counts == pytest.approx(600 * 59.75, abs=1)
 
 
+def test_real_full_throttle_peak_is_fuel():
+  # 000001f2 hard acceleration: 0x3F9 rose 219-248 counts per 0.25 s frame, first seen 0.2 s apart in qlog.
+  tracker = TripFuelTracker()
+  counter = 65022
+  tracker.update(0.0, car(counter))
+  for step, delta in enumerate((219, 231, 239, 248, 247, 241), start=1):
+    counter = (counter + delta) % 65536
+    tracker.update(step * 0.2, car(counter))
+  assert tracker.counter_restarts == 0 and tracker.used_counts == 219 + 231 + 239 + 248 + 247 + 241
+  assert 1500 * MAX_GAP_S < 65536
+
+
+def test_reset_after_a_long_still_counter_is_not_fuel():
+  # Counter held at 50000 for 30 s (fuel cut / auto stop) while samples keep coming, then the ECM resets it.
+  tracker = TripFuelTracker()
+  for step in range(301):
+    tracker.update(step / 10, car(50000, 0.0))
+  tracker.update(30.1, car(0, 0.0))
+  tracker.update(30.35, car(13, 0.0))
+  assert tracker.counter_restarts == 1
+  assert tracker.used_counts == 13 and tracker.idle_counts == 13
+
+
 def test_long_engine_gap_drops_its_distance_too():
   tracker = TripFuelTracker()
   t, counter, odo = 0.0, 1000, 61000.0
