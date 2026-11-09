@@ -115,12 +115,12 @@ class RecordingDark:
 
 
 def test_dark_ambient_override_replaces_profile_with_car_light_inputs(sm):
-  sm.data['carState'] = car(ambientLight=NS(valid=True, dark=True))
+  sm.data['carState'] = car(ambientLight=NS(valid=True, dark=True, cameraValid=True, cameraLights=2))
   dark = RecordingDark({'mode': 'manual', 'id': 'carrot-dark-1'})
   payload = bridge.live_payload(sm, 1, ambient_override={'mode': 'profile'}, dark_ambient=dark)
   assert payload['ambientOverride'] == {'mode': 'manual', 'id': 'carrot-dark-1'}
   call = dark.calls[0]
-  assert (call['dark'], call['onroad'], call['door_open']) == (True, True, False)
+  assert (call['dark'], call['onroad'], call['door_open'], call['camera']) == (True, True, False, 2)
   assert call['user_override'] == {'mode': 'profile'}
   assert payload['active'] and payload['ambientState'] == 'onroad'
 
@@ -141,6 +141,27 @@ def test_dark_ambient_gets_unknown_without_a_valid_reading(sm, state):
   assert dark.calls[0]['dark'] is None
 
 
+@pytest.mark.parametrize('light,camera', [
+  (NS(valid=True, dark=True), None),
+  (NS(valid=True, dark=True, cameraValid=False, cameraLights=1), None),
+  (NS(valid=True, dark=True, cameraValid=True, cameraLights=0), 0),
+  (NS(valid=True, dark=True, cameraValid=True, cameraLights=1), 1),
+  (NS(valid=True, dark=True, cameraValid=True, cameraLights=7), None),
+])
+def test_dark_ambient_gets_the_camera_light_view(sm, light, camera):
+  sm.data['carState'] = car(ambientLight=light)
+  dark = RecordingDark(None)
+  bridge.live_payload(sm, 1, dark_ambient=dark)
+  assert dark.calls[0]['camera'] == camera
+
+
+def test_dark_ambient_camera_unknown_with_invalid_can(sm):
+  sm.data['carState'] = car(ambientLight=NS(valid=True, dark=True, cameraValid=True, cameraLights=0), canValid=False)
+  dark = RecordingDark(None)
+  bridge.live_payload(sm, 1, dark_ambient=dark)
+  assert dark.calls[0]['camera'] is None
+
+
 @pytest.mark.parametrize('gear,parked', [('park', True), ('drive', False), ('reverse', False)])
 def test_dark_ambient_gets_park_from_the_gear(sm, gear, parked):
   sm.data['carState'] = car(ambientLight=NS(valid=True, dark=True), gearShifter=gear)
@@ -157,7 +178,7 @@ def test_dark_ambient_offroad_and_car_door(sm):
   sm.data['deviceState'].started = False
   sm.data['carState'] = car(ambientLight=NS(valid=True, dark=True))
   bridge.live_payload(sm, 2, dark_ambient=dark)
-  assert (dark.calls[1]['onroad'], dark.calls[1]['dark']) == (False, None)
+  assert (dark.calls[1]['onroad'], dark.calls[1]['dark'], dark.calls[1]['camera']) == (False, None, None)
 
 
 @pytest.mark.parametrize('service', ['carState', 'selfdriveState'])

@@ -3,8 +3,9 @@ from types import SimpleNamespace as NS
 import pytest
 
 from openpilot.selfdrive.car.ambient_light import (
-  AMBIENT_MAX_AGE_NS, TRAVERSE_AMBIENT_ADDRESS, TRAVERSE_AMBIENT_BUS,
-  TraverseAmbientLight, ambient_dark, decode_ambient_dark,
+  AMBIENT_MAX_AGE_NS, CAMERA_LIGHTS_MAX_AGE_NS, TRAVERSE_AMBIENT_ADDRESS, TRAVERSE_AMBIENT_BUS,
+  TRAVERSE_CAMERA_LIGHTS_ADDRESS, TRAVERSE_CAMERA_LIGHTS_BUS, TraverseAmbientLight, TraverseCameraLights,
+  ambient_dark, camera_lights, decode_ambient_dark, decode_camera_lights,
 )
 
 # Real 0x140 frames from the 11/08 evening drive (000001f4): 0x12 0x22 0x01 0x80 is
@@ -81,3 +82,55 @@ def test_capnp_field_round_trip():
   cs.canValid = True
   with structs.CarState.from_bytes(cs.to_bytes()) as copy:
     assert ambient_dark(copy) is True
+
+
+@pytest.mark.parametrize("data,expected", [
+  (b"\x00", 0), (b"\x01", 1), (b"\x02", 2), (b"\x01\x00", 1), (b"\x03", None), (b"\x41", None), (b"", None),
+])
+def test_camera_lights_decode(data, expected):
+  assert decode_camera_lights(data) == expected
+
+
+def test_camera_lights_only_bus1_and_short_freshness():
+  lights = TraverseCameraLights()
+  now = 5_000_000_000
+  # bus0 0x135 is a different 8-byte frame (gear and lights flags); it must not be read here.
+  wrong = [(TRAVERSE_CAMERA_LIGHTS_ADDRESS, bytes.fromhex("020808030b1a0000"), 0),
+           (TRAVERSE_CAMERA_LIGHTS_ADDRESS, b"\x01", 129), (0x136, b"\x01", TRAVERSE_CAMERA_LIGHTS_BUS)]
+  assert lights.update([(now, wrong)], now) is None
+  assert lights.update([(now, [(TRAVERSE_CAMERA_LIGHTS_ADDRESS, b"\x01", TRAVERSE_CAMERA_LIGHTS_BUS)])], now) == 1
+  assert lights.update([], now + CAMERA_LIGHTS_MAX_AGE_NS) == 1
+  assert lights.update([], now + CAMERA_LIGHTS_MAX_AGE_NS + 1) is None
+
+
+def test_camera_and_ambient_decoders_are_independent():
+  light, lights = TraverseAmbientLight(), TraverseCameraLights()
+  now = 1_000_000_000
+  batch = [(now, [frame(data=NIGHT), (TRAVERSE_CAMERA_LIGHTS_ADDRESS, b"\x00", TRAVERSE_CAMERA_LIGHTS_BUS)])]
+  assert light.update(batch, now) is True
+  assert lights.update(batch, now) == 0
+
+
+@pytest.mark.parametrize("state,expected", [
+  (NS(), None),
+  (NS(ambientLight=NS(valid=True, dark=True)), None),
+  (NS(ambientLight=NS(cameraValid=False, cameraLights=1)), None),
+  (NS(ambientLight=NS(cameraValid=True, cameraLights=0)), 0),
+  (NS(ambientLight=NS(cameraValid=True, cameraLights=2)), 2),
+  (NS(ambientLight=NS(cameraValid=True, cameraLights=3)), None),
+  (NS(ambientLight=NS(cameraValid=True, cameraLights=1), canValid=False), None),
+  (NS(ambientLight=NS(cameraValid=True, cameraLights=1), canTimeout=True), None),
+])
+def test_camera_lights_car_state_reader(state, expected):
+  assert camera_lights(state) == expected
+
+
+def test_camera_capnp_field_round_trip():
+  from opendbc.car import structs
+  cs = structs.CarState.new_message()
+  assert cs.ambientLight.cameraValid is False and cs.ambientLight.cameraLights == 0
+  cs.ambientLight.cameraValid = True
+  cs.ambientLight.cameraLights = 2
+  cs.canValid = True
+  with structs.CarState.from_bytes(cs.to_bytes()) as copy:
+    assert camera_lights(copy) == 2

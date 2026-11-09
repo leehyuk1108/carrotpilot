@@ -305,6 +305,8 @@ struct CarState {
   struct AmbientLight {
     valid @0 :Bool; # false: unsupported car, no fresh frame, or CAN invalid
     dark @1 :Bool;
+    cameraValid @2 :Bool; # false: unsupported car, no fresh high-beam camera frame, or CAN invalid
+    cameraLights @3 :UInt8; # high-beam camera view: 0 nothing (also idle), 1 street/city lights, 2 high beam advised
   }
 
   struct VehicleGps {

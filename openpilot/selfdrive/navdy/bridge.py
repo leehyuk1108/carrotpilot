@@ -181,7 +181,7 @@ def usb_recovery_allowed(sm):
 
 
 def live_payload(sm, sequence, *, sources=None, door_open=False, ambient_override=None, vehicles=None, dark_ambient=None):
-  from openpilot.selfdrive.car.ambient_light import ambient_dark
+  from openpilot.selfdrive.car.ambient_light import ambient_dark, camera_lights
   from openpilot.selfdrive.navdy.display import payload_from_messages, resolve_operating_state
   sources = display_sources(sm) if sources is None else sources
 
@@ -215,10 +215,12 @@ def live_payload(sm, sequence, *, sources=None, door_open=False, ambient_overrid
   else:
     payload['ambientState'] = 'disconnected'
   if dark_ambient is not None:
-    dark = ambient_dark(car_state) if known_road is True and car_state is not None else None
+    usable = known_road is True and car_state is not None
+    dark = ambient_dark(car_state) if usable else None
+    camera = camera_lights(car_state) if usable else None
     dark_override = dark_ambient.update(now=time.monotonic(), wall=time.time(), dark=dark, onroad=known_road,
                                         door_open=door_open, parked=payload['gear'] == 'park',
-                                        user_override=ambient_override)
+                                        user_override=ambient_override, camera=camera)
     if dark_override is not None:
       ambient_override = dark_override
   if ambient_override is not None:

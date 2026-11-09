@@ -5,12 +5,15 @@ import pytest
 
 from openpilot.selfdrive.navdy import ambient_dark as mod
 from openpilot.selfdrive.navdy.ambient_dark import (
-  DARK_HOLD_S, LIT_HOLD_S, RELEASE_S, ROTATE_S, DarkAmbient, off_override, read_enabled,
+  CAMERA_RESET_S, DARK_HOLD_S, LIGHTS_HOLD_S, LIT_HOLD_S, NO_LIGHTS_HOLD_S, RELEASE_S, ROTATE_S, DarkAmbient,
+  off_override, read_enabled,
 )
 
 WALL = 1_794_180_000.0
 AUTO = {'mode': 'auto'}
 PROFILE = {'mode': 'profile', 'profile': {'driving': {'zone1': {'brightness': 30}}}}
+NONE, CITY, HIGH_BEAM = 0, 1, 2
+OFF_HOLD_S = max(DARK_HOLD_S, NO_LIGHTS_HOLD_S)
 
 
 def driver(enabled=True):
@@ -19,9 +22,10 @@ def driver(enabled=True):
   return ambient, state
 
 
-def step(ambient, now, *, dark=True, onroad=True, door_open=False, parked=False, user_override=None, wall=None):
+def step(ambient, now, *, dark=True, onroad=True, door_open=False, parked=False, user_override=None, wall=None,
+         camera=HIGH_BEAM):
   return ambient.update(now=now, wall=WALL + now if wall is None else wall, dark=dark, onroad=onroad,
-                        door_open=door_open, parked=parked, user_override=user_override)
+                        door_open=door_open, parked=parked, user_override=user_override, camera=camera)
 
 
 def run(ambient, start, duration, **kwargs):
@@ -45,9 +49,9 @@ def is_off(command):
 
 
 def settle(ambient, now=0.0, **kwargs):
-  """Run past the dark hold at 5 Hz; returns the last result and the next time."""
+  """Run past the dark and no-lights holds at 5 Hz; returns the last result and the next time."""
   t = now
-  while t <= now + DARK_HOLD_S + 1.0:
+  while t <= now + OFF_HOLD_S + 1.0:
     result = step(ambient, t, **kwargs)
     t += 0.2
   return result, t
@@ -73,14 +77,94 @@ def test_id_rotates_and_rearms_expiry_before_it_lapses():
   assert same['id'] == first['id']
 
 
-def test_turns_off_only_after_dark_hold():
+def test_turns_off_only_after_the_no_lights_hold():
   ambient, _ = driver()
   assert step(ambient, 0.0) == AUTO  # startup releases anything a previous bridge left
   t = 0.2
-  while t < DARK_HOLD_S - 0.01:
+  while t < NO_LIGHTS_HOLD_S - 0.01:
     assert step(ambient, t) == AUTO
     t += 0.2
-  assert is_off(step(ambient, DARK_HOLD_S))
+  assert is_off(step(ambient, NO_LIGHTS_HOLD_S))
+
+
+def test_turns_off_only_after_the_dark_hold():
+  ambient, _ = driver()
+  assert run(ambient, 0.0, 19.8, dark=False) == [AUTO]  # camera already says no lights
+  assert run(ambient, 20.0, DARK_HOLD_S - 0.2) == [AUTO]
+  assert is_off(step(ambient, 20.0 + DARK_HOLD_S))
+
+
+def test_daytime_tunnel_camera_never_active_stays_on():
+  # Daytime tunnels read dark, but the camera reports "nothing" the whole time.
+  ambient, _ = driver()
+  assert run(ambient, 0.0, 120, camera=NONE) == [AUTO]
+  assert not ambient.state()['cameraSeen']
+
+
+@pytest.mark.parametrize("camera", [CITY, None])
+def test_city_lights_or_no_camera_keep_it_on(camera):
+  ambient, _ = driver()
+  assert run(ambient, 0.0, 120, camera=camera) == [AUTO]
+
+
+def test_camera_nothing_counts_once_lights_were_seen():
+  ambient, _ = driver()
+  assert run(ambient, 0.0, 19.8, camera=CITY) == [AUTO]
+  assert ambient.state()['cameraSeen']
+  assert run(ambient, 20.0, NO_LIGHTS_HOLD_S - 0.2, camera=NONE) == [AUTO]
+  assert is_off(step(ambient, 20.0 + NO_LIGHTS_HOLD_S, camera=NONE))
+
+
+def test_city_lights_switch_it_back_on_after_the_lights_hold():
+  ambient, _ = driver()
+  result, t = settle(ambient)
+  assert is_off(result)
+  start = t
+  while t < start + LIGHTS_HOLD_S - 0.01:
+    assert is_off(step(ambient, t, camera=CITY))
+    t += 0.2
+  assert step(ambient, start + LIGHTS_HOLD_S + 0.01, camera=CITY) == AUTO
+
+
+def test_short_lit_stretch_keeps_it_off():
+  ambient, _ = driver()
+  result, t = settle(ambient)
+  assert all(is_off(r) for r in run(ambient, t, LIGHTS_HOLD_S - 2, camera=CITY))
+  assert is_off(step(ambient, t + LIGHTS_HOLD_S - 1, camera=NONE))
+  assert is_off(step(ambient, t + LIGHTS_HOLD_S + 5, camera=NONE))
+
+
+def test_lost_camera_releases_after_the_lights_hold():
+  ambient, _ = driver()
+  result, t = settle(ambient)
+  assert is_off(step(ambient, t, camera=None))
+  assert is_off(step(ambient, t + LIGHTS_HOLD_S - 1, camera=None))
+  assert step(ambient, t + LIGHTS_HOLD_S + 0.01, camera=None) == AUTO
+
+
+def test_daylight_forgets_the_camera_but_a_short_bright_patch_does_not():
+  ambient, _ = driver()
+  result, t = settle(ambient, camera=CITY)
+  assert ambient.state()['cameraSeen'] and result == AUTO
+  # A bright patch shorter than CAMERA_RESET_S (a lit station): "nothing" still counts afterwards.
+  run(ambient, t, CAMERA_RESET_S - 10, dark=False, camera=NONE)
+  t += CAMERA_RESET_S - 9.8
+  result, t = settle(ambient, t, camera=NONE)
+  assert is_off(result)
+  # Daylight: the camera idles at "nothing", so a later tunnel stays lit.
+  run(ambient, t, CAMERA_RESET_S + 1, dark=False, camera=NONE)
+  assert not ambient.state()['cameraSeen']
+  t += CAMERA_RESET_S + 1.2
+  assert not any(is_off(r) for r in run(ambient, t, 60, camera=NONE))
+
+
+def test_new_drive_forgets_the_camera():
+  ambient, _ = driver()
+  settle(ambient, camera=CITY)
+  assert ambient.state()['cameraSeen']
+  step(ambient, 20.0, onroad=False, camera=None)
+  assert not ambient.state()['cameraSeen']
+  assert not any(is_off(r) for r in run(ambient, 20.2, 60, camera=NONE))
 
 
 def test_disabled_never_touches_the_payload():
