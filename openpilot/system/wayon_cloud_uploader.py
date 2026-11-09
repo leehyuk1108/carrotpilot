@@ -1373,7 +1373,15 @@ def segment_log_file(segment_dir):
   return None
 
 
+# Set when wayon_cloud stops normally: route work in the background worker stops at its next guard
+# check, so ffmpeg children it owns are still terminated and reaped by _run_ffmpeg's finally.
+ROUTE_WORK_STOP = threading.Event()
+ROUTE_WORKER_STOP_TIMEOUT_S = 3.0
+
+
 def route_summary_allowed(params=None):
+  if ROUTE_WORK_STOP.is_set():
+    return False
   try:
     params = Params() if params is None else params
     return (not params.get_bool("IsOnroad") and params.get_bool("IsOffroad")
@@ -2162,11 +2170,15 @@ class RouteSummaryWorker:
     self.result = None
 
   def busy(self):
-    return self.thread is not None and self.thread.is_alive()
+    """Running, or finished with a result not collected yet (so a due cycle cannot overwrite it)."""
+    return self.thread is not None
 
   def start(self, config, device_id):
+    if self.thread is not None:
+      return False
     target = self.target or upload_recent_route_summary
     self.result = None
+    ROUTE_WORK_STOP.clear()
 
     def run():
       try:
@@ -2177,6 +2189,15 @@ class RouteSummaryWorker:
 
     self.thread = threading.Thread(target=run, name="wayon-route-summary", daemon=True)
     self.thread.start()
+    return True
+
+  def stop(self, timeout=ROUTE_WORKER_STOP_TIMEOUT_S):
+    """Ask running route work to stop and wait briefly; True once no worker thread is alive."""
+    ROUTE_WORK_STOP.set()
+    thread = self.thread
+    if thread is not None and thread.is_alive():
+      thread.join(timeout)
+    return thread is None or not thread.is_alive()
 
   def collect(self):
     """The finished run's result once: True, or the exception it raised. None while idle or running."""
@@ -2186,7 +2207,7 @@ class RouteSummaryWorker:
     return self.result
 
 
-def main():
+def _main_loop(route_worker):
   from openpilot.system.wayon_parking import ApproachSession
   set_core_affinity([0, 1, 2, 3])
   params = Params()
@@ -2209,7 +2230,6 @@ def main():
   last_connection_signature = None
   telemetry_backoff = UploadBackoff()
   route_backoff = UploadBackoff(base=60.0, maximum=900.0)
-  route_worker = RouteSummaryWorker()
 
   while True:
     sm.update(1000)
@@ -2336,6 +2356,15 @@ def main():
     previous_started = started
     time.sleep(LOOP_SLEEP_ONROAD if started else LOOP_SLEEP_OFFROAD)
 
+
+def main():
+  route_worker = RouteSummaryWorker()
+  try:
+    _main_loop(route_worker)
+  finally:
+    # Normal SIGINT stop: the worker is a daemon thread, so let its route work (and any ffmpeg child
+    # it owns) wind down at the next guard check instead of vanishing with the process.
+    route_worker.stop()
 
 if __name__ == "__main__":
   main()

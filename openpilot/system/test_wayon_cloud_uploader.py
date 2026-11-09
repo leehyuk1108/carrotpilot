@@ -1818,3 +1818,35 @@ def test_route_summary_worker_reports_once_and_never_blocks():
 
 def test_blackbox_accepts_the_same_route_length_as_analysis():
   assert uploader_box.WorkLimits().max_route_segments == uploader.ROUTE_MAX_SEGMENTS
+
+
+def test_finished_worker_result_is_kept_until_collected():
+  # collect() can see a running worker that finishes right after; the due cycle must not overwrite it.
+  calls = []
+  worker = uploader.RouteSummaryWorker(lambda config, device_id: calls.append(device_id))
+  assert worker.start({}, "first") is True
+  worker.thread.join(5)
+  assert worker.busy()
+  assert worker.start({}, "second") is False
+  assert worker.collect() is True and not worker.busy()
+  assert calls == ["first"]
+
+
+def test_worker_stop_lets_route_work_wind_down():
+  import threading
+  import time as real_time
+  seen = threading.Event()
+  def target(config, device_id):
+    seen.set()
+    for _ in range(500):  # bounded: the stop flag must end it long before this
+      if not uploader.route_summary_allowed():
+        return
+      real_time.sleep(0.01)
+  try:
+    worker = uploader.RouteSummaryWorker(target)
+    worker.start({}, "dev")
+    assert seen.wait(5)
+    assert worker.stop(timeout=2) is True
+    assert not worker.thread.is_alive() and not uploader.route_summary_allowed()
+  finally:
+    uploader.ROUTE_WORK_STOP.clear()
