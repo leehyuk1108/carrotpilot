@@ -1771,3 +1771,50 @@ def test_mark_uploaded_incomplete_retries_hourly(tmp_path):
   uploader.mark_route_uploaded("00000009--abcdef", "sig", {}, complete=False, receipt={"schema": "x"})
   entry = uploader.read_route_state()["route_uploads"]["00000009--abcdef"]
   assert entry["complete"] is False and entry["retryAfter"] == NOW.timestamp() + uploader.ROUTE_INCOMPLETE_RETRY_S
+
+
+def test_never_tried_route_goes_before_due_retries(tmp_path, monkeypatch):
+  # Many newer routes due for a retry must not keep an older, never-tried route out of the cycle.
+  groups = [analysis_route(tmp_path, f"0000000{index}--abcdef", incident=False) for index in range(5)]
+  for index, group in enumerate(groups):
+    group["mtime"] = NOW.timestamp() - 3600 - index * 60
+  for group in groups[:4]:
+    signature = uploader.route_upload_signature(group, {}, device_id="test-device")
+    uploader.save_route_progress(group["route_name"], signature, {})
+  state = uploader.read_route_state()
+  for group in groups[:4]:
+    state["route_uploads"][group["route_name"]]["retryAfter"] = NOW.timestamp() - 1
+  uploader.write_route_state(state)
+  monkeypatch.setattr(uploader, "recent_route_groups", lambda age: groups)
+  trips = []
+  monkeypatch.setattr(uploader, "post_json", lambda config, path, payload: trips.append(payload) or {"ok": True, "id": payload["id"]})
+  assert uploader.upload_recent_route_summary({}, "test-device")
+  assert trips[0]["routeName"] == groups[4]["route_name"]
+  assert len(trips) == 2  # then the least recently scheduled retry
+
+
+def test_route_summary_worker_reports_once_and_never_blocks():
+  import threading
+  gate = threading.Event()
+  calls = []
+  def target(config, device_id):
+    calls.append((config, device_id))
+    gate.wait(5)
+  worker = uploader.RouteSummaryWorker(target)
+  assert worker.collect() is None and not worker.busy()
+  worker.start({"a": 1}, "dev")
+  assert worker.busy() and worker.collect() is None
+  gate.set()
+  worker.thread.join(5)
+  assert worker.collect() is True and worker.collect() is None
+  def failing(config, device_id):
+    raise RuntimeError("boom")
+  worker = uploader.RouteSummaryWorker(failing)
+  worker.start({}, "dev")
+  worker.thread.join(5)
+  result = worker.collect()
+  assert isinstance(result, RuntimeError) and calls == [({"a": 1}, "dev")]
+
+
+def test_blackbox_accepts_the_same_route_length_as_analysis():
+  assert uploader_box.WorkLimits().max_route_segments == uploader.ROUTE_MAX_SEGMENTS

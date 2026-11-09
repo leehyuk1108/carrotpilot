@@ -67,7 +67,7 @@ class WorkLimits:
   max_decoded_log_bytes: int = 64 * 1024 * 1024
   max_total_decoded_bytes: int = 128 * 1024 * 1024
   max_messages: int = 1_000_000
-  max_route_segments: int = 240
+  max_route_segments: int = 720  # route index bound only; packages still read max_package_segments
   max_package_segments: int = 3
   max_signal_bytes: int = 8 * 1024 * 1024
   max_video_bytes: int = 32 * 1024 * 1024

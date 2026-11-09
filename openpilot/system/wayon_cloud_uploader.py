@@ -6,6 +6,7 @@ import json
 import math
 import os
 import shutil
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1988,18 +1989,37 @@ def upload_recent_route_summary(config, device_id):
 
   uploaded = False
   attempted = 0
+  # Order the cycle's work so retries cannot starve history: routes never tried with their current
+  # files first (newest first), then due retries, least recently scheduled first.
+  candidates = []
   for group in recent_route_groups(max_age)[:100]:
-    if attempted >= limit or not allowed():
+    if not allowed():
       break
     if not grace <= time.time() - group["mtime"] <= max_age:
       continue
-    name = group["route_name"]
     try:
       signature = route_upload_signature(group, config, allowed=allowed, device_id=device_id)
-      previous = state.get("route_uploads", {}).get(name, {})
-      if previous.get("signature") == signature:
-        if previous.get("complete") or previous.get("retryAfter", 0) > time.time():
-          continue
+    except WorkAborted:
+      if not allowed():
+        break
+      continue
+    except Exception as exc:
+      print(f"Wayon cloud: route analysis deferred ({type(exc).__name__})")
+      continue
+    previous = state.get("route_uploads", {}).get(group["route_name"], {})
+    if previous.get("signature") == signature:
+      if previous.get("complete") or previous.get("retryAfter", 0) > time.time():
+        continue
+      candidates.append(((1, previous.get("retryAfter", 0)), group, signature, previous))
+    else:
+      candidates.append(((0, -group["mtime"]), group, signature, previous))
+  candidates.sort(key=lambda item: item[0])
+
+  for _, group, signature, previous in candidates:
+    if attempted >= limit or not allowed():
+      break
+    name = group["route_name"]
+    try:
       packages = previous.get("packages", {})
       packages = {key: dict(value) for key, value in packages.items()
                   if isinstance(value, dict) and value.get("status") == "uploaded" and value.get("captureId")} if isinstance(packages, dict) else {}
@@ -2130,6 +2150,42 @@ def capture_offroad_images():
   return enhance_wide_snapshot(wide), driver
 
 
+class RouteSummaryWorker:
+  """Runs upload_recent_route_summary off the main loop.
+
+  Reading a long route now takes minutes; done inline it held up ambient commands (60 s expiry),
+  telemetry and event uploads. The work keeps its own offroad/deadline guards.
+  """
+  def __init__(self, target=None):
+    self.target = target
+    self.thread = None
+    self.result = None
+
+  def busy(self):
+    return self.thread is not None and self.thread.is_alive()
+
+  def start(self, config, device_id):
+    target = self.target or upload_recent_route_summary
+    self.result = None
+
+    def run():
+      try:
+        target(config, device_id)
+        self.result = True
+      except Exception as exc:
+        self.result = exc
+
+    self.thread = threading.Thread(target=run, name="wayon-route-summary", daemon=True)
+    self.thread.start()
+
+  def collect(self):
+    """The finished run's result once: True, or the exception it raised. None while idle or running."""
+    if self.thread is None or self.thread.is_alive():
+      return None
+    self.thread = None
+    return self.result
+
+
 def main():
   from openpilot.system.wayon_parking import ApproachSession
   set_core_affinity([0, 1, 2, 3])
@@ -2153,6 +2209,7 @@ def main():
   last_connection_signature = None
   telemetry_backoff = UploadBackoff()
   route_backoff = UploadBackoff(base=60.0, maximum=900.0)
+  route_worker = RouteSummaryWorker()
 
   while True:
     sm.update(1000)
@@ -2259,14 +2316,15 @@ def main():
         })
         next_telemetry = time.monotonic() + telemetry_backoff.failure_delay()
 
-    if not started and now >= next_route_summary:
-      try:
-        upload_recent_route_summary(config, device_id)
-        route_backoff.success()
-        next_route_summary = now + route_summary_interval
-      except Exception as exc:
-        print(f"Wayon cloud: route summary upload failed: {exc}")
-        next_route_summary = time.monotonic() + max(route_summary_interval, route_backoff.failure_delay())
+    finished = route_worker.collect()
+    if finished is True:
+      route_backoff.success()
+      next_route_summary = time.monotonic() + route_summary_interval
+    elif finished is not None:
+      print(f"Wayon cloud: route summary upload failed: {finished}")
+      next_route_summary = time.monotonic() + max(route_summary_interval, route_backoff.failure_delay())
+    if not started and now >= next_route_summary and not route_worker.busy():
+      route_worker.start(config, device_id)
 
     if not started and config.get("snapshots_enabled", True) and now >= next_snapshot:
       if upload_offroad_snapshot(config, device_id, multiframe=parking_burst_pending,
