@@ -34,6 +34,8 @@ from openpilot.system.wayon_cloud_policy import UploadBackoff, bounded_interval
 from openpilot.system.wayon_ambient_delivery import AmbientCommandDelivery
 from openpilot.system.wayon_camera import sample_fresh
 from openpilot.system.wayon_drive_report import DriveReportAccumulator
+from openpilot.system.wayon_vehicle_care import TripFuelTracker, VehicleCareStore
+from openpilot.selfdrive.car.vehicle_care import vehicle_care_snapshot
 from openpilot.system.wayon_event_blackbox import (
   BLACKBOX_SCHEMA, CAMERA_LAYOUT, DEFAULT_BLACKBOX_ROOT, WorkAborted, WorkBudget, WorkLimits,
   ResourceLimitExceeded, build_blackbox_archive, prune_blackbox_archives, recording_lock,
@@ -87,6 +89,8 @@ DEFAULT_ROUTE_POINT_MIN_DISTANCE_M = 15.0
 DEFAULT_ROUTE_POINT_LIMIT = 720
 DEFAULT_SNAPSHOT_INTERVAL_OFFROAD = 3600.0
 AMBIENT_OVERRIDE_PATH = Path(os.getenv("WAYON_AMBIENT_OVERRIDE_PATH", "/data/params/d/WayonAmbientOverride"))
+VEHICLE_CARE_PATH = Path(os.getenv("WAYON_VEHICLE_CARE_PATH", str(CONFIG_PATH.with_name("vehicle_care.json"))))
+VEHICLE_CARE_STORE = VehicleCareStore(VEHICLE_CARE_PATH)
 CONFIG_RELOAD_INTERVAL = 60.0
 LOOP_SLEEP_ONROAD = 1.0
 LOOP_SLEEP_OFFROAD = 1.0
@@ -1121,7 +1125,22 @@ def resolve_onroad_state(device_state_started: bool, started_override: bool | No
   return bool(device_state_started) if started_override is None else bool(started_override)
 
 
-def telemetry_payload(sm, params, device_id, started_override: bool | None = None):
+def vehicle_care_payload(sm, started, store=None):
+  """Fresh CAN maintenance readings while driving, else the last known ones (marked not fresh)."""
+  store = VEHICLE_CARE_STORE if store is None else store
+  snapshot = None
+  if started and sample_fresh(sm, "carState"):
+    try:
+      snapshot = vehicle_care_snapshot(sm["carState"])
+    except Exception:
+      snapshot = None
+  try:
+    return store.update(snapshot)
+  except Exception:
+    return None
+
+
+def telemetry_payload(sm, params, device_id, started_override: bool | None = None, care_store=None):
   device_state = sm["deviceState"]
   device_fresh = sample_fresh(sm, "deviceState")
   panda_state = first_panda_state(sm["pandaStates"]) if sample_fresh(sm, "pandaStates") else None
@@ -1182,6 +1201,7 @@ def telemetry_payload(sm, params, device_id, started_override: bool | None = Non
     "vehicle": vehicle,
     "openpilot": openpilot,
     "cutInRisk": radar_cutin_payload(sm) if started else cutin_risk_stage(0.0),
+    "vehicleCare": vehicle_care_payload(sm, started, care_store),
   }
 
 
@@ -1603,6 +1623,7 @@ def summarize_route_from_logs(route_group, config, device_id, *, allowed=None):
   cutin_event_count = 0
   previous_cutin_stage = 0
   accumulator = None
+  fuel_tracker = TripFuelTracker()
   read_segments = []
   partial_reasons = set()
   decoded_bytes = 0
@@ -1641,6 +1662,10 @@ def summarize_route_from_logs(route_group, config, device_id, *, allowed=None):
           continue
 
         if which == "carState":
+          try:
+            fuel_tracker.update(msg_mono, msg.carState)
+          except Exception:
+            pass
           try:
             last_vehicle_speed = car_state_speed_payload(msg.carState)
             if last_vehicle_speed.get("speedMps") is not None:
@@ -1768,6 +1793,11 @@ def summarize_route_from_logs(route_group, config, device_id, *, allowed=None):
               "decodedBytes": decoded_bytes, "messagesRead": message_count,
               "processingDurationS": round(time.monotonic() - started_mono, 3)}
   analysis["dataQuality"].update(source="sampled_qlog", **coverage)
+  fuel = fuel_tracker.summary()
+  if fuel is not None:
+    # Stored with the analysis blob (the trips API keeps it whole); partial routes undercount.
+    fuel["partial"] = coverage["partial"]
+    analysis["fuel"] = fuel
 
   return {
     "id": f"{device_id}-{route_name}",
