@@ -3,6 +3,7 @@ import gzip
 import json
 import os
 import subprocess
+import time
 import sys
 import zipfile
 from dataclasses import replace
@@ -539,3 +540,16 @@ def test_native_ffmpeg_non_keyframe_seek_and_segment_boundary(tmp_path, monkeypa
     assert all(bright[bright.index(True):])
   else:
     assert all(value == (indices[0] == 1) for value in bright)
+
+
+def test_only_a_recent_recording_lock_blocks_reading(tmp_path):
+  # A power cut can leave a zero-byte lock behind for good; offroad route work treats an old one as stale.
+  _, directory, path = make_segment(tmp_path)
+  lock = directory / "qcamera.ts.lock"
+  lock.touch()
+  assert box.recording_lock(directory)
+  old = time.time() - box.RECORDING_LOCK_STALE_S - 5
+  os.utime(lock, (old, old))
+  assert not box.recording_lock(directory)
+  assert list(box.iter_route_log(path, allowed=lambda: True))
+  assert box.recording_lock(directory, now=old + 1)

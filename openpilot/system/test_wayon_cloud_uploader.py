@@ -20,7 +20,8 @@ from openpilot.system.wayon_cloud_uploader import (device_details_payload, enhan
 from openpilot.system.wayon_impact import enqueue_impact_event, peek_impact_event, peek_impact_events
 from openpilot.system.wayon_vehicle_events import door_lock_event, enqueue_vehicle_event, peek_vehicle_event
 from openpilot.cereal import car, log
-from openpilot.system import wayon_cloud_uploader as uploader, wayon_impact, wayon_vehicle_events
+from openpilot.system import wayon_cloud_uploader as uploader
+from openpilot.system import wayon_event_blackbox as uploader_box, wayon_impact, wayon_vehicle_events
 
 
 NOW = datetime(2026, 7, 19, tzinfo=timezone.utc)
@@ -1183,7 +1184,9 @@ def test_recent_backfill_skips_grace_period_and_retries_without_starving_history
   state = uploader.read_route_state()
   assert groups[1]["route_name"] not in state["uploaded_routes"]
   assert state["route_uploads"][groups[1]["route_name"]]["complete"] is False
-  assert state["route_uploads"][groups[1]["route_name"]]["retryAfter"] == NOW.timestamp() + 300
+  # An unreadable route retries hourly (not every 5 minutes) so it cannot crowd out history.
+  assert state["route_uploads"][groups[1]["route_name"]]["retryAfter"] == NOW.timestamp() + uploader.ROUTE_INCOMPLETE_RETRY_S
+  assert state["route_uploads"][groups[1]["route_name"]]["skipReason"] == "no_route_report"
 
 
 def test_route_signature_tracks_files_and_bounded_policy(tmp_path):
@@ -1374,7 +1377,8 @@ def test_route_partial_observations_never_override_outer_abort(tmp_path, monkeyp
       elif guard == "memory":
         monkeypatch.setattr(uploader.psutil, "virtual_memory", lambda: SimpleNamespace(available=0))
       else:
-        monkeypatch.setattr(uploader.time, "monotonic", lambda: 191)
+        # Past the cycle deadline, which a route attempt extends to its own budget plus the 90 s work time.
+        monkeypatch.setattr(uploader.time, "monotonic", lambda: 100 + uploader.route_analysis_seconds(2) + 91)
       raise uploader.ResourceLimitExceeded("limit concurrent with abort")
     yield from original_reader(path, budget=budget)
   monkeypatch.setattr(uploader, "route_log_messages", reader)
@@ -1701,3 +1705,69 @@ def test_config_exception_does_not_fall_back_or_expose_secret(monkeypatch, capsy
   monkeypatch.setattr(uploader, "ensure_wayon_identity", fail)
   assert uploader.read_config() is None
   assert "private-test-token" not in capsys.readouterr().out
+
+
+def test_route_analysis_budget_scales_with_route_length():
+  assert uploader.route_analysis_seconds(1) == uploader.route_analysis_seconds(15) == 30.0
+  assert uploader.route_analysis_seconds(67) == 134.0
+  assert uploader.route_analysis_seconds(10_000) == uploader.ROUTE_MAX_SECONDS
+  assert uploader.ROUTE_WORK_LIMITS.max_route_segments == uploader.ROUTE_MAX_SEGMENTS == 720
+
+
+def test_long_route_is_read_past_the_old_30_second_route_deadline(tmp_path, monkeypatch):
+  # 11/08: a 67-segment route took 61 s to read; the old single 30 s deadline stopped at segment 32.
+  group = two_segment_route(tmp_path)
+  for index in range(2, 61):
+    other = analysis_route(tmp_path, f"segment-{index}", incident=False, origin=100 + index * 60)
+    _, directory, path = other["segments"][0]
+    group["segments"].append((index, directory, path))
+  clock = [100.0]
+  monkeypatch.setattr(uploader.time, "monotonic", lambda: clock[0])
+  original_reader = uploader.route_log_messages
+  def slow_reader(path, *, budget):
+    clock[0] += 0.95  # one qlog per ~second, as measured on the comma
+    yield from original_reader(path, budget=budget)
+  monkeypatch.setattr(uploader, "route_log_messages", slow_reader)
+  payload = uploader.summarize_route_from_logs(group, {}, "test-device")
+  quality = payload["analysis"]["dataQuality"]
+  assert clock[0] - 100.0 > 30.0
+  assert quality["partial"] is False and quality["readSegments"] == list(range(61))
+
+
+def test_upload_cycle_extends_to_the_route_budget(tmp_path, monkeypatch):
+  group = two_segment_route(tmp_path)
+  for index in range(2, 61):
+    other = analysis_route(tmp_path, f"segment-{index}", incident=False, origin=100 + index * 60)
+    _, directory, path = other["segments"][0]
+    group["segments"].append((index, directory, path))
+  monkeypatch.setattr(uploader, "recent_route_groups", lambda age: [group])
+  clock = [100.0]
+  monkeypatch.setattr(uploader.time, "monotonic", lambda: clock[0])
+  original_reader = uploader.route_log_messages
+  def slow_reader(path, *, budget):
+    clock[0] += 1.5  # 61 segments take ~92 s: past the 90 s cycle default, inside the route budget
+    yield from original_reader(path, budget=budget)
+  monkeypatch.setattr(uploader, "route_log_messages", slow_reader)
+  trips = []
+  monkeypatch.setattr(uploader, "post_json", lambda config, path, payload: trips.append(payload) or {"ok": True, "id": payload["id"]})
+  assert uploader.upload_recent_route_summary({}, "test-device")
+  assert trips[0]["analysis"]["dataQuality"]["readSegments"] == list(range(61))
+
+
+def test_stale_recording_lock_no_longer_hides_a_finished_route(tmp_path, monkeypatch):
+  groups = [analysis_route(tmp_path, f"0000000{index}--abcdef", incident=False) for index in range(2)]
+  lock = groups[0]["segments"][0][1] / "qcamera.ts.lock"
+  lock.touch()
+  monkeypatch.setattr(uploader, "recent_route_groups", lambda age: groups)
+  trips = []
+  monkeypatch.setattr(uploader, "post_json", lambda config, path, payload: trips.append(payload) or {"ok": True, "id": payload["id"]})
+  stale = NOW.timestamp() - uploader_box.RECORDING_LOCK_STALE_S - 1
+  os.utime(lock, (stale, stale))
+  assert uploader.upload_recent_route_summary({}, "test-device")
+  assert {trip["routeName"] for trip in trips} == {group["route_name"] for group in groups}
+
+
+def test_mark_uploaded_incomplete_retries_hourly(tmp_path):
+  uploader.mark_route_uploaded("00000009--abcdef", "sig", {}, complete=False, receipt={"schema": "x"})
+  entry = uploader.read_route_state()["route_uploads"]["00000009--abcdef"]
+  assert entry["complete"] is False and entry["retryAfter"] == NOW.timestamp() + uploader.ROUTE_INCOMPLETE_RETRY_S
