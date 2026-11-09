@@ -11,15 +11,17 @@ from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 
-from openpilot.selfdrive.car.vehicle_care import FUEL_COUNTER_MODULO, FUEL_ML_PER_COUNT, TANK_LITERS
+from openpilot.selfdrive.car.vehicle_care import ENGINE_MAX_AGE_NS, FUEL_COUNTER_MODULO, FUEL_ML_PER_COUNT, TANK_LITERS
 
 TRIP_FUEL_SCHEMA = "wayon-trip-fuel-v1"
 # Full-throttle flow peaks near 1,000 counts/s (000001f2: 991 over a 0.25 s frame); anything
 # faster between two samples is a counter restart (the ECM resets it to 0 when it wakes), not fuel.
 MAX_COUNTS_PER_S = 1500.0
 COUNT_SLACK = 50.0
-COUNTER_HOLD_S = 0.5         # the ECM refreshes the counter at 4 Hz; allow one missed refresh
-MAX_GAP_S = 40.0             # keeps the widest bound (1500 x 40 s) below one 65536 wrap
+# A sample can repeat the last counter value for as long as the decoder keeps it valid (a few
+# lost 0x3F9 frames), plus one 4 Hz refresh; the next new value may cover all of that time.
+COUNTER_HOLD_S = ENGINE_MAX_AGE_NS / 1e9 + 0.25
+MAX_GAP_S = 40.0             # keeps the widest bound (1500 x (40 + hold) s) below one 65536 wrap
 IDLE_SPEED_MPS = 0.5
 LEVEL_WINDOW = 30            # samples (~3 s at the qlog carState rate) for start/end fuel level medians
 MIN_OBSERVED_S = 30.0        # less engine data than this: no fuel block
@@ -115,9 +117,9 @@ class TripFuelTracker:
     self.observed_s += min(sample_dt, 1.0)
     self.prev_sample_mono = mono
     if counter != self.prev_counter:
-      # Samples come at 10 Hz and repeat the 4 Hz counter, so a step may cover up to one refresh
-      # period more than the sample gap; but a value that sat still for long (fuel cut, auto
-      # stop) does not widen the bound, or a reset to 0 would pass as fuel.
+      # Samples come at 10 Hz and repeat the held counter, so a step may cover up to the hold time
+      # more than the sample gap; but a value that sat still for long (fuel cut, auto stop) does
+      # not widen the bound further, or a reset to 0 would pass as fuel.
       dt = min(mono - self.prev_change_mono, sample_dt + COUNTER_HOLD_S)
       limit = MAX_COUNTS_PER_S * dt + COUNT_SLACK
       delta = (counter - self.prev_counter) % FUEL_COUNTER_MODULO

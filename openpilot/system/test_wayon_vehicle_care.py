@@ -5,7 +5,7 @@ from types import SimpleNamespace as NS
 import pytest
 
 from openpilot.system.wayon_vehicle_care import (
-  MAX_GAP_S, MIN_OBSERVED_S, TRIP_FUEL_SCHEMA, VEHICLE_CARE_SAVE_INTERVAL_S, TripFuelTracker, VehicleCareStore,
+  COUNTER_HOLD_S, MAX_GAP_S, MIN_OBSERVED_S, TRIP_FUEL_SCHEMA, VEHICLE_CARE_SAVE_INTERVAL_S, TripFuelTracker, VehicleCareStore,
 )
 
 ML_PER_COUNT = 0.0336
@@ -72,7 +72,19 @@ def test_real_full_throttle_peak_is_fuel():
     counter = (counter + delta) % 65536
     tracker.update(step * 0.2, car(counter))
   assert tracker.counter_restarts == 0 and tracker.used_counts == 219 + 231 + 239 + 248 + 247 + 241
-  assert 1500 * MAX_GAP_S < 65536
+  assert 1500 * (MAX_GAP_S + COUNTER_HOLD_S) + 50 < 65536
+
+
+def test_value_held_over_lost_frames_then_a_big_step_is_fuel():
+  # 600 counts/s; 0x3F9 frames 1.25-2.50 s lost, the decoder keeps the 1.0 s value valid until 2.75 s.
+  tracker = TripFuelTracker()
+  for step in range(29):
+    t = step / 10
+    held = t >= 1.0 and t < 2.75
+    frame_t = 1.0 if held else int(t * 4) / 4
+    tracker.update(t, car(int(600 * frame_t)))
+  assert tracker.counter_restarts == 0
+  assert tracker.used_counts == int(600 * 2.75)
 
 
 def test_reset_after_a_long_still_counter_is_not_fuel():

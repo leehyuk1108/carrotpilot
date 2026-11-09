@@ -65,10 +65,12 @@ def decode_battery_soc(data: bytes) -> float | None:
   return data[1] * 100.0 / 255.0
 
 
+ENGINE_MAX_AGE_NS = 2_000_000_000  # 0x3F9 is 4 Hz; its last value stays valid this long
+
 # (address, bus) -> (key, decoder, max age ns). Ages allow a few missed frames at each rate.
 _SOURCES = {
   (0x4D1, 0): (FUEL_LEVEL_KEY, decode_fuel_level, 3_000_000_000),  # 2 Hz
-  (0x3F9, 0): (ENGINE_KEY, decode_engine, 2_000_000_000),          # 4 Hz
+  (0x3F9, 0): (ENGINE_KEY, decode_engine, ENGINE_MAX_AGE_NS),      # 4 Hz
   (0x120, 0): (ODOMETER_KEY, decode_odometer, 3_000_000_000),      # 1 Hz
   (0x3F3, 0): (BATTERY_KEY, decode_battery, 2_000_000_000),        # 4 Hz
   (0x4EF, 0): (BATTERY_SOC_KEY, decode_battery_soc, 3_000_000_000),  # 1 Hz
