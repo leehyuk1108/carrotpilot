@@ -180,8 +180,19 @@ def usb_recovery_allowed(sm):
   return recovery_messages(sm, time.monotonic())
 
 
-def live_payload(sm, sequence, *, sources=None, door_open=False, ambient_override=None, vehicles=None, dark_ambient=None):
+def dark_ambient_inputs(sm, sources=None) -> dict:
+  """Road state, darkness and camera light view for DarkAmbient, from fresh messages only."""
   from openpilot.selfdrive.car.ambient_light import ambient_dark, camera_lights
+  sources = display_sources(sm) if sources is None else sources
+  car_state = sm['carState'] if sources['carState']['usable'] else None
+  known_road = road_state(sm['deviceState'] if sources['deviceState']['usable'] else None,
+                          sm['pandaStates'] if sources['pandaStates']['usable'] else None)
+  usable = known_road is True and car_state is not None
+  return {'onroad': known_road, 'dark': ambient_dark(car_state) if usable else None,
+          'camera': camera_lights(car_state) if usable else None}
+
+
+def live_payload(sm, sequence, *, sources=None, door_open=False, ambient_override=None, vehicles=None, dark_ambient=None):
   from openpilot.selfdrive.navdy.display import payload_from_messages, resolve_operating_state
   sources = display_sources(sm) if sources is None else sources
 
@@ -215,12 +226,11 @@ def live_payload(sm, sequence, *, sources=None, door_open=False, ambient_overrid
   else:
     payload['ambientState'] = 'disconnected'
   if dark_ambient is not None:
-    usable = known_road is True and car_state is not None
-    dark = ambient_dark(car_state) if usable else None
-    camera = camera_lights(car_state) if usable else None
-    dark_override = dark_ambient.update(now=time.monotonic(), wall=time.time(), dark=dark, onroad=known_road,
-                                        door_open=door_open, parked=payload['gear'] == 'park',
-                                        user_override=ambient_override, camera=camera)
+    light = dark_ambient_inputs(sm, sources)
+    dark_override = dark_ambient.update(now=time.monotonic(), wall=time.time(), dark=light['dark'],
+                                        onroad=light['onroad'], door_open=door_open,
+                                        parked=payload['gear'] == 'park', user_override=ambient_override,
+                                        camera=light['camera'])
     if dark_override is not None:
       ambient_override = dark_override
   if ambient_override is not None:
@@ -267,6 +277,7 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
     vehicles = VehicleOverlay()
     doors = DoorMonitor()
     dark_ambient = DarkAmbient()
+    observe_dark = True
     diagnostics = LinkDiagnostics(cloudlog.event, journal=LocalJournal())
     recovery_events = queue.Queue(maxsize=32)
     def record_recovery(*args, **kwargs):
@@ -294,6 +305,13 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
           diagnostics.record(*args, **kwargs)
         sm.update(0)
         sequence += 1
+        if observe_dark:
+          try:
+            # Also while the Navdy link is down, so a stop or daylight in between clears the camera record.
+            dark_ambient.observe(now=time.monotonic(), **dark_ambient_inputs(sm))
+          except Exception:
+            observe_dark = False
+            cloudlog.exception('navdy dark ambient observe failed; observing only with payloads')
         if tick - config_checked >= 5:
           config_checked = tick
           old_policy = policy

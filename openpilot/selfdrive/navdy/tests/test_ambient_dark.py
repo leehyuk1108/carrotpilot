@@ -89,9 +89,11 @@ def test_turns_off_only_after_the_no_lights_hold():
 
 def test_turns_off_only_after_the_dark_hold():
   ambient, _ = driver()
-  assert run(ambient, 0.0, 19.8, dark=False) == [AUTO]  # camera already says no lights
-  assert run(ambient, 20.0, DARK_HOLD_S - 0.2) == [AUTO]
-  assert is_off(step(ambient, 20.0 + DARK_HOLD_S))
+  assert run(ambient, 0.0, NO_LIGHTS_HOLD_S - 0.2) == [AUTO]  # camera seen; no lights from t=0
+  assert run(ambient, NO_LIGHTS_HOLD_S, 4.8, dark=None) == [AUTO]  # darkness briefly unknown
+  start = NO_LIGHTS_HOLD_S + 5.0
+  assert run(ambient, start, DARK_HOLD_S - 0.2) == [AUTO]
+  assert is_off(step(ambient, start + DARK_HOLD_S))
 
 
 def test_daytime_tunnel_camera_never_active_stays_on():
@@ -311,3 +313,33 @@ def test_read_enabled_reads_param_file(tmp_path, raw, expected):
 
 def test_read_enabled_missing_file_is_disabled(tmp_path):
   assert read_enabled(NS(get_param_path=lambda key: str(tmp_path / key))) is False
+
+
+def test_camera_lights_seen_while_bright_do_not_count_and_daylight_still_clears():
+  # Dusk or a lit station: the camera can report lights while the light sensor reads bright.
+  ambient, _ = driver()
+  step(ambient, 0.0, camera=CITY)
+  assert ambient.state()['cameraSeen']
+  run(ambient, 1.0, CAMERA_RESET_S + 1, dark=False, camera=CITY)
+  assert not ambient.state()['cameraSeen']
+  assert not any(is_off(r) for r in run(ambient, CAMERA_RESET_S + 2.2, 60, camera=NONE))
+
+
+def test_camera_lights_with_unknown_darkness_do_not_count():
+  ambient, _ = driver()
+  run(ambient, 0.0, 5, dark=None, camera=CITY)
+  assert not ambient.state()['cameraSeen']
+  assert not any(is_off(r) for r in run(ambient, 5.2, 60, camera=NONE))
+
+
+def test_observe_keeps_the_camera_record_without_payloads():
+  ambient, _ = driver()
+  settle(ambient, camera=CITY)
+  assert ambient.state()['cameraSeen']
+  ambient.observe(now=20.0, dark=None, onroad=False, camera=None)  # stop while the Navdy link is down
+  assert not ambient.state()['cameraSeen']
+  ambient.observe(now=30.0, dark=True, onroad=True, camera=HIGH_BEAM)
+  assert ambient.state()['cameraSeen']
+  for i in range(int(CAMERA_RESET_S / 0.2) + 1):
+    ambient.observe(now=40.0 + i * 0.2, dark=False, onroad=True, camera=CITY)
+  assert not ambient.state()['cameraSeen']

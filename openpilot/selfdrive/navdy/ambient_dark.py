@@ -96,6 +96,21 @@ class DarkAmbient:
     except Exception:
       self.enabled = False
 
+  def observe(self, *, now: float, dark: bool | None, onroad: bool | None, camera: int | None) -> None:
+    """Keep the camera record current on ticks without a payload (Navdy link down)."""
+    self._track_camera(now, dark, onroad, camera)
+
+  def _track_camera(self, now, dark, onroad, camera) -> None:
+    # Idempotent per tick: run() observes every loop and update() repeats it when a payload goes out.
+    if dark is False:
+      self.bright_since = now if self.bright_since is None else self.bright_since
+    else:
+      self.bright_since = None
+    if onroad is not True or (self.bright_since is not None and now - self.bright_since >= CAMERA_RESET_S):
+      self.camera_seen = False  # a new drive or daylight: the camera has to report again
+    elif dark is True and camera in (CAMERA_CITY_LIGHTS, CAMERA_HIGH_BEAM):
+      self.camera_seen = True
+
   def update(self, *, now: float, wall: float, dark: bool | None, onroad: bool | None, door_open: bool,
              parked: bool = False, user_override=None, camera: int | None = None) -> dict | None:
     """Override to send instead of the user's, or None to leave the payload alone."""
@@ -117,14 +132,7 @@ class DarkAmbient:
     else:
       self.dark_since = None
       self.lit_since = now if self.lit_since is None else self.lit_since
-    if dark is False:
-      self.bright_since = now if self.bright_since is None else self.bright_since
-    else:
-      self.bright_since = None
-    if onroad is not True or (self.bright_since is not None and now - self.bright_since >= CAMERA_RESET_S):
-      self.camera_seen = False
-    if onroad is True and camera in (CAMERA_CITY_LIGHTS, CAMERA_HIGH_BEAM):
-      self.camera_seen = True
+    self._track_camera(now, dark, onroad, camera)
     no_lights = self.camera_seen and camera in (CAMERA_NONE, CAMERA_HIGH_BEAM)
     if no_lights:
       self.lights_since = None

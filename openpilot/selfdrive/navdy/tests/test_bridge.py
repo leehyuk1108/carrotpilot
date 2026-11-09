@@ -610,6 +610,49 @@ def test_jetson_remains_available_without_working_bluetooth(monkeypatch, tmp_pat
   assert attempted == (['bluetooth', 'jetson'] if peer else ['jetson'])
 
 
+def test_dark_ambient_camera_record_follows_the_car_while_the_navdy_link_is_down(monkeypatch, tmp_path):
+  from openpilot import cereal
+  clock = NS(now=100.0)
+  sm = Messages()
+
+  def update(_):
+    for service in bridge.SERVICES:
+      sm.recv_time[service] = clock.now
+      sm.logMonoTime[service] = round(clock.now * 1e9)
+    if clock.now >= 101.5:
+      sm.data['deviceState'] = NS(started=False)  # ignition off; the link never comes up
+
+  sm.update = update
+  sm.data['carState'] = car(ambientLight=NS(valid=True, dark=True, cameraValid=True, cameraLights=1))
+  ambient = DarkAmbient(read=lambda: True)
+  seen = []
+  observe = ambient.observe
+
+  def recording_observe(**kwargs):
+    observe(**kwargs)
+    seen.append((kwargs['onroad'], kwargs['camera'], ambient.camera_seen))
+
+  ambient.observe = recording_observe
+  ambient.update = lambda **kwargs: pytest.fail('no payload goes out without a link')
+  monkeypatch.setattr(bridge, 'DarkAmbient', lambda: ambient)
+  monkeypatch.setattr(bridge.time, 'monotonic', lambda: clock.now)
+  monkeypatch.setattr(bridge.time, 'sleep', lambda seconds: setattr(clock, 'now', clock.now + seconds))
+  monkeypatch.setattr(cereal, 'messaging', NS(SubMaster=lambda _: sm), raising=False)
+  monkeypatch.setattr(bridge, 'configured_connection', lambda _: (None, False))
+  monkeypatch.setattr(bridge, 'jetson_candidates', lambda: [])
+
+  class MissingUsb:
+    def connect(self):
+      raise ConnectionError('No USB')
+    def close(self):
+      pass
+
+  monkeypatch.setattr(bridge, 'AdbTransport', MissingUsb)
+  bridge.run(feedback=tmp_path/'feedback.json', status=tmp_path/'status.json', duration=3)
+  assert (True, 1, True) in seen
+  assert seen[-1] == (False, None, False)
+
+
 def test_jetson_connection_bootstraps_only_inactive_state():
   transport = bridge.SshTransport.__new__(bridge.SshTransport)
   sent = []
