@@ -19,7 +19,7 @@ from openpilot.selfdrive.navdy.navigation import FEEDBACK_PATH, STATUS_PATH
 from openpilot.selfdrive.navdy.transport import AdbTransport, LineReader, encode_frame
 from openpilot.selfdrive.navdy.bluetooth import BluetoothTransport, CONFIG_PATH, configured_connection
 from openpilot.selfdrive.navdy.connection import UsbProbe
-from openpilot.selfdrive.navdy.ambient import DoorMonitor, read_override, road_state
+from openpilot.selfdrive.navdy.ambient import DoorMonitor, led_gamma, read_override, road_state
 from openpilot.selfdrive.navdy.ambient_dark import DarkAmbient
 from openpilot.selfdrive.navdy.model_navigation import ModelNavigationTracker, ModelRouteCache, age_model_feedback
 from openpilot.selfdrive.navdy.diagnostics import LinkDiagnostics, public_error
@@ -225,6 +225,7 @@ def live_payload(sm, sequence, *, sources=None, door_open=False, ambient_overrid
                                                      door_open=door_open, gear=payload['gear'] if known_road else 'unknown')
   else:
     payload['ambientState'] = 'disconnected'
+  ambient_override = led_gamma(ambient_override)
   if dark_ambient is not None:
     light = dark_ambient_inputs(sm, sources)
     dark_override = dark_ambient.update(now=time.monotonic(), wall=time.time(), dark=light['dark'],

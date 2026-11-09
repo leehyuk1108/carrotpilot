@@ -2,7 +2,9 @@ from types import SimpleNamespace as NS
 
 import pytest
 
-from openpilot.selfdrive.navdy.ambient import DoorMonitor, build_door_parsers, read_override, road_state, updated_door_state
+from openpilot.selfdrive.navdy.ambient import (
+  DoorMonitor, build_door_parsers, led_gamma, read_override, road_state, updated_door_state,
+)
 
 
 def test_override_expiry_and_durable_profile(tmp_path):
@@ -76,3 +78,38 @@ def test_unwatched_bus_cannot_change_door():
   from opendbc.can.packer import CANPacker
   frame = CANPacker('gm_global_a_powertrain_generated').make_can_msg('BCMDoorBeltStatus', 3, {'FrontLeftDoor': 1})
   assert updated_door_state(build_door_parsers(), [(1, [frame])]) is None
+
+
+def test_led_gamma_corrects_manual_zones_without_touching_the_input():
+  command = {'mode': 'manual', 'id': 'a34c1ea5', 'expiresAt': '2026-11-09T03:30:22Z',
+             'zone1': {'enabled': True, 'rgb': [255, 98, 92], 'brightness': 100},
+             'zone2': {'enabled': True, 'rgb': [0, 128, 255], 'brightness': 40}}
+  corrected = led_gamma(command)
+  assert corrected['zone1']['rgb'] == [255, 31, 27]
+  assert corrected['zone2']['rgb'] == [0, 56, 255]
+  assert corrected['zone1']['brightness'] == 100 and corrected['id'] == 'a34c1ea5'
+  assert command['zone1']['rgb'] == [255, 98, 92]  # the caller's dict is not modified
+  assert corrected['zone1'] is not command['zone1']
+
+
+def test_led_gamma_corrects_every_profile_section():
+  profile = {'mode': 'profile', 'profile': {
+    'enabled': True,
+    'driving': {'zone1': {'enabled': True, 'rgb': [255, 214, 173], 'brightness': 20, 'automaticBrightness': True}},
+    'overspeed': {'zone1': {'enabled': True, 'rgb': [255, 0, 0], 'brightness': 50}},
+    'timing': {'fadeMilliseconds': 1000}}}
+  corrected = led_gamma(profile)
+  assert corrected['profile']['driving']['zone1']['rgb'] == [255, 173, 109]
+  assert corrected['profile']['overspeed']['zone1']['rgb'] == [255, 0, 0]
+  assert corrected['profile']['timing'] == {'fadeMilliseconds': 1000}
+
+
+@pytest.mark.parametrize('rgb', [[255, 98], [255, 98, 92, 1], [True, 0, 0], [256, 0, 0], [-1, 0, 0], [1.5, 0, 0], '255,0,0'])
+def test_led_gamma_leaves_invalid_triples_alone(rgb):
+  assert led_gamma({'mode': 'manual', 'zone1': {'rgb': rgb}})['zone1']['rgb'] == rgb
+
+
+@pytest.mark.parametrize('override', [None, {'mode': 'auto'}, 'manual', 7,
+                                      {'mode': 'manual', 'id': 'carrot-dark-1', 'zone1': {'enabled': False, 'brightness': 0}}])
+def test_led_gamma_passes_other_values_unchanged(override):
+  assert led_gamma(override) == override

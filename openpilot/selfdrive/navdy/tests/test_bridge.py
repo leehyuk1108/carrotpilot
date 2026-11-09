@@ -97,6 +97,15 @@ def test_ignition_before_onroad_wakes_without_fabricating_active_telemetry(sm):
   assert not payload['active'] and payload['vEgoKph'] == 0
 
 
+def test_wayon_override_colors_reach_the_hud_gamma_corrected(sm):
+  command = {'mode': 'manual', 'id': 'phone', 'zone1': {'enabled': True, 'rgb': [255, 98, 92], 'brightness': 100},
+             'zone2': {'enabled': True, 'rgb': [255, 255, 255], 'brightness': 99}}
+  payload = bridge.live_payload(sm, 1, ambient_override=command)
+  assert payload['ambientOverride']['zone1']['rgb'] == [255, 31, 27]
+  assert payload['ambientOverride']['zone2']['rgb'] == [255, 255, 255]
+  assert command['zone1']['rgb'] == [255, 98, 92]
+
+
 def test_ambient_override_is_carried_without_changing_display_state(sm):
   command = {'mode': 'profile', 'id': 'test'}
   payload = bridge.live_payload(sm, 1, ambient_override=command)
