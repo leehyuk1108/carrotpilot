@@ -48,13 +48,20 @@ def _finite(value):
 
 
 class TripFuelTracker:
-  """Integrates the ECM fuel-used counter over one route and keeps start/end gauge and odometer."""
+  """Integrates the ECM fuel-used counter over one route and keeps start/end gauge and odometer.
+
+  Fuel and distance are counted over the same stretches: a gap in the engine record longer than
+  MAX_GAP_S drops both, so km/L stays consistent even when some fuel could not be counted.
+  """
 
   def __init__(self):
-    self.prev_counter = None
-    self.prev_counter_mono = None
+    self.prev_counter = None        # last counter value
+    self.prev_change_mono = None    # when that value was first seen
+    self.prev_sample_mono = None    # last engine-record sample
+    self.prev_fuel_odometer = None  # odometer at the last engine-record sample
     self.used_counts = 0.0
     self.idle_counts = 0.0
+    self.fuel_distance_km = 0.0
     self.counter_restarts = 0
     self.long_gaps = 0
     self.observed_s = 0.0
@@ -68,29 +75,19 @@ class TripFuelTracker:
     care = getattr(car_state, "vehicleCare", None)
     if care is None or not bool(getattr(car_state, "canValid", False)) or getattr(car_state, "canTimeout", False):
       # Skip the sample but keep the last counter: it is cumulative, so the next good sample
-      # still accounts for the fuel burned meanwhile (or is caught as a restart).
+      # still accounts for the fuel burned meanwhile (or is caught as a restart or long gap).
       return
-    speed = _finite(getattr(car_state, "vEgo", None))
+    odometer = None
+    if care.odometerValid:
+      odometer = _finite(care.odometerKm)
+      if odometer is not None and odometer > 0:
+        self.odometer_start = odometer if self.odometer_start is None else self.odometer_start
+        self.odometer_end = odometer
+      else:
+        odometer = None
     if care.engineValid:
-      counter = int(care.fuelUsedCounter) % FUEL_COUNTER_MODULO
-      if self.prev_counter is not None and mono - self.prev_counter_mono > MAX_GAP_S:
-        # The counter may have wrapped more than once or restarted: resync and report the gap.
-        self.long_gaps += 1
-      elif self.prev_counter is not None and mono > self.prev_counter_mono:
-        dt = mono - self.prev_counter_mono
-        limit = MAX_COUNTS_PER_S * dt + COUNT_SLACK
-        delta = (counter - self.prev_counter) % FUEL_COUNTER_MODULO
-        if delta > limit:
-          # Counter restarted at 0 (ECM wake); what it shows now was burned since the restart.
-          self.counter_restarts += 1
-          delta = counter if counter <= limit else 0
-        self.used_counts += delta
-        if speed is not None and speed < IDLE_SPEED_MPS:
-          self.idle_counts += delta
-        self.observed_s += min(dt, 1.0)
-      if self.prev_counter is None or mono > self.prev_counter_mono:
-        self.prev_counter = counter
-        self.prev_counter_mono = mono
+      self._update_fuel(mono, int(care.fuelUsedCounter) % FUEL_COUNTER_MODULO, odometer,
+                        _finite(getattr(car_state, "vEgo", None)))
       oil = _finite(care.oilLifePercent)
       if oil is not None:
         self.oil_life = oil
@@ -100,11 +97,39 @@ class TripFuelTracker:
         if len(self.level_start) < LEVEL_WINDOW:
           self.level_start.append(level)
         self.level_end.append(level)
-    if care.odometerValid:
-      odometer = _finite(care.odometerKm)
-      if odometer is not None and odometer > 0:
-        self.odometer_start = odometer if self.odometer_start is None else self.odometer_start
-        self.odometer_end = odometer
+
+  def _update_fuel(self, mono, counter, odometer, speed):
+    if self.prev_sample_mono is None or mono - self.prev_sample_mono > MAX_GAP_S:
+      if self.prev_sample_mono is not None:
+        # The counter may have wrapped more than once or restarted: count neither the fuel
+        # nor the distance across the gap.
+        self.long_gaps += 1
+      self.prev_counter, self.prev_change_mono = counter, mono
+      self.prev_fuel_odometer = odometer
+      self.prev_sample_mono = mono
+      return
+    if mono <= self.prev_sample_mono:
+      return
+    self.observed_s += min(mono - self.prev_sample_mono, 1.0)
+    self.prev_sample_mono = mono
+    if counter != self.prev_counter:
+      # The ECM refreshes the counter at 4 Hz while samples come at 10 Hz (and repeat the last
+      # value), so bound the step by the time since the previous value was first seen.
+      dt = mono - self.prev_change_mono
+      limit = MAX_COUNTS_PER_S * dt + COUNT_SLACK
+      delta = (counter - self.prev_counter) % FUEL_COUNTER_MODULO
+      if delta > limit:
+        # Counter restarted at 0 (ECM wake); what it shows now was burned since the restart.
+        self.counter_restarts += 1
+        delta = counter if counter <= limit else 0
+      self.used_counts += delta
+      if speed is not None and speed < IDLE_SPEED_MPS:
+        self.idle_counts += delta
+      self.prev_counter, self.prev_change_mono = counter, mono
+    if odometer is not None:
+      if self.prev_fuel_odometer is not None and odometer >= self.prev_fuel_odometer:
+        self.fuel_distance_km += odometer - self.prev_fuel_odometer
+      self.prev_fuel_odometer = odometer
 
   def summary(self):
     if self.observed_s < MIN_OBSERVED_S:
@@ -124,12 +149,14 @@ class TripFuelTracker:
       "scale": {"mlPerCount": FUEL_ML_PER_COUNT, "grade": "likely"},
     }
     if self.odometer_start is not None and self.odometer_end is not None and self.odometer_end >= self.odometer_start:
-      distance_km = self.odometer_end - self.odometer_start
       fuel.update(odometerStartKm=round(self.odometer_start, 1), odometerEndKm=round(self.odometer_end, 1),
-                  distanceKm=round(distance_km, 2))
-      if distance_km >= MIN_ECONOMY_KM and used_l >= MIN_ECONOMY_L:
-        fuel["kmPerL"] = round(distance_km / used_l, 2)
-        fuel["lPer100Km"] = round(used_l / distance_km * 100.0, 1)
+                  odometerDistanceKm=round(self.odometer_end - self.odometer_start, 2))
+    if self.prev_fuel_odometer is not None:
+      # Distance over exactly the stretches whose fuel was counted.
+      fuel["distanceKm"] = round(self.fuel_distance_km, 2)
+      if self.fuel_distance_km >= MIN_ECONOMY_KM and used_l >= MIN_ECONOMY_L:
+        fuel["kmPerL"] = round(self.fuel_distance_km / used_l, 2)
+        fuel["lPer100Km"] = round(used_l / self.fuel_distance_km * 100.0, 1)
     start, end = _median(self.level_start), _median(self.level_end)
     if start is not None and end is not None:
       fuel.update(levelStartPercent=round(start * 100.0, 1), levelEndPercent=round(end * 100.0, 1),
@@ -200,4 +227,6 @@ class VehicleCareStore:
         self._save(now)
     if not self.values or self.observed_at is None:
       return None
-    return {"fresh": fresh, "observedAt": _iso(self.observed_at), "source": "traverseCan", **self.values}
+    # liveKeys: readings that are current right now; the others are last-known values from earlier.
+    return {"fresh": fresh, "observedAt": _iso(self.observed_at), "source": "traverseCan", **self.values,
+            "liveKeys": sorted(snapshot) if fresh else []}

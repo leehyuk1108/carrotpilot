@@ -52,6 +52,34 @@ def test_steady_drive_economy_idle_share_levels_and_odometer():
   assert fuel["observedS"] == pytest.approx(720.0, abs=0.2)
 
 
+def test_4hz_counter_sampled_at_10hz_keeps_heavy_fuel_flow():
+  # The ECM refreshes 0x3F9 every 0.25 s; qlog carState repeats the last value at 10 Hz.
+  tracker = TripFuelTracker()
+  for step in range(600):  # 60 s at 600 counts/s (full throttle)
+    t = step / 10
+    counter = int(600 * (int(t * 4) / 4)) % 65536
+    tracker.update(t, car(counter))
+  assert tracker.counter_restarts == 0
+  assert tracker.used_counts == pytest.approx(600 * 59.75, abs=1)
+
+
+def test_long_engine_gap_drops_its_distance_too():
+  tracker = TripFuelTracker()
+  t, counter, odo = 0.0, 1000, 61000.0
+  for step in range(2400):  # 240 s, 20 m/s, 0.0336 mL x 100 counts/s; engine record missing for 120 s
+    t = step / 10
+    counter = 1000 + int(100 * t)
+    odo = 61000.0 + 0.02 * t
+    engine = None if 60 <= t < 180 else counter
+    tracker.update(t, car(engine, 20.0, odometer=odo))
+  fuel = tracker.summary()
+  assert fuel["longGaps"] == 1
+  assert fuel["odometerDistanceKm"] == pytest.approx(4.8, abs=0.01)
+  assert fuel["distanceKm"] == pytest.approx(2.4, abs=0.01)  # only the stretches whose fuel was counted
+  assert fuel["usedL"] == pytest.approx(120 * 100 * ML_PER_COUNT / 1000, abs=0.01)
+  assert fuel["kmPerL"] == pytest.approx(0.02 / (100 * ML_PER_COUNT / 1000), rel=0.02)
+
+
 def test_wrap_is_fuel_but_a_restart_is_not_a_huge_jump():
   tracker = TripFuelTracker()
   tracker.update(0.0, car(65500))
@@ -125,13 +153,14 @@ def test_store_reports_fresh_then_last_known_and_survives_restart(tmp_path):
   assert store.update(None) is None
   block = store.update({"fuelLevelPercent": 50.0, "oilLifePercent": 25})
   assert block == {"fresh": True, "observedAt": "2026-11-09T08:00:00Z", "source": "traverseCan",
-                   "fuelLevelPercent": 50.0, "oilLifePercent": 25}
+                   "fuelLevelPercent": 50.0, "oilLifePercent": 25, "liveKeys": ["fuelLevelPercent", "oilLifePercent"]}
   clock.now += 5
-  block = store.update({"batterySocPercent": 80})  # merges with earlier groups
+  block = store.update({"batterySocPercent": 80})  # merges with earlier groups, but only SOC is live
   assert block["fuelLevelPercent"] == 50.0 and block["batterySocPercent"] == 80
+  assert block["liveKeys"] == ["batterySocPercent"]
   clock.now += 3600
   block = store.update(None)
-  assert block["fresh"] is False and block["observedAt"] == "2026-11-09T08:00:05Z"
+  assert block["fresh"] is False and block["observedAt"] == "2026-11-09T08:00:05Z" and block["liveKeys"] == []
   # Saved at the first observation only (the next save waits for the interval).
   saved = json.loads(path.read_text())
   assert saved == {"observedAt": "2026-11-09T08:00:00Z", "fuelLevelPercent": 50.0, "oilLifePercent": 25}
