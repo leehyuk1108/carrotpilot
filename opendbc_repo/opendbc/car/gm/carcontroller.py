@@ -127,7 +127,7 @@ class CarController(CarControllerBase):
       steerDeltaUp = params.get_int("CustomSteerDeltaUp")
       steerDeltaDown = params.get_int("CustomSteerDeltaDown")
       if steerMax > 0:
-        self.params.STEER_MAX = steerMax
+        self.params.STEER_MAX = min(steerMax, self.params.STEER_MAX_EPS)
       if steerDeltaUp > 0:
         self.params.STEER_DELTA_UP = steerDeltaUp
       if steerDeltaDown > 0:

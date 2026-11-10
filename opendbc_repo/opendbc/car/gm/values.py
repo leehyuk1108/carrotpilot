@@ -12,7 +12,10 @@ Ecu = CarParams.Ecu
 
 class CarControllerParams:
   STEER_MAX = 300  # GM limit is 3Nm. Used by carcontroller to generate LKA output
-  STEER_STEP = 4  # Active control frames per command (~33hz)
+  # Ceiling for CustomSteerMax. In Traverse logs the reported LKATorqueDelivered stayed at about 3.00
+  # once commands passed ~300 while up to 400 was sent, so the extra range only delayed torque release.
+  STEER_MAX_EPS = 300
+  STEER_STEP = 4  # Active control frames per command (25hz)
   INACTIVE_STEER_STEP = 10  # Inactive control frames per command (10hz)
   STEER_DELTA_UP = 5  # Delta rates require review due to observed EPS weakness
   STEER_DELTA_DOWN = 7
@@ -61,6 +64,14 @@ class CarControllerParams:
 
     self.BRAKE_LOOKUP_BP = [self.ACCEL_MIN, max_regen_acceleration]
     self.BRAKE_LOOKUP_V = [self.MAX_BRAKE, 0.]
+
+    if CP.carFingerprint == CAR.CHEVROLET_TRAVERSE:
+      # Same LKA command timing as upstream openpilot and FrogPilot GM: ~33 Hz, +10/-15 per command.
+      # At 25 Hz a +5 ramp needs 2.4 s for 0->300 (2.0 s with CustomSteerDeltaUp 6), which kept
+      # large-curve requests rate limited long enough for the torque loop to wind and unwind the wheel.
+      self.STEER_STEP = 3
+      self.STEER_DELTA_UP = 10
+      self.STEER_DELTA_DOWN = 15
 
   # determined by letting Volt regen to a stop in L gear from 89mph,
   # and by letting off gas and allowing car to creep, for determining

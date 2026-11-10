@@ -206,6 +206,12 @@ Previously ignored ID.4 values now take effect. For example, with `CustomSR=0`, 
 
 `LateralTorqueCustom` and `CustomSteer*` are advanced settings that can affect the vehicle tune and safety limits. Do not alter them without a vehicle-specific validated baseline and a recovery path.
 
+On GM vehicles `CustomSteerMax` is capped at 300. In Traverse logs the torque the EPS reported (`LKATorqueDelivered`) stayed at about 3.00 while commands were above roughly 300; commands between 300 and 400 only delayed torque release.
+
+The Chevrolet Traverse sends LKA torque commands at about 33 Hz (every 3 frames) with default steps of +10 up and -15 down, matching FrogPilot, so 0 to 300 takes about 0.9 s. A `CustomSteerDeltaUp`/`CustomSteerDeltaDown` above 0 overrides these steps. The values validated on the Traverse are exactly 10/15; larger values need their own check against the panda safety limits. With lower values such as 6/8, logs show torque lagging the request in large curves and the wheel winding and unwinding.
+
+With `NNFF` on, the Traverse uses the Trailblazer NNFF model as a substitute and, like FrogPilot's NNFF, the NN low-speed table, the steering-rate jerk input and a jerk window based on the lateral delay. NNFF on other vehicles is unchanged.
+
 #### NNFF torque control
 
 `NNFF` is a neural-network feedforward option that defaults to off. Enabling selects torque-controller tuning on vehicles without angle control and uses NNFF when a matching model is available. Vehicles supported by comma's own NNFF retain that path's precedence; angle-control vehicles are unaffected.
