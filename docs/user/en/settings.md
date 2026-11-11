@@ -212,6 +212,8 @@ The Chevrolet Traverse, Trailblazer and Trax send LKA torque commands at about 3
 
 With `NNFF` on, the Traverse uses the Trailblazer NNFF model as a substitute. With `NNFF` on, the Traverse, Trailblazer and Trax use, like FrogPilot's NNFF, the NN low-speed table, the steering-rate jerk input and a jerk window based on the lateral delay. NNFF on other vehicles is unchanged.
 
+`LateralTorqueKd` (steering derivative gain, only with `LateralTorqueCustom` on) adds torque against how fast the measured lateral acceleration changes. It does not react to target changes, goes through a 2 Hz filter, and is off while the driver holds the wheel. 0 is off; try 3-5 (0.03-0.05). Values above 10 (0.10) are treated as 10, and the D share is capped at 20% of maximum torque. In Traverse and Trailblazer logs, from 0.1 up D asks for torque changes faster than GM lane keeping can make (1.1/s winding, 1.7/s unwinding, 1.0 = torque 300), so it would not reach the wheel as computed. Its effect in the car has not been verified yet.
+
 #### NNFF torque control
 
 `NNFF` is a neural-network feedforward option that defaults to off. Enabling selects torque-controller tuning on vehicles without angle control and uses NNFF when a matching model is available. Vehicles supported by comma's own NNFF retain that path's precedence; angle-control vehicles are unaffected.

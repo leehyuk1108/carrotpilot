@@ -828,17 +828,17 @@
       "group": "조향토크",
       "name": "LateralTorqueKd",
       "title": "_LateralTorqueKd*0.01(0)",
-      "descr": "조향 미분 계수(급격한 변화에 저항) \n\n 0 권장",
+      "descr": "조향 미분 계수(D). 측정한 횡가속도가 빨리 바뀌면 반대로 잡아 줍니다. \n\n 0=끔, 시험은 3~5 권장. 10(0.10)보다 크게 넣어도 10으로 제한됩니다.",
       "egroup": "LAT_TQ",
       "etitle": "_LateralTorqueKd*0.01(0)",
-      "edescr": "Steering Derivative Gain, 0 Recommended",
+      "edescr": "Steering derivative gain (D) on the measured lateral acceleration. 0 = off; try 3-5. Values above 10 (0.10) are capped at 10.",
       "cgroup": "转向",
       "ctitle": "转向力矩 Kd*0.01(0)",
-      "cdescr": "转向微分增益，推荐 0",
+      "cdescr": "转向微分增益(D)，作用于测得的横向加速度。0=关闭，建议试 3~5。超过 10(0.10) 按 10 处理。",
       "min": 0,
-      "max": 10000,
+      "max": 10,
       "default": 0,
-      "unit": 10
+      "unit": 1
     },
     {
       "group": "레인모드",

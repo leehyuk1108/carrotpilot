@@ -14,6 +14,7 @@ from openpilot.selfdrive.controls.lib.latcontrol import LatControl
 from openpilot.common.pid import PIDController
 
 from openpilot.common.params import Params
+from openpilot.common.realtime import DT_CTRL
 
 # At higher speeds (25+mph) we can assume:
 # Lateral acceleration achieved by a specific car correlates to
@@ -31,6 +32,13 @@ LOW_SPEED_Y = [15, 13, 10, 5]
 LOW_SPEED_Y_NN = [12, 3, 1, 0]
 
 LAT_PLAN_MIN_IDX = 5
+
+# Derivative on measurement (D). LateralTorqueKd is in 0.01 steps and is capped at 0.10: in the Traverse and
+# Trailblazer wobble logs a D of 0.1 already needed torque changes of 2-3/s against the 1.1/s (wind) and 1.7/s
+# (unwind) the GM LKA ramp allows, and the Trailblazer had 200 (2.0) set while D was not connected at all.
+LAT_KD_MAX = 0.10
+LAT_D_MAX = 0.2  # |D| in normalized torque
+LAT_D_FILTER_HZ = 2.0
 
 NNFF_FROGPILOT_PARITY_CARS = ("CHEVROLET_TRAVERSE", "CHEVROLET_TRAILBLAZER", "CHEVROLET_TRAILBLAZER_CC", "CHEVROLET_TRAX")
 
@@ -77,6 +85,8 @@ class LatControlTorque(LatControl):
     self.torque_params = CP.lateralTuning.torque.as_builder()
     self.pid = PIDController(self.torque_params.kp, self.torque_params.ki,
                              k_f=self.torque_params.kf, pos_limit=self.steer_max, neg_limit=-self.steer_max)
+    self.previous_measurement = None
+    self.measurement_rate = FirstOrderFilter(0.0, 1 / (2 * math.pi * LAT_D_FILTER_HZ), DT_CTRL)
     self.torque_from_lateral_accel = CI.torque_from_lateral_accel()
     self.use_steering_angle = self.torque_params.useSteeringAngle
     self.steering_angle_deadzone_deg = self.torque_params.steeringAngleDeadzoneDeg
@@ -162,7 +172,7 @@ class LatControlTorque(LatControl):
         lateralTorqueKp = self.params.get_float("LateralTorqueKpV")*0.01
         lateralTorqueKi = self.params.get_float("LateralTorqueKiV")*0.01
         lateralTorqueKf = self.params.get_float("LateralTorqueKf")*0.01
-        lateralTorqueKd = self.params.get_float("LateralTorqueKd")*0.01
+        lateralTorqueKd = min(max(self.params.get_float("LateralTorqueKd")*0.01, 0.0), LAT_KD_MAX)
         self.pid._k_p = [[0], [lateralTorqueKp]]
         self.pid._k_i = [[0], [lateralTorqueKi]]
         self.pid.k_f = lateralTorqueKf
@@ -177,6 +187,7 @@ class LatControlTorque(LatControl):
     pid_log = log.ControlsState.LateralTorqueState.new_message()
     nn_log = None
     if not active:
+      self._reset_measurement_rate()
       output_torque = 0.0
       pid_log.active = False
       angle_steers_des = float(CS.steeringAngleDeg)
@@ -303,7 +314,9 @@ class LatControlTorque(LatControl):
                                             gravity_adjusted=True)
 
       freeze_integrator = steer_limited_by_controls or CS.steeringPressed or CS.vEgo < 5
+      error_rate = self._measurement_error_rate(measurement, CS)
       output_torque = self.pid.update(pid_log.error,
+                                      error_rate=error_rate,
                                       feedforward=ff,
                                       speed=CS.vEgo,
                                       freeze_integrator=freeze_integrator)
@@ -322,3 +335,31 @@ class LatControlTorque(LatControl):
 
     # TODO left is positive in this convention
     return -output_torque,angle_steers_des, pid_log
+
+  def reset(self):
+    super().reset()
+    self._reset_measurement_rate()
+
+  def _reset_measurement_rate(self):
+    self.previous_measurement = None
+    self.measurement_rate.x = 0.0
+
+  def _measurement_error_rate(self, measurement, CS):
+    # D acts on the measured lateral acceleration only (no kick when the target jumps), through a 2 Hz
+    # low-pass, never against the driver, and its contribution is capped at LAT_D_MAX.
+    if not math.isfinite(measurement):
+      self._reset_measurement_rate()
+      return 0.0
+    previous, self.previous_measurement = self.previous_measurement, measurement
+    if previous is None or CS.steeringPressed:
+      self.measurement_rate.x = 0.0
+      return 0.0
+    rate = self.measurement_rate.update((measurement - previous) / DT_CTRL)
+    if not math.isfinite(rate):
+      self.measurement_rate.x = 0.0
+      return 0.0
+    k_d = float(np.interp(CS.vEgo, self.pid._k_d[0], self.pid._k_d[1]))
+    if k_d <= 0.0:
+      return 0.0
+    limit = LAT_D_MAX / k_d
+    return float(np.clip(-rate, -limit, limit))
