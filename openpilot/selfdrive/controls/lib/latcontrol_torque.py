@@ -14,6 +14,7 @@ from openpilot.selfdrive.controls.lib.latcontrol import LatControl
 from openpilot.common.pid import PIDController
 
 from openpilot.common.params import Params
+from openpilot.common.realtime import DT_CTRL
 
 # At higher speeds (25+mph) we can assume:
 # Lateral acceleration achieved by a specific car correlates to
@@ -29,6 +30,8 @@ from openpilot.common.params import Params
 LOW_SPEED_X = [0, 10, 20, 30]
 LOW_SPEED_Y = [15, 13, 10, 5]
 LOW_SPEED_Y_NN = [12, 3, 1, 0]
+
+MAX_LAT_JERK_UP = 2.5            # m/s^3
 
 LAT_PLAN_MIN_IDX = 5
 
@@ -69,11 +72,24 @@ class LatControlTorque(LatControl):
   def __init__(self, CP, CI):
     super().__init__(CP, CI)
     self.torque_params = CP.lateralTuning.torque.as_builder()
+    self.is_gm = getattr(CP, 'brand', '') == 'gm' or getattr(CP, 'carName', '') == 'gm' or any(b in str(getattr(CP, 'carFingerprint', '')) for b in ['CHEVROLET', 'CADILLAC', 'GMC', 'BUICK'])
+
+    lateralTorqueKd = Params().get_float("LateralTorqueKd") * 0.01
+    if lateralTorqueKd > 0:
+      k_d = lateralTorqueKd
+    elif self.is_gm:
+      k_d = getattr(self.torque_params, 'kd', 0.1)
+    else:
+      k_d = getattr(self.torque_params, 'kd', 0.0)
+
     self.pid = PIDController(self.torque_params.kp, self.torque_params.ki,
-                             k_f=self.torque_params.kf, pos_limit=self.steer_max, neg_limit=-self.steer_max)
+                             k_f=self.torque_params.kf, k_d=k_d, pos_limit=self.steer_max, neg_limit=-self.steer_max)
     self.torque_from_lateral_accel = CI.torque_from_lateral_accel()
     self.use_steering_angle = self.torque_params.useSteeringAngle
     self.steering_angle_deadzone_deg = self.torque_params.steeringAngleDeadzoneDeg
+
+    self.previous_measurement = 0.0
+    self.measurement_rate_filter = FirstOrderFilter(0.0, 1 / (2 * np.pi * (MAX_LAT_JERK_UP - 0.5)), DT_CTRL)
 
     # carrot
     self.frame = 0
@@ -197,6 +213,12 @@ class LatControlTorque(LatControl):
       low_speed_factor = np.interp(CS.vEgo, LOW_SPEED_X, LOW_SPEED_Y)**2
       setpoint = desired_lateral_accel + low_speed_factor * desired_curvature
       measurement = actual_lateral_accel + low_speed_factor * actual_curvature
+
+      error_rate = 0.0
+      if self.is_gm:
+        measurement_rate = self.measurement_rate_filter.update((measurement - self.previous_measurement) / DT_CTRL)
+        self.previous_measurement = measurement
+        error_rate = -measurement_rate
       
       lateral_jerk_setpoint = 0
       lateral_jerk_measurement = 0
@@ -287,6 +309,7 @@ class LatControlTorque(LatControl):
 
       freeze_integrator = steer_limited_by_controls or CS.steeringPressed or CS.vEgo < 5
       output_torque = self.pid.update(pid_log.error,
+                                      error_rate=error_rate,
                                       feedforward=ff,
                                       speed=CS.vEgo,
                                       freeze_integrator=freeze_integrator)
@@ -305,3 +328,8 @@ class LatControlTorque(LatControl):
 
     # TODO left is positive in this convention
     return -output_torque,angle_steers_des, pid_log
+
+  def reset(self):
+    super().reset()
+    self.pid.reset()
+    self.previous_measurement = 0.0
