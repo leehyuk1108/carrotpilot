@@ -187,9 +187,12 @@ def test_carrot_cruise_publishes_stock_display_without_rescaling_target(runtime,
 def controller_state():
   out = structs.CarState(vEgo=10., standstill=False)
   out.cruiseState.enabled = True
+  # Same defaults as GM CarState.__init__, including the Trailblazer camera-long stock references.
   return NS(out=out, loopback_lka_steering_cmd_ts_nanos=0, loopback_lka_steering_cmd_updated=False,
             cam_lka_steering_cmd_counter=0, pt_lka_steering_cmd_counter=0, buttons_counter=0,
-            pcm_acc_status=0, pscm_status=defaultdict(int))
+            pcm_acc_status=0, pscm_status=defaultdict(int),
+            cam_ascm_2cb_counter=0, cam_ascm_2cb_counter_updated=False, cam_ascm_2cb_counter_ts_nanos=0,
+            cam_stock_long_active=None, cam_stock_long_cancel=False, cam_acc_status=None)
 
 
 @pytest.mark.parametrize("active", [False, True])
