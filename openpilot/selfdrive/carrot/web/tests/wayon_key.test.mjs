@@ -15,6 +15,13 @@ test("the key panel is wired into the device tab before its binder", () => {
   for (const lang of ["ko", "en", "zh"]) assert.match(read(`js/translations/${lang}.js`), /device_group_wayon_key: "/);
 });
 
+test("the hidden copy hint and field stay hidden even though the shared field class sets display:block", () => {
+  const css = read("css/pages/remote_support.css");
+  assert.match(css, /\.remote-support__field \{ display: block;/);
+  assert.match(css, /#wayonKeyPanel \[hidden\] \{ display: none !important; \}/);
+  assert.match(read("index.html"), /\/css\/pages\/remote_support\.css/);
+});
+
 function deferred() {
   let resolve;
   let reject;
