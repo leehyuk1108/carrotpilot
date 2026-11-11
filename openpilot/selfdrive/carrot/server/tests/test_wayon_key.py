@@ -83,7 +83,7 @@ def test_reveal_returns_the_key_once_and_then_rate_limits(feature):
 
 
 @pytest.mark.parametrize("case", ["no_csrf", "bad_csrf", "no_origin", "foreign_origin", "cross_site", "forwarded",
-                                  "not_confirmed", "not_json", "too_large"])
+                                  "forwarded_proto", "via", "real_ip", "not_confirmed", "not_json", "too_large"])
 def test_reveal_refuses_anything_but_a_confirmed_same_origin_request(feature, case):
   app, _, _ = feature
   async def run():
@@ -103,6 +103,8 @@ def test_reveal_refuses_anything_but_a_confirmed_same_origin_request(feature, ca
         headers["Sec-Fetch-Site"] = "cross-site"
       elif case == "forwarded":
         headers["X-Forwarded-For"] = "192.168.35.10"
+      elif case in ("forwarded_proto", "via", "real_ip"):
+        headers[{"forwarded_proto": "X-Forwarded-Proto", "via": "Via", "real_ip": "X-Real-IP"}[case]] = "1"
       elif case == "not_confirmed":
         payload = {"json": {"confirmed": "yes"}}
       elif case == "not_json":
@@ -111,6 +113,8 @@ def test_reveal_refuses_anything_but_a_confirmed_same_origin_request(feature, ca
         payload = {"json": {"confirmed": True, "pad": "x" * 2048}}
       response = await client.post("/api/wayon_key/reveal", headers=headers, **payload)
       assert response.status in (400, 403)
+      assert response.headers["Cache-Control"] == "no-store"
+      assert response.headers["X-Content-Type-Options"] == "nosniff"
       assert KEY not in await response.text()
   asyncio.run(run())
 
@@ -135,6 +139,9 @@ def fake_request(peer, local, host):
   ("203.0.113.9", "192.168.35.175", "192.168.35.175:7000", False),
   ("192.168.35.157", "192.168.35.175", "192.168.35.99:7000", False),
   ("192.168.35.157", "192.168.35.175", "comma.local:7000", False),
+  ("::ffff:192.168.35.157", "::ffff:192.168.35.175", "192.168.35.175:7000", True),
+  ("::ffff:8.8.8.8", "::ffff:192.168.35.175", "192.168.35.175:7000", False),
+  ("2001:db8::1", "192.168.35.175", "192.168.35.175:7000", False),
 ])
 def test_only_the_owner_network_reaching_the_comma_address_is_trusted(feature, peer, local, host, allowed):
   _, api, _ = feature
@@ -144,3 +151,16 @@ def test_only_the_owner_network_reaching_the_comma_address_is_trusted(feature, p
   else:
     with pytest.raises(web.HTTPForbidden):
       api.validate_request(request)
+
+
+def test_carrot_web_main_page_refuses_to_be_framed_by_other_sites(feature, monkeypatch):
+  from openpilot.selfdrive.carrot.server.features import static
+
+  async def loaded():
+    return "<!doctype html><title>t</title>", False
+
+  monkeypatch.setattr(static, "_load_index_after_update", loaded)
+  monkeypatch.setattr(static, "_inject_bootstrap", lambda html: html)
+  response = asyncio.run(static.handle_index(None))
+  assert response.headers["Content-Security-Policy"] == "frame-ancestors 'self'"
+  assert response.headers["X-Frame-Options"] == "SAMEORIGIN"

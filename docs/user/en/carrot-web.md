@@ -109,8 +109,10 @@ See [Understanding Settings](settings.md) for ranges, units, and a safe tuning o
 `Settings → Device → My Traverse key` shows this comma's My Traverse (Wayon) device ID and key. The comma uses the key to upload drives and photos to the My Traverse cloud.
 
 - At first only the first and last four characters of the key are shown.
-- `Copy key`, after confirmation, copies the whole key to the clipboard. Carrot Web runs over plain http, so the browser may block automatic copying; the key is then shown in a field below for you to copy by long-press. It is cleared after 60 seconds or when you leave the app.
-- The page only opens when you reach the comma's own address, from the same Wi-Fi or your own Tailscale at `http://<comma address>:7000`. Requests embedded in other sites or relayed through another server are refused.
+- `키 복사` (Copy key), after confirmation, copies the whole key to the clipboard. Carrot Web runs over plain http, so the browser may block automatic copying; the key is then shown in a field below for you to copy by long-press. It is cleared after 60 seconds, or when you switch to another app or another Carrot Web page. If you leave while the key is still being fetched, the fetched key is dropped and never shown.
+- A copied key stays on the clipboard. After pasting it, copy something else over it.
+- The page only opens when you reach the comma's own address, from the same Wi-Fi or your own Tailscale at `http://<comma address>:7000`. Requests carrying proxy headers (`Forwarded`, `X-Forwarded-*`, `Via`, `X-Real-IP`) are refused, and other sites cannot show Carrot Web inside their own page.
+- These checks only narrow who can reach the key page; they do not prove you are the owner. Anyone who can open Carrot Web from the same Wi-Fi or Tailscale can also read the same file through its terminal and tools. Do not put the comma on a Wi-Fi you do not trust, or share it with others on Tailscale.
 - Anyone holding the key can reach the cloud as this comma. Do not send it to others or paste it anywhere public.
 - If no key is reported, the comma has no `/data/wayon_cloud/config.json`. That file is not part of the git branch, so a new comma needs it installed separately.
 
