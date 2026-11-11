@@ -2,12 +2,17 @@
 
 // My Traverse (Wayon) device key. The status call returns only a masked key; the full key is fetched
 // once per explicit copy and, when the browser cannot copy on plain http, shown for 60 s and cleared.
-// Hiding the tab, leaving the page or re-rendering the panel bumps the generation, so a reveal that is still
-// in flight is dropped instead of putting the key back on screen.
+// Hiding the tab, leaving the page, going back to the settings group list or re-rendering the panel bumps
+// the generation, so a reveal or copy that is still in flight is dropped instead of putting the key back
+// on screen or onto the clipboard. While the key is shown, a short watch clears it as soon as the panel
+// stops being visible by any other route.
 
 const WAYON_KEY_REVEAL_MS = 60000;
+const WAYON_KEY_WATCH_MS = 250;
 let wayonKeyState = null;
 let wayonKeyHideTimer = null;
+let wayonKeyWatchTimer = null;
+let wayonKeyShownArea = null;
 let wayonKeyGeneration = 0;
 
 function renderWayonKeyPanel() {
@@ -48,16 +53,30 @@ function hideWayonKey() {
   wayonKeyGeneration += 1;
   if (wayonKeyHideTimer) clearTimeout(wayonKeyHideTimer);
   wayonKeyHideTimer = null;
+  if (wayonKeyWatchTimer) clearInterval(wayonKeyWatchTimer);
+  wayonKeyWatchTimer = null;
+  // The panel may already be gone from the page (another settings group was rendered); clear the field
+  // we filled even if it is detached.
+  if (wayonKeyShownArea) { wayonKeyShownArea.value = ""; wayonKeyShownArea.hidden = true; }
+  wayonKeyShownArea = null;
   const area = document.getElementById("wayonKeyReveal");
   if (area) { area.value = ""; area.hidden = true; }
   const label = document.getElementById("wayonKeyRevealLabel");
   if (label) label.hidden = true;
 }
 
-function wayonKeyStillWanted(generation) {
-  if (generation !== wayonKeyGeneration || document.hidden) return false;
+function wayonKeyPanelVisible() {
+  if (document.hidden) return false;
   const panel = document.getElementById("wayonKeyPanel");
-  return Boolean(panel) && !panel.closest?.("[hidden], [inert]");
+  if (!panel || panel.isConnected === false) return false;
+  if (panel.closest?.("[hidden], [inert], .hidden")) return false;
+  // display:none anywhere above (the settings items screen once it is put away) leaves no boxes.
+  if (typeof panel.getClientRects === "function" && panel.getClientRects().length === 0) return false;
+  return true;
+}
+
+function wayonKeyStillWanted(generation) {
+  return generation === wayonKeyGeneration && wayonKeyPanelVisible();
 }
 
 function wayonKeyFramed() {
@@ -82,25 +101,43 @@ function updateWayonKeyPanel(value) {
   wayonKeyText("wayonKeyError", configured ? " " : wayonKeyReasonText(value?.reason));
 }
 
-async function wayonCopyText(text) {
-  if (window.isSecureContext && navigator.clipboard?.writeText) {
-    try {
-      await navigator.clipboard.writeText(text);
-      return true;
-    } catch {}
+function wayonCanUseClipboardApi() {
+  return Boolean(window.isSecureContext && navigator.clipboard?.writeText);
+}
+
+async function wayonClipboardApiCopy(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    return false;
   }
+}
+
+// Synchronous, so nothing can change between the caller's last check and the copy.
+function wayonLegacyCopy(text) {
   const area = document.createElement("textarea");
-  area.value = text;
-  area.setAttribute("readonly", "");
-  area.style.position = "fixed";
-  area.style.opacity = "0";
-  document.body.appendChild(area);
-  area.select();
   let copied = false;
-  try { copied = document.execCommand("copy"); } catch {}
-  area.value = "";
-  area.remove();
+  try {
+    area.value = text;
+    area.setAttribute("readonly", "");
+    area.style.position = "fixed";
+    area.style.opacity = "0";
+    document.body.appendChild(area);
+    area.select();
+    copied = document.execCommand("copy");
+  } catch {
+    copied = false;
+  } finally {
+    area.value = "";
+    area.remove();
+  }
   return copied;
+}
+
+async function wayonCopyText(text) {
+  if (wayonCanUseClipboardApi() && await wayonClipboardApiCopy(text)) return true;
+  return wayonLegacyCopy(text);
 }
 
 async function refreshWayonKey() {
@@ -131,8 +168,14 @@ async function copyWayonKey() {
     body: JSON.stringify({ confirmed: true }),
   });
   if (!wayonKeyStillWanted(generation)) return;
-  const copied = await wayonCopyText(result.key);
-  if (!wayonKeyStillWanted(generation)) return;
+  let copied = false;
+  if (wayonCanUseClipboardApi()) {
+    copied = await wayonClipboardApiCopy(result.key);
+    // A write the browser already finished cannot be taken back, but a cancelled copy must not start the
+    // fallback or show the key.
+    if (!wayonKeyStillWanted(generation)) return;
+  }
+  if (!copied) copied = wayonLegacyCopy(result.key);
   if (copied) {
     hideWayonKey();
     wayonKeyText("wayonKeyMessage", "키를 복사했습니다. 붙여 넣은 뒤에는 다른 글을 복사해 클립보드를 덮어 두세요.");
@@ -143,6 +186,7 @@ async function copyWayonKey() {
   area.value = result.key;
   area.hidden = false;
   label.hidden = false;
+  wayonKeyShownArea = area;
   area.focus();
   area.select();
   wayonKeyText("wayonKeyMessage", "자동 복사가 막혀 있어 아래 칸에 표시했습니다.");
@@ -151,6 +195,9 @@ async function copyWayonKey() {
     hideWayonKey();
     wayonKeyText("wayonKeyMessage", "표시한 키를 지웠습니다.");
   }, WAYON_KEY_REVEAL_MS);
+  wayonKeyWatchTimer = setInterval(() => {
+    if (!wayonKeyPanelVisible()) hideWayonKey();
+  }, WAYON_KEY_WATCH_MS);
 }
 
 function bindWayonKeyPanel(container) {
@@ -172,3 +219,6 @@ function bindWayonKeyPanel(container) {
 document.addEventListener("visibilitychange", () => { if (document.hidden) hideWayonKey(); });
 window.addEventListener("pagehide", hideWayonKey);
 window.addEventListener("carrot:pagechange", hideWayonKey);
+window.addEventListener("carrot:settingscreenchange", (event) => {
+  if (event?.detail?.screen !== "items") hideWayonKey();
+});

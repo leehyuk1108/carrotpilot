@@ -164,3 +164,28 @@ def test_carrot_web_main_page_refuses_to_be_framed_by_other_sites(feature, monke
   response = asyncio.run(static.handle_index(None))
   assert response.headers["Content-Security-Policy"] == "frame-ancestors 'self'"
   assert response.headers["X-Frame-Options"] == "SAMEORIGIN"
+
+
+def test_the_index_html_alias_gets_the_same_frame_guard(feature, monkeypatch, tmp_path):
+  from openpilot.selfdrive.carrot.server.features import static
+
+  async def loaded():
+    return "<!doctype html><title>t</title>", False
+
+  monkeypatch.setattr(static, "_load_index_after_update", loaded)
+  monkeypatch.setattr(static, "_inject_bootstrap", lambda html: html)
+  (tmp_path / "index.html").write_text("<!doctype html><title>t</title>")
+  (tmp_path / "app.js").write_text("void 0;")
+  app = web.Application()
+  static.register(app)
+  app.router.add_static("/", str(tmp_path), show_index=True)
+
+  async def run():
+    async with TestClient(TestServer(app)) as client:
+      for path, guarded in (("/", True), ("/index.html", True), ("/app.js", False)):
+        for method in ("GET", "HEAD"):
+          response = await client.request(method, path)
+          assert response.status == 200, (method, path)
+          assert (response.headers.get("Content-Security-Policy") == "frame-ancestors 'self'") is guarded, (method, path)
+          assert (response.headers.get("X-Frame-Options") == "SAMEORIGIN") is guarded, (method, path)
+  asyncio.run(run())

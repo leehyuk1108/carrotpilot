@@ -24,11 +24,18 @@ function deferred() {
 
 function panelContext({ secure = false, clipboardOk = true, execOk = false, reveal = null, clipboard = null, framed = false } = {}) {
   const elements = new Map();
+  const view = { panelShown: true };
   const element = (id) => {
-    if (!elements.has(id)) elements.set(id, { id, textContent: "", value: "", hidden: true, disabled: false, focus() {}, select() {} });
+    if (!elements.has(id)) elements.set(id, {
+      id, textContent: "", value: "", hidden: true, disabled: false, focus() {}, select() {},
+      getClientRects: () => (view.panelShown ? [{}] : []),
+      classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+    });
     return elements.get(id);
   };
   const timers = [];
+  const intervals = [];
+  const legacy = { created: 0, exec: 0, lastValue: null };
   const posted = [];
   const copied = [];
   const listeners = { document: {}, window: {} };
@@ -36,12 +43,16 @@ function panelContext({ secure = false, clipboardOk = true, execOk = false, reve
   const self = {};
   const document = {
     hidden: false, addEventListener: on("document"), getElementById: element,
-    createElement: () => ({ value: "", style: {}, setAttribute() {}, select() {}, remove() {} }),
-    body: { appendChild() {} },
-    execCommand: () => execOk,
+    createElement: () => { legacy.created += 1; return { value: "", style: {}, setAttribute() {}, select() {}, remove() {} }; },
+    body: { appendChild(area) { legacy.lastValue = area.value; } },
+    execCommand: () => { legacy.exec += 1; return execOk; },
   };
   const context = vm.createContext({
-    window: { isSecureContext: secure, addEventListener: on("window"), self, top: framed ? {} : self },
+    window: {
+      isSecureContext: secure, addEventListener: on("window"), self, top: framed ? {} : self,
+      dispatchEvent: (event) => (listeners.window[event.type] || []).forEach((fn) => fn(event)),
+    },
+    CustomEvent: class { constructor(type, init = {}) { this.type = type; this.detail = init.detail; } },
     navigator: { clipboard: { writeText: async (text) => {
       if (clipboard) await clipboard.promise;
       if (!clipboardOk) throw new Error("denied");
@@ -50,6 +61,8 @@ function panelContext({ secure = false, clipboardOk = true, execOk = false, reve
     document,
     setTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers.length; },
     clearTimeout() {},
+    setInterval: (fn, ms) => { intervals.push({ fn, ms, live: true }); return intervals.length; },
+    clearInterval: (id) => { if (intervals[id - 1]) intervals[id - 1].live = false; },
     appConfirm: async () => true,
     getJson: async () => ({ ok: true, configured: true, device_id: "dev-1", endpoint_host: "cloud.example.test", key_masked: "wyn_…9z9z", key_length: 52, csrf: "tok" }),
     requestJson: async (url, options) => {
@@ -59,9 +72,10 @@ function panelContext({ secure = false, clipboardOk = true, execOk = false, reve
     },
   });
   vm.runInContext(read("js/pages/wayon_key.js"), context);
-  const fire = (target, type) => (listeners[target][type] || []).forEach((fn) => fn({ type }));
+  const fire = (target, type, detail) => (listeners[target][type] || []).forEach((fn) => fn({ type, detail }));
   const hideTab = () => { document.hidden = true; fire("document", "visibilitychange"); };
-  return { context, element, timers, posted, copied, fire, hideTab };
+  const tickWatch = () => intervals.filter((t) => t.live).forEach((t) => t.fn());
+  return { context, element, timers, intervals, posted, copied, legacy, view, fire, hideTab, tickWatch };
 }
 
 const settle = () => new Promise((resolve) => setImmediate(resolve));
@@ -126,7 +140,7 @@ test("a reveal that answers after the tab was hidden is dropped, not shown", asy
 
 test("a failed clipboard write that finishes after the tab was hidden does not fall back to showing the key", async () => {
   const clipboard = deferred();
-  const { context, element, posted, hideTab } = panelContext({ secure: true, clipboardOk: false, execOk: false, clipboard });
+  const { context, element, posted, legacy, hideTab } = panelContext({ secure: true, clipboardOk: false, execOk: true, clipboard });
   await context.refreshWayonKey();
   const pending = context.copyWayonKey();
   await settle();
@@ -136,6 +150,85 @@ test("a failed clipboard write that finishes after the tab was hidden does not f
   await pending;
   assert.equal(element("wayonKeyReveal").value, "");
   assert.equal(element("wayonKeyReveal").hidden, true);
+  assert.equal(legacy.created, 0);
+  assert.equal(legacy.exec, 0);
+});
+
+test("a failed clipboard write that finishes after leaving the page does not try the legacy copy", async () => {
+  const clipboard = deferred();
+  const { context, legacy, fire } = panelContext({ secure: true, clipboardOk: false, execOk: true, clipboard });
+  await context.refreshWayonKey();
+  const pending = context.copyWayonKey();
+  await settle();
+  fire("window", "carrot:pagechange");
+  clipboard.resolve();
+  await pending;
+  assert.equal(legacy.created, 0);
+  assert.equal(legacy.exec, 0);
+});
+
+test("when the clipboard API fails while the panel is still shown, the legacy copy runs and is cleaned up", async () => {
+  const { context, element, legacy } = panelContext({ secure: true, clipboardOk: false, execOk: true });
+  await context.refreshWayonKey();
+  await context.copyWayonKey();
+  assert.equal(legacy.exec, 1);
+  assert.equal(legacy.lastValue, "SECRET-KEY-VALUE");
+  assert.equal(element("wayonKeyReveal").value, "");
+  assert.match(element("wayonKeyMessage").textContent, /복사했습니다/);
+});
+
+test("going back to the settings group list clears a shown key at once", async () => {
+  const { context, element, fire } = panelContext({ secure: false, execOk: false });
+  await context.refreshWayonKey();
+  await context.copyWayonKey();
+  assert.equal(element("wayonKeyReveal").value, "SECRET-KEY-VALUE");
+  fire("window", "carrot:settingscreenchange", { screen: "items" });
+  assert.equal(element("wayonKeyReveal").value, "SECRET-KEY-VALUE");
+  fire("window", "carrot:settingscreenchange", { screen: "groups" });
+  assert.equal(element("wayonKeyReveal").value, "");
+  assert.equal(element("wayonKeyReveal").hidden, true);
+});
+
+test("a reveal that answers after going back to the group list neither copies nor shows the key", async () => {
+  const reveal = deferred();
+  const { context, element, copied, legacy, fire } = panelContext({ secure: true, execOk: true, reveal });
+  await context.refreshWayonKey();
+  const pending = context.copyWayonKey();
+  await settle();
+  fire("window", "carrot:settingscreenchange", { screen: "groups" });
+  reveal.resolve();
+  await pending;
+  assert.deepEqual(copied, []);
+  assert.equal(legacy.exec, 0);
+  assert.equal(element("wayonKeyReveal").value, "");
+});
+
+test("a reveal that answers after the panel stopped being visible by any route is dropped", async () => {
+  const reveal = deferred();
+  const { context, element, copied, legacy, view } = panelContext({ secure: false, execOk: true, reveal });
+  await context.refreshWayonKey();
+  const pending = context.copyWayonKey();
+  await settle();
+  view.panelShown = false;
+  reveal.resolve();
+  await pending;
+  assert.deepEqual(copied, []);
+  assert.equal(legacy.exec, 0);
+  assert.equal(element("wayonKeyReveal").value, "");
+});
+
+test("a shown key is cleared by the watch once the panel is no longer visible, e.g. after a settings tab change", async () => {
+  const { context, element, intervals, view, tickWatch } = panelContext({ secure: false, execOk: false });
+  await context.refreshWayonKey();
+  await context.copyWayonKey();
+  assert.equal(element("wayonKeyReveal").value, "SECRET-KEY-VALUE");
+  assert.equal(intervals.filter((t) => t.live && t.ms === 250).length, 1);
+  tickWatch();
+  assert.equal(element("wayonKeyReveal").value, "SECRET-KEY-VALUE");
+  view.panelShown = false;
+  tickWatch();
+  assert.equal(element("wayonKeyReveal").value, "");
+  assert.equal(intervals.filter((t) => t.live).length, 0);
 });
 
 test("leaving the page inside the app clears a shown key and drops a reveal in flight", async () => {
@@ -162,4 +255,59 @@ test("Carrot Web framed by another page refuses to fetch the key", async () => {
   await context.refreshWayonKey();
   await assert.rejects(context.copyWayonKey(), /다른 화면 안에/);
   assert.equal(posted.length, 0);
+});
+
+function settingScreenFunction() {
+  const source = read("js/shared/ui/navigation.js");
+  const start = source.indexOf("function showSettingScreen(");
+  const end = source.indexOf("\n}\n", start);
+  assert.ok(start >= 0 && end > start);
+  return source.slice(start, end + 3);
+}
+
+function settingScreens(context) {
+  const screen = (name) => ({
+    name, style: { display: "" }, classList: {
+      set: new Set(), add(c) { this.set.add(c); }, remove(c) { this.set.delete(c); }, contains(c) { return this.set.has(c); },
+      toggle() {},
+    },
+  });
+  Object.assign(context, {
+    screenGroups: screen("groups"), screenItems: screen("items"), settingScreenHost: null, settingGroupTransitionLock: false,
+    settingScreenTransitionToken: 0, settingScreenHideTimer: null, clearPendingScreenHide: () => null,
+    syncSettingSplitLayoutClass() {}, btnBackGroups: null, settingTitle: { textContent: "" }, UI_STRINGS: { ko: {} }, LANG: "ko",
+    CURRENT_GROUP: "WayonKey", CURRENT_PAGE: "setting", isCompactLandscapeMode: () => false, requestAnimationFrame: (fn) => fn(),
+    history: { pushState() {}, replaceState() {} },
+  });
+  context.window.matchMedia = () => ({ matches: true });
+  context.window.setTimeout = (fn) => fn();
+  vm.runInContext(settingScreenFunction(), context);
+}
+
+test("the real settings back-to-groups transition clears a shown key before the items screen is put away", async () => {
+  const { context, element } = panelContext({ secure: false, execOk: false });
+  settingScreens(context);
+  await context.refreshWayonKey();
+  await context.copyWayonKey();
+  assert.equal(element("wayonKeyReveal").value, "SECRET-KEY-VALUE");
+  context.showSettingScreen("items");
+  assert.equal(element("wayonKeyReveal").value, "SECRET-KEY-VALUE");
+  context.showSettingScreen("groups");
+  assert.equal(element("wayonKeyReveal").value, "");
+  assert.equal(context.screenItems.style.display, "none");
+});
+
+test("the real settings back-to-groups transition during a reveal leaves nothing copied or shown", async () => {
+  const reveal = deferred();
+  const { context, element, copied, legacy } = panelContext({ secure: true, execOk: true, reveal });
+  settingScreens(context);
+  await context.refreshWayonKey();
+  const pending = context.copyWayonKey();
+  await settle();
+  context.showSettingScreen("groups");
+  reveal.resolve();
+  await pending;
+  assert.deepEqual(copied, []);
+  assert.equal(legacy.exec, 0);
+  assert.equal(element("wayonKeyReveal").value, "");
 });
