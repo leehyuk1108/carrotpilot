@@ -32,6 +32,12 @@ LOW_SPEED_Y_NN = [12, 3, 1, 0]
 
 LAT_PLAN_MIN_IDX = 5
 
+NNFF_FROGPILOT_PARITY_CARS = ("CHEVROLET_TRAVERSE", "CHEVROLET_TRAILBLAZER", "CHEVROLET_TRAILBLAZER_CC", "CHEVROLET_TRAX")
+
+def get_low_speed_factor(v_ego, nn_table):
+  # FrogPilot's NNFF (and twilsonco's original) uses the smaller NN low-speed table.
+  return np.interp(v_ego, LOW_SPEED_X, LOW_SPEED_Y_NN if nn_table else LOW_SPEED_Y)**2
+
 def get_predicted_lateral_jerk(lat_accels, t_diffs):
   # compute finite difference between subsequent model_data.acceleration.y values
   # this is just two calls of np.diff followed by an element-wise division
@@ -130,6 +136,13 @@ class LatControlTorque(LatControl):
       self.error_deque = deque(maxlen=history_check_frames[0])
       self.past_future_len = len(self.past_times) + len(self.nn_future_times)
 
+    # The Traverse runs FrogPilot's donor NNFF model (Trailblazer). On the Traverse, Trailblazer and Trax,
+    # match FrogPilot's NNFF where it differs: NN low-speed factor, steering-rate/planned jerk kept on a
+    # steering-angle car, and desired jerk taken over the lateral delay instead of SteerActuatorDelay + 0.3 s.
+    self.nnff_frogpilot_parity = self.use_nnff and CP.carFingerprint in NNFF_FROGPILOT_PARITY_CARS
+    if self.nnff_frogpilot_parity:
+      self.desired_lat_jerk_time = self.nn_time_offset
+
 
   def update_live_torque_params(self, latAccelFactor, latAccelOffset, friction):
     if self.lateralTorqueCustom > 0:
@@ -180,6 +193,8 @@ class LatControlTorque(LatControl):
         if self.use_nnff or self.use_nnff_lite:
           actual_curvature_rate = -VM.calc_curvature(math.radians(CS.steeringRateDeg), CS.vEgo, 0.0)
           actual_lateral_jerk = actual_curvature_rate * CS.vEgo ** 2
+          if not math.isfinite(actual_lateral_jerk):
+            actual_lateral_jerk = 0.0
       else:
         if len(CC.angularVelocity) >= 3:
           actual_curvature_llk = CC.angularVelocity[2] / CS.vEgo #llk.angularVelocityCalibrated.value[2] / CS.vEgo
@@ -194,7 +209,7 @@ class LatControlTorque(LatControl):
       actual_lateral_accel = actual_curvature * CS.vEgo ** 2
       lateral_accel_deadzone = curvature_deadzone * CS.vEgo ** 2
 
-      low_speed_factor = np.interp(CS.vEgo, LOW_SPEED_X, LOW_SPEED_Y)**2
+      low_speed_factor = get_low_speed_factor(CS.vEgo, self.nnff_frogpilot_parity)
       setpoint = desired_lateral_accel + low_speed_factor * desired_curvature
       measurement = actual_lateral_accel + low_speed_factor * actual_curvature
       
@@ -211,7 +226,9 @@ class LatControlTorque(LatControl):
         desired_lateral_jerk = (np.interp(self.desired_lat_jerk_time, ModelConstants.T_IDXS, model_data.acceleration.y) - desired_lateral_accel) / self.desired_lat_jerk_time
         lookahead_lateral_jerk = get_lookahead_value(predicted_lateral_jerk[LAT_PLAN_MIN_IDX:friction_upper_idx], desired_lateral_jerk)
 
-        if self.use_steering_angle or lookahead_lateral_jerk == 0.0:
+        # With FrogPilot parity the steering-angle car keeps the steering-rate jerk, as FrogPilot does:
+        # the NN sees the planned jerk ahead of a curve and the measured jerk damps winding/unwinding.
+        if (self.use_steering_angle and not self.nnff_frogpilot_parity) or lookahead_lateral_jerk == 0.0:
           lookahead_lateral_jerk = 0.0
           actual_lateral_jerk = 0.0
           self.lat_accel_friction_factor = 1.0

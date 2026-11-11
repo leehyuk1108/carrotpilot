@@ -453,6 +453,7 @@
           "params": [
             "DriverMonitoringEnabled",
             "DriverMonitoringMode",
+            "GmClusterTakeSteering",
             "SimulationIgnorePhoneDM",
             "CarrotVisionEnabled",
             "MuteDoor",
@@ -466,7 +467,8 @@
           "zh": "车辆辅助",
           "params": [
             "MaxAngleFrames",
-            "SpeedFromPCM"
+            "SpeedFromPCM",
+            "AutoStopOff"
           ]
         },
         {
@@ -548,7 +550,8 @@
                 "ClusterHudTheme",
                 "ClusterNaviMapTheme",
                 "ClusterNaviMapType",
-                "ClusterNaviMapFps"
+                "ClusterNaviMapFps",
+                "NavdyAmbientDarkOff"
               ]
             },
             {
@@ -1816,6 +1819,45 @@
       "unit": 1
     },
     {
+      "group": "주행튜닝",
+      "name": "CruiseDelay",
+      "title": "오토크루즈 재진입 지연시간 x0.01초(12권장)",
+      "descr": "진입실패율 높으면 낮추고 \n 폴트가 잦으면 높인다",
+      "egroup": "LONG",
+      "etitle": "CruiseDelay.x0.01s(12)",
+      "edescr": "",
+      "min": 0,
+      "max": 40,
+      "default": 12,
+      "unit": 1
+    },
+    {
+      "group": "주행튜닝",
+      "name": "ResumeDelay",
+      "title": "리쥼재진입 지연시간.x0.01초(6권장)",
+      "descr": "리쥼이 느리면 낮추고 \n 폴트가 잦으면 높인다.",
+      "egroup": "LONG",
+      "etitle": "ResumeDelay.x0.01s(6)",
+      "edescr": "",
+      "min": 0,
+      "max": 40,
+      "default": 6,
+      "unit": 1
+    },
+    {
+      "group": "가속설정",
+      "name": "AccelForce",
+      "title": "리쥼 가속도: 1346",
+      "descr": "리쥼 가속도 \n\n 세이프티 최대 가스값 기준(카메라 롱컨 1346)",
+      "egroup": "ACCEL",
+      "etitle": "Accel for Resume: 1346",
+      "edescr": "Acceleration for Resume",
+      "min": 0,
+      "max": 1346,
+      "default": 1346,
+      "unit": 10
+    },
+    {
       "group": "오토크루즈",
       "name": "AutoCruiseControl",
       "title": "오토크루즈제어(HKG only)",
@@ -1995,6 +2037,24 @@
     },
     {
       "group": "시작",
+      "name": "AutoStopOff",
+      "title": "오토스톱 자동 끄기(트래버스)",
+      "descr": "0: 사용 안 함 / 1: 시동마다 엔진 오토스톱을 자동으로 끔\n트래버스 + 오픈파일럿 롱컨 전용 시험 기능. 시동 5초 뒤 정차 중이고 크루즈·오파가 꺼져 있을 때 오토스톱 끄기 버튼 누름(0x1E1)을 대신 보내고, 꺼짐 상태(0x1F4)가 1이 됐는지 확인합니다. 이미 꺼져 있으면 누르지 않고, 주행마다 최대 3번만 시도합니다. 실제 버튼 신호 사이에 끼워 넣는 방식이라 차에서 동작·경고 여부는 아직 미검증입니다.",
+      "egroup": "START",
+      "etitle": "Auto stop off (Traverse)",
+      "edescr": "0: off / 1: turn engine auto stop off on every ignition.\nExperimental, Traverse with openpilot longitudinal only. 5 s after start, while stopped with cruise and openpilot off, it sends the auto-stop-off switch press (0x1E1) and checks that the auto-stop-off state (0x1F4) becomes 1. It never presses when auto stop is already off and tries at most 3 times per drive. The press is added between the real button frames, so vehicle behavior and warnings are not verified yet.",
+      "cgroup": "启动设置",
+      "ctitle": "自动关闭自动启停（Traverse）",
+      "cdescr": "0: 不使用 / 1: 每次点火自动关闭发动机自动启停\n实验功能，仅限Traverse且使用openpilot纵向控制。点火5秒后，在停车且巡航和openpilot关闭时，发送自动启停关闭按键（0x1E1），并确认关闭状态（0x1F4）变为1。已关闭时不会按键，每次行驶最多尝试3次。按键插入在真实按键帧之间，实车行为和警告尚未验证。",
+      "min": 0,
+      "max": 1,
+      "default": 0,
+      "unit": 1,
+      "control": "select",
+      "options": {"ko": ["0 사용 안 함", "1 자동 끄기"], "en": ["0 Off", "1 Auto off"], "zh": ["0 关闭", "1 自动关闭"]}
+    },
+    {
+      "group": "시작",
       "name": "MaxTimeOffroadMin",
       "title": "자동전원OFF(분)",
       "descr": "시동이 꺼지고 해당 시간이 경과하면 콤마가 꺼집니다.",
@@ -2096,6 +2156,40 @@
         ]
       },
       "risk": "high"
+    },
+    {
+      "group": "시작",
+      "name": "GmClusterTakeSteering",
+      "title": "GM 계기판 핸들 경고 (실험)",
+      "descr": "트래버스 SDGM 카메라 하네스에서 오픈파일럿 롱컨을 쓸 때만 동작하는 실험 기능입니다. 다른 차종이나 순정 롱컨에서는 저장해도 아무것도 바꾸지 않습니다. 오픈파일럿은 평소 순정 카메라에 손이 핸들에 있다고 알려 순정 'Take Steering' 경고를 숨깁니다. 이 설정을 켜면 오픈파일럿의 운전자 감시 경고가 떠 있는 동안만 손을 뗐다고 알려 순정 카메라의 계기판 핸들 경고 표시를 유도합니다.\n0: 끔(기본)\n1: 경고음이 나는 감시 경고(2단계 이상)부터\n2: 첫 감시 경고(1단계)부터\n조향 명령과 운전자 감시 판단은 바뀌지 않고, 실제 핸들 토크 신호도 그대로입니다. 제조사 매뉴얼에 따르면 Take Steering 경고가 반복되면 순정 차선유지(LKA)가 잠시 사용할 수 없게 될 수 있습니다. 순정 카메라의 반응 시간, 경고음, 순정 차선유지 설정 필요 여부, 다른 계기판 메시지와 반복 경고 뒤 복구는 실차에서 확인되지 않았습니다. 약 0.5초 안에 재부팅 없이 적용됩니다.",
+      "egroup": "START",
+      "etitle": "GM cluster Take Steering alert (experimental)",
+      "edescr": "Experimental; works only on a Traverse with the SDGM camera harness and openpilot longitudinal control. On other cars or with stock longitudinal control the saved value changes nothing. openpilot normally tells the stock camera that hands are on the wheel, which hides the stock 'Take Steering' alert. When enabled, it reports hands off only while openpilot's own driver-monitoring alert is up, so the stock camera can show its steering alert on the instrument cluster.\n0: Off (default)\n1: From the audible monitoring alert (level 2 and above)\n2: From the first monitoring alert (level 1)\nSteering commands, driver-monitoring decisions and the real steering torque signal are unchanged. GM's manual says Lane Keep Assist may become temporarily unavailable after repeated Take Steering alerts. The camera's delay, chime, whether stock Lane Keep Assist must be on, other cluster messages and recovery after repeated alerts are not yet verified in the car. Applies within about 0.5 seconds without rebooting.",
+      "cgroup": "启动设置",
+      "ctitle": "GM 仪表盘握方向盘警告（实验）",
+      "cdescr": "实验功能，仅在使用 SDGM 摄像头线束且由 openpilot 纵向控制的 Traverse 上生效；其他车型或原厂纵向控制时保存的值不改变任何内容。openpilot 平时告诉原厂摄像头双手在方向盘上，从而隐藏原厂“Take Steering”警告。开启后，仅在 openpilot 驾驶员监控警告显示期间报告双手离开，以诱导原厂摄像头在仪表盘上显示握方向盘警告。\n0：关闭（默认）\n1：从有提示音的监控警告（2级及以上）开始\n2：从第一次监控警告（1级）开始\n转向指令、驾驶员监控判断和实际方向盘扭矩信号均不变。根据厂商手册，重复出现 Take Steering 警告后原厂车道保持（LKA）可能暂时不可用。摄像头的反应时间、提示音、是否需要开启原厂车道保持、其他仪表信息以及重复警告后的恢复尚未在实车验证。约0.5秒内生效，无需重启。",
+      "min": 0,
+      "max": 2,
+      "default": 0,
+      "unit": 1,
+      "control": "select",
+      "options": {
+        "ko": [
+          "끔",
+          "경고음 단계부터",
+          "첫 경고부터"
+        ],
+        "en": [
+          "Off",
+          "From audible alert",
+          "From first alert"
+        ],
+        "zh": [
+          "关闭",
+          "从提示音警告开始",
+          "从第一次警告开始"
+        ]
+      }
     },
     {
       "group": "시작",
@@ -4376,6 +4470,37 @@
           "10 FPS",
           "20 FPS",
           "30 FPS"
+        ]
+      }
+    },
+    {
+      "group": "외부 HUD",
+      "name": "NavdyAmbientDarkOff",
+      "title": "불빛 없는 어두운 길에서 Navdy 앰비언트 끄기",
+      "descr": "Navdy에 연결한 앰비언트 라이트를 주행 중 어둡고 주변에 가로등·도심 불빛이 없는 길에서 끕니다. 어두움은 차의 오토라이트 조도 센서, 불빛 여부는 오토 하이빔 카메라의 판단을 씁니다(현재 쉐보레 트래버스만).\n0: 끔(기본)\n1: 켬\n어두움이 5초, 카메라의 불빛 없음이 10초 이어지면 끄고, 도심 불빛이 15초 이어지거나 밝음이 10초 이어지면 원래 조명으로 돌아옵니다. 카메라는 낮에 불빛을 판단하지 않으므로 낮 터널에서는 끄지 않고, 밤에도 어두워진 뒤 카메라가 불빛이나 상향등 권장을 한 번 보고하기 전(시동 직후 등)에는 끄지 않습니다. P단에 넣거나 주행 중 문을 열면 바로 원래 조명으로 돌아오므로 시동을 끈 뒤 하차 조명과 주차 중 조명은 그대로 동작합니다. 과속 경고 깜빡임은 Navdy 앱 쪽 동작이라 꺼진 동안에도 켜질 수 있습니다. Wayon 앱에서 직접 켠 앰비언트 수동 조명이 있으면 그쪽이 우선합니다. 약 2초 안에 재부팅 없이 적용됩니다.",
+      "egroup": "CLUSTER HUD",
+      "etitle": "Navdy ambient off on unlit dark roads",
+      "edescr": "Turns the ambient light connected to the Navdy off while driving on dark roads without street or city lights. Darkness comes from the car's auto-headlamp light sensor and the lights check from the auto high beam camera (Chevrolet Traverse only for now).\n0: Off (default)\n1: On\nThe light turns off after 5 seconds of darkness with 10 seconds of no lights from the camera, and returns to its normal lighting after 15 seconds of city lights or 10 seconds of brightness. The camera does not judge lights in daylight, so daytime tunnels never turn it off, and at night it stays on until the camera has reported lights or a high beam advice once since it got dark (for example right after starting). Shifting to Park or opening a door returns it to normal lighting right away, so exit and parked lighting work as before once the car is off. The overspeed warning blink comes from the Navdy app and can still light it while it is off. A manual ambient light set from the Wayon app takes priority. Applies within about 2 seconds without rebooting.",
+      "cgroup": "外部 HUD",
+      "ctitle": "在无路灯的暗路上关闭 Navdy 氛围灯",
+      "cdescr": "行驶中在天黑且周围没有路灯或城市灯光的道路上，关闭连接到 Navdy 的氛围灯。天黑判断使用车辆自动大灯光线传感器，灯光判断使用自动远光灯摄像头（目前仅限雪佛兰 Traverse）。\n0：关闭（默认）\n1：开启\n天黑持续 5 秒且摄像头判断无灯光持续 10 秒后关闭；城市灯光持续 15 秒或变亮持续 10 秒后恢复原来的灯光。摄像头白天不判断灯光，因此白天的隧道不会关闭；夜间在天黑后摄像头首次报告灯光或建议远光之前（例如刚启动时）也不会关闭。挂入 P 挡或开门会立即恢复原来的灯光，因此熄火后的下车灯光和停车灯光照常工作。超速警告闪烁由 Navdy 应用控制，关闭期间仍可能点亮。在 Wayon 应用中手动设置的氛围灯优先。约 2 秒内生效，无需重启。",
+      "min": 0,
+      "max": 1,
+      "default": 0,
+      "unit": 1,
+      "control": "select",
+      "options": {
+        "ko": [
+          "끄기",
+          "켜기"
+        ],
+        "en": [
+          "Off",
+          "On"
+        ],
+        "zh": [
+          "关闭",
+          "开启"
         ]
       }
     },

@@ -29,6 +29,8 @@ from openpilot.selfdrive.car.car_specific import MockCarState
 from openpilot.selfdrive.car.openpilot_toggle import CruiseMainOpenpilotToggle
 from openpilot.selfdrive.car.stock_lane_markings import TraverseStockLaneMarkings, UNKNOWN_LANES, lane_boottime_ns
 from openpilot.selfdrive.car.outside_air_temp import TraverseOutsideAirTemp
+from openpilot.selfdrive.car.ambient_light import TraverseAmbientLight, TraverseCameraLights
+from openpilot.selfdrive.car.vehicle_care import TraverseVehicleCare, clear_vehicle_care, fill_vehicle_care
 from openpilot.selfdrive.controls.lib.lateral_readiness import LateralStartupGate
 from openpilot.selfdrive.carrot.xiaoge.xiaoge_vision import (
   XiaogeVisionResult,
@@ -192,6 +194,9 @@ class Car:
     self.xiaoge_vision_result: XiaogeVisionResult | None = None
     self.stock_lane_markings = TraverseStockLaneMarkings() if self.CP.carFingerprint == GM_CAR.CHEVROLET_TRAVERSE else None
     self.outside_air_temp = TraverseOutsideAirTemp() if self.CP.carFingerprint == GM_CAR.CHEVROLET_TRAVERSE else None
+    self.ambient_light = TraverseAmbientLight() if self.CP.carFingerprint == GM_CAR.CHEVROLET_TRAVERSE else None
+    self.camera_lights = TraverseCameraLights() if self.CP.carFingerprint == GM_CAR.CHEVROLET_TRAVERSE else None
+    self.vehicle_care = TraverseVehicleCare() if self.CP.carFingerprint == GM_CAR.CHEVROLET_TRAVERSE else None
     self.xiaoge_blindspot_sources = (False, False, False, False)
     self.xiaoge_blindspot_sources_published = None
     self.xiaoge_blindspot_sources_published_ns = 0
@@ -262,6 +267,40 @@ class Car:
       oat = CS.outsideAirTemp
       oat.valid = celsius is not None and CS.canValid and not CS.canTimeout
       oat.celsius = celsius if oat.valid else 0.0
+    if self.ambient_light is not None:
+      try:
+        light_now_ns = can_list[-1][0] if REPLAY and can_list else lane_boottime_ns()
+        dark = self.ambient_light.update(can_list, light_now_ns)
+        lights = self.camera_lights.update(can_list, light_now_ns) if self.camera_lights is not None else None
+        light = CS.ambientLight
+        can_ok = CS.canValid and not CS.canTimeout
+        light.valid = dark is not None and can_ok
+        light.dark = bool(dark) if light.valid else False
+        light.cameraValid = lights is not None and can_ok
+        light.cameraLights = lights if light.cameraValid else 0
+      except Exception:
+        # Display-only field: never let it stop card. Log once, then stop decoding.
+        cloudlog.exception("ambient light decode failed; disabled for this card run")
+        self.ambient_light = None
+        self.camera_lights = None
+        try:
+          CS.ambientLight.valid = False
+          CS.ambientLight.cameraValid = False
+        except Exception:
+          pass
+    if self.vehicle_care is not None:
+      try:
+        care_now_ns = can_list[-1][0] if REPLAY and can_list else lane_boottime_ns()
+        care_values = self.vehicle_care.update(can_list, care_now_ns)
+        fill_vehicle_care(CS.vehicleCare, care_values, CS.canValid and not CS.canTimeout)
+      except Exception:
+        # Display/report-only field: never let it stop card. Log once, then stop decoding.
+        cloudlog.exception("vehicle care decode failed; disabled for this card run")
+        self.vehicle_care = None
+        try:
+          clear_vehicle_care(CS.vehicleCare)
+        except Exception:
+          pass
     #self.t1 = time.monotonic()
 
     can_rcv_valid = len(can_strs) > 0

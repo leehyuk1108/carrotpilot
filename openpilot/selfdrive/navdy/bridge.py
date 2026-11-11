@@ -19,7 +19,8 @@ from openpilot.selfdrive.navdy.navigation import FEEDBACK_PATH, STATUS_PATH
 from openpilot.selfdrive.navdy.transport import AdbTransport, LineReader, encode_frame
 from openpilot.selfdrive.navdy.bluetooth import BluetoothTransport, CONFIG_PATH, configured_connection
 from openpilot.selfdrive.navdy.connection import UsbProbe
-from openpilot.selfdrive.navdy.ambient import DoorMonitor, read_override, road_state
+from openpilot.selfdrive.navdy.ambient import DoorMonitor, led_gamma, read_override, road_state
+from openpilot.selfdrive.navdy.ambient_dark import DarkAmbient
 from openpilot.selfdrive.navdy.model_navigation import ModelNavigationTracker, ModelRouteCache, age_model_feedback
 from openpilot.selfdrive.navdy.diagnostics import LinkDiagnostics, public_error
 from openpilot.selfdrive.navdy.feedback import is_no_observation
@@ -179,7 +180,19 @@ def usb_recovery_allowed(sm):
   return recovery_messages(sm, time.monotonic())
 
 
-def live_payload(sm, sequence, *, sources=None, door_open=False, ambient_override=None, vehicles=None):
+def dark_ambient_inputs(sm, sources=None) -> dict:
+  """Road state, darkness and camera light view for DarkAmbient, from fresh messages only."""
+  from openpilot.selfdrive.car.ambient_light import ambient_dark, camera_lights
+  sources = display_sources(sm) if sources is None else sources
+  car_state = sm['carState'] if sources['carState']['usable'] else None
+  known_road = road_state(sm['deviceState'] if sources['deviceState']['usable'] else None,
+                          sm['pandaStates'] if sources['pandaStates']['usable'] else None)
+  usable = known_road is True and car_state is not None
+  return {'onroad': known_road, 'dark': ambient_dark(car_state) if usable else None,
+          'camera': camera_lights(car_state) if usable else None}
+
+
+def live_payload(sm, sequence, *, sources=None, door_open=False, ambient_override=None, vehicles=None, dark_ambient=None):
   from openpilot.selfdrive.navdy.display import payload_from_messages, resolve_operating_state
   sources = display_sources(sm) if sources is None else sources
 
@@ -212,6 +225,15 @@ def live_payload(sm, sequence, *, sources=None, door_open=False, ambient_overrid
                                                      door_open=door_open, gear=payload['gear'] if known_road else 'unknown')
   else:
     payload['ambientState'] = 'disconnected'
+  ambient_override = led_gamma(ambient_override)
+  if dark_ambient is not None:
+    light = dark_ambient_inputs(sm, sources)
+    dark_override = dark_ambient.update(now=time.monotonic(), wall=time.time(), dark=light['dark'],
+                                        onroad=light['onroad'], door_open=door_open,
+                                        parked=payload['gear'] == 'park', user_override=ambient_override,
+                                        camera=light['camera'])
+    if dark_override is not None:
+      ambient_override = dark_override
   if ambient_override is not None:
     payload['ambientOverride'] = ambient_override
   if payload['active'] and 'navPathLeft' not in payload:
@@ -255,6 +277,8 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
     model_route_cache = ModelRouteCache(model_route_path, atomic_json)
     vehicles = VehicleOverlay()
     doors = DoorMonitor()
+    dark_ambient = DarkAmbient()
+    observe_dark = True
     diagnostics = LinkDiagnostics(cloudlog.event, journal=LocalJournal())
     recovery_events = queue.Queue(maxsize=32)
     def record_recovery(*args, **kwargs):
@@ -282,6 +306,13 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
           diagnostics.record(*args, **kwargs)
         sm.update(0)
         sequence += 1
+        if observe_dark:
+          try:
+            # Also while the Navdy link is down, so a stop or daylight in between clears the camera record.
+            dark_ambient.observe(now=time.monotonic(), **dark_ambient_inputs(sm))
+          except Exception:
+            observe_dark = False
+            cloudlog.exception('navdy dark ambient observe failed; observing only with payloads')
         if tick - config_checked >= 5:
           config_checked = tick
           old_policy = policy
@@ -398,7 +429,7 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
           captured_ns = time.monotonic_ns()
           sources = display_sources(sm)
           payload = live_payload(sm, sequence, sources=sources, door_open=doors.door_open,
-                                 ambient_override=read_override(), vehicles=vehicles)
+                                 ambient_override=read_override(), vehicles=vehicles, dark_ambient=dark_ambient)
           payload['modelRoute'] = model_navigation.request(time.monotonic())
           car_state = sm['carState']
           diagnostics.sources(sources, payload,
@@ -476,7 +507,8 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
                                            'ambientState': payload['ambientState'], 'sources': sources,
                                            'vehicleCount': len(payload['navVehicles'])},
                                'power': payload['displayPower'],
-                               'ambient': {'doorOpen': payload['doorOpen'], 'gmDoorMonitor': doors.gm, 'error': doors.error},
+                               'ambient': {'doorOpen': payload['doorOpen'], 'gmDoorMonitor': doors.gm, 'error': doors.error,
+                                           'darkOff': dark_ambient.state()},
                                'lastDisplayDropout': last_display_dropout,
                                'lastHandover': last_handover, 'wirelessConfigured': peer is not None,
                                'transportPolicy': policy, 'connectionMode': connection_mode,

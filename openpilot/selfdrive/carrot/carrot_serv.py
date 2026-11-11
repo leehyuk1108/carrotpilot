@@ -89,6 +89,16 @@ import collections
 COUNTDOWN_NEW_TARGET_MIN_JUMP_M = 20.0
 SCHOOL_ZONE_GAS_OVERRIDE_TIMEOUT_S = 3.0
 
+# Navdy section hold. Phone navigation stops reporting a section (and the road
+# limit) when it loses GPS, e.g. in a long tunnel with section enforcement, while
+# turn guidance continues by dead reckoning. The physical section has not ended,
+# so its last limit is kept for the remaining distance measured by ego motion.
+SECTION_HOLD_MIN_DISTANCE_M = 50.0      # a section that had (nearly) ended is not held
+SECTION_HOLD_RELEASE_S = 3.0            # location-backed absence needed before releasing
+SECTION_HOLD_TIME_FACTOR = 1.5          # time bound (odometry-failure guard only):
+SECTION_HOLD_TIME_MARGIN_S = 60.0       #   remaining / 30 km/h x 1.5 + 60 s
+SECTION_HOLD_MIN_SPEED_KPH = 30.0
+
 
 class CarrotServ:
   def __init__(self):
@@ -234,6 +244,12 @@ class CarrotServ:
     self.navdy_section_limit = 0
     self.navdy_section_distance = 0
     self._navdy_section_hazard = None
+    self._navdy_section_last = None
+    self.navdy_section_hold = None
+    self.navdy_section_release_since = None
+    self.navdy_section_effective_distance = 0.0
+    self.device_gps_fix_since = None
+    self.section_clock = time.monotonic
 
     self.debugText = ""
 
@@ -1001,14 +1017,76 @@ class CarrotServ:
         self.navdy_section_distance = speed.section_remaining_distance_m
     self._navdy_section_hazard = hazard
 
+  def _navdy_section_end(self):
+    reader = getattr(self, 'navdy_navigation', None)
+    section_end = getattr(reader, 'section_end', None)
+    try:
+      return section_end() if callable(section_end) else ''
+    except Exception:
+      return ''
+
+  def _navdy_section_absence_confirmed(self, now):
+    """The phone has a valid location again and still reports no section.
+
+    Both confirmations run concurrently: a continuous comma GPS fix and a fresh
+    Navdy road limit without any section, each for SECTION_HOLD_RELEASE_S.
+    """
+    if not (self.carrot_navi_active and self.carrot_navi_road_limit_valid):
+      self.navdy_section_release_since = None
+      return False
+    if getattr(self, 'navdy_section_release_since', None) is None:
+      self.navdy_section_release_since = now
+    gps_since = getattr(self, 'device_gps_fix_since', None)
+    return (gps_since is not None and now - gps_since >= SECTION_HOLD_RELEASE_S
+            and now - self.navdy_section_release_since >= SECTION_HOLD_RELEASE_S)
+
+  def _release_navdy_section_hold(self, reason):
+    if getattr(self, 'navdy_section_hold', None) is not None:
+      print(f'[navdy section] hold released: {reason}', flush=True)
+    self.navdy_section_hold = None
+    self.navdy_section_release_since = None
+
   def _navdy_section_speed(self, delta_dist):
-    self.navdy_section_distance = max(0, getattr(self, 'navdy_section_distance', 0) - max(0, delta_dist))
-    if (self.accepts_navigation(NAVI_SOURCE_NAVDY) and self.external_navigation_active
-        and self.active_carrot > 0 and not self.carrot_navi_off_route
-        and self.autoNaviSpeedCtrlMode > 0 and self.navdy_section_distance > 0):
-      limit = getattr(self, 'navdy_section_limit', 0) * self.autoNaviSpeedSafetyFactor
-      if limit > 0:
-        return limit
+    delta = max(0, delta_dist)
+    now = getattr(self, 'section_clock', time.monotonic)()
+    self.navdy_section_distance = max(0, getattr(self, 'navdy_section_distance', 0) - delta)
+    enabled = self.accepts_navigation(NAVI_SOURCE_NAVDY) and self.autoNaviSpeedCtrlMode > 0
+    limit = getattr(self, 'navdy_section_limit', 0)
+    if (enabled and self.external_navigation_active and self.active_carrot > 0 and not self.carrot_navi_off_route
+        and self.navdy_section_distance > 0 and limit > 0):
+      # A fresh observation always owns the cap, including a different or new section.
+      self._release_navdy_section_hold('fresh section')
+      self._navdy_section_last = (limit, self.navdy_section_distance)
+      self.navdy_section_effective_distance = self.navdy_section_distance
+      return limit * self.autoNaviSpeedSafetyFactor
+
+    last, self._navdy_section_last = getattr(self, '_navdy_section_last', None), None
+    end = self._navdy_section_end() if enabled else ''
+    hold = getattr(self, 'navdy_section_hold', None)
+    if not enabled or end or self.carrot_navi_off_route:
+      self._release_navdy_section_hold(end or ('off_route' if self.carrot_navi_off_route else 'disabled'))
+    elif hold is None and last is not None and last[1] - delta > SECTION_HOLD_MIN_DISTANCE_M:
+      held_limit, remaining = last[0], last[1] - delta
+      duration = remaining / (SECTION_HOLD_MIN_SPEED_KPH / 3.6) * SECTION_HOLD_TIME_FACTOR
+      self.navdy_section_hold = [held_limit, remaining, now + duration + SECTION_HOLD_TIME_MARGIN_S]
+      self.navdy_section_release_since = None
+      print(f'[navdy section] holding {held_limit} km/h for {remaining:.0f} m after the source stopped reporting it',
+            flush=True)
+    elif hold is not None:
+      hold[1] = max(0.0, hold[1] - delta)
+
+    hold = getattr(self, 'navdy_section_hold', None)
+    if hold is not None:
+      if hold[1] <= 0:
+        self._release_navdy_section_hold('distance consumed')
+      elif now >= hold[2]:
+        self._release_navdy_section_hold('time bound')
+      elif self._navdy_section_absence_confirmed(now):
+        self._release_navdy_section_hold('location-backed absence')
+      else:
+        self.navdy_section_effective_distance = hold[1]
+        return hold[0] * self.autoNaviSpeedSafetyFactor
+    self.navdy_section_effective_distance = self.navdy_section_distance
     return 250.0
 
   def _apply_carrot_navi_speed(self, navi: CarrotNaviControl, *, preserve_navdy_distance=False):
@@ -1236,10 +1314,14 @@ class CarrotServ:
     if sm.updated[gps_service]:
       if sm.valid[gps_service] and gps.hasFix:
         sources.put('device', gps.latitude, gps.longitude, gps.bearingDeg, gps.speed, sm.recv_time[gps_service])
+        if getattr(self, 'device_gps_fix_since', None) is None:
+          self.device_gps_fix_since = now
       else:
         sources.remove('device')
+        self.device_gps_fix_since = None
     if not sm.alive[gps_service] or not sm.valid[gps_service]:
       sources.remove('device')
+      self.device_gps_fix_since = None
     vehicle = sm['carState'].vehicleGps
     ego_speed = v_ego if math.isfinite(v_ego) and 0 <= v_ego <= 90 else 0.
     if sm.alive['carState'] and sm.valid['carState'] and vehicle.valid:
@@ -1624,7 +1706,7 @@ class CarrotServ:
     display_distances = {'atc': self.xDistToTurn, 'atc2': self.xDistToTurnNext,
                          sdi_source: rear_camera_remaining if rear_camera_holding else max(0.0, self.xSpdDist)}
     if section_speed < 250:
-      display_distances['section'] = self.navdy_section_distance
+      display_distances['section'] = self.navdy_section_effective_distance
     if CS is not None:
       display_distances.update(hda=CS.speedLimitDistance, hda_bump=CS.speedBumpDistance)
     display_candidates = deceleration_candidates(speed_n_sources, display_targets, display_distances)
@@ -1635,6 +1717,14 @@ class CarrotServ:
       desired_speed, source = self._apply_speed_source_gas_floor(
         CS, desired_speed, source, v_ego_kph, road_speed_limit_changed,
       )
+      if source == "gas":
+        # Cameras and sections are never overridden by an accelerator floor, even
+        # when a lower curve or bump target owned the cap when the pedal was pressed.
+        hard = [item for item in speed_n_sources if item[1] in ("cam", "section", "police") and item[0] < 250]
+        if hard:
+          hard_speed, hard_source = min(hard, key=lambda x: x[0])
+          if hard_speed < desired_speed:
+            desired_speed, source = hard_speed, hard_source
 
       self.debugText += f"route={route_speed:.1f}"#f"desired={desired_speed:.1f},{source},g={self.gas_override_speed:.0f}"
 
@@ -1643,7 +1733,7 @@ class CarrotServ:
     speed_countdown_rearmed = False
     turn_countdown_rearmed = False
     if self.autoNaviCountDownMode > 0:
-      speed_countdown_distance = self.navdy_section_distance if section_selected else self._speed_countdown_distance(CS)
+      speed_countdown_distance = self.navdy_section_effective_distance if section_selected else self._speed_countdown_distance(CS)
       left_spd_sec, self.speed_countdown_distance_last, speed_countdown_rearmed = self._countdown_channel(
         speed_countdown_distance, self.speed_countdown_distance_last, self.left_spd_sec, v_ego,
       )
@@ -1678,7 +1768,7 @@ class CarrotServ:
     msg.carrotMan.routeTrafficSegments = [{'endM': end, 'status': status} for end, status in self.route_traffic_segments]
     msg.carrotMan.xSpdType = 4 if section_selected else int(self.xSpdType)
     msg.carrotMan.xSpdLimit = int(section_speed if section_selected else self.xSpdLimit)
-    msg.carrotMan.xSpdDist = int(self.navdy_section_distance if section_selected else self.xSpdDist)
+    msg.carrotMan.xSpdDist = int(self.navdy_section_effective_distance if section_selected else self.xSpdDist)
     msg.carrotMan.xSpdCountDown = int(left_spd_sec)
     msg.carrotMan.xTurnInfo = int(self.xTurnInfo)
     msg.carrotMan.xDistToTurn = int(self.xDistToTurn)

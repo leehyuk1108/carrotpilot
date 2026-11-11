@@ -300,6 +300,33 @@ struct CarState {
     celsius @1 :Float32;
   }
 
+  ambientLight @107 :AmbientLight; # display-only BCM ambient light level (the auto-headlamp light sensor)
+
+  struct AmbientLight {
+    valid @0 :Bool; # false: unsupported car, no fresh frame, or CAN invalid
+    dark @1 :Bool;
+    cameraValid @2 :Bool; # false: unsupported car, no fresh high-beam camera frame, or CAN invalid
+    cameraLights @3 :UInt8; # high-beam camera view: 0 nothing (also idle), 1 street/city lights, 2 high beam advised
+  }
+
+  vehicleCare @108 :VehicleCare; # display-only ECM/battery-sensor maintenance readings (fuel, oil life, odometer, battery)
+
+  struct VehicleCare {
+    # Each *Valid is false for an unsupported car, no fresh frame of that source, or invalid CAN.
+    fuelLevelValid @0 :Bool;
+    fuelLevel @1 :Float32;       # 0..1 of a full tank (gauge sender)
+    engineValid @2 :Bool;        # ECM engine record: fuelUsedCounter and oilLifePercent
+    fuelUsedCounter @3 :UInt16;  # ECM fuel-used accumulator, ~0.0336 mL/count; wraps at 65536, restarts at 0 when the ECM wakes
+    oilLifePercent @4 :Float32;  # engine oil life (the cluster value)
+    odometerValid @5 :Bool;
+    odometerKm @6 :Float64;      # 1/64 km steps
+    batteryValid @7 :Bool;       # battery current sensor
+    batteryVoltage @8 :Float32;  # sensor terminal voltage; reads ~1.1 V above the panda's OBD input
+    batteryCurrent @9 :Float32;  # amps, positive = charging
+    batterySocValid @10 :Bool;
+    batterySocPercent @11 :Float32;
+  }
+
   struct VehicleGps {
     available @0 :Bool;
     valid @1 :Bool; # receive/continuity checks, not a decoded satellite fix flag

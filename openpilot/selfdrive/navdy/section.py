@@ -13,6 +13,8 @@ class SectionTracker:
     self.retired = deque(maxlen=8)
     self.observation = None
     self.deadline = -math.inf
+    # Latest accepted frame's explicit off-route flag; expiry alone never sets it.
+    self.off_route = False
 
   def clear(self):
     # Keep the generation watermark: a heartbeat cannot revive revoked data.
@@ -21,12 +23,14 @@ class SectionTracker:
 
   def accept(self, guidance, relay_age, relay_deadline, now):
     if not isinstance(guidance, dict):
+      self.off_route = False
       self.clear()
       return
     if 'section' in guidance:
       self.supported = True
     section = guidance.get('section')
     if not isinstance(section, dict):
+      self.off_route = False
       self.clear()
       return
     session, sequence, age = (section.get(k) for k in ('session', 'sequence', 'ageMs'))
@@ -34,10 +38,12 @@ class SectionTracker:
         or not isinstance(session, str) or not 1 <= len(session) <= 64
         or type(sequence) is not int or not 0 <= sequence <= 2**53
         or type(age) is not int or not 0 <= age < self.TTL * 1000):
+      self.off_route = False
       self.clear()
       return
     if session in self.retired or (session == self.session and sequence < self.sequence):
       return
+    self.off_route = section.get('offRoute') is True
     if session != self.session:
       if self.session is not None:
         self.retired.append(self.session)

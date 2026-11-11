@@ -27,6 +27,10 @@ from pathlib import Path
 
 
 BLACKBOX_SCHEMA = "wayon-drive-blackbox-package-v1"
+# loggerd keeps a zero-byte <file>.lock beside a file while it records. A power cut can leave one
+# behind for good, which used to hide that route forever. Route work only runs offroad, so a lock
+# untouched for this long is stale.
+RECORDING_LOCK_STALE_S = 600.0
 CAMERA_LAYOUT = "road_blackbox"
 SEGMENT_DURATION_S = 60.0
 STATE_SAMPLE_INTERVAL_S = 0.1
@@ -63,7 +67,7 @@ class WorkLimits:
   max_decoded_log_bytes: int = 64 * 1024 * 1024
   max_total_decoded_bytes: int = 128 * 1024 * 1024
   max_messages: int = 1_000_000
-  max_route_segments: int = 240
+  max_route_segments: int = 720  # route index bound only; packages still read max_package_segments
   max_package_segments: int = 3
   max_signal_bytes: int = 8 * 1024 * 1024
   max_video_bytes: int = 32 * 1024 * 1024
@@ -103,9 +107,21 @@ class WorkBudget:
       raise ResourceLimitExceeded("work deadline exceeded")
 
 
+def recording_lock(directory, now=None, stale_s=RECORDING_LOCK_STALE_S):
+  """True while any loggerd lock in the segment directory was touched within stale_s (or is unreadable)."""
+  now = time.time() if now is None else now
+  for lock in Path(directory).glob("*.lock"):
+    try:
+      if now - lock.stat().st_mtime < stale_s:
+        return True
+    except OSError:
+      return True
+  return False
+
+
 def _open_input(path, max_bytes):
   path = Path(path)
-  if path.is_symlink() or path.parent.is_symlink() or any(path.parent.glob("*.lock")):
+  if path.is_symlink() or path.parent.is_symlink() or recording_lock(path.parent):
     raise WorkAborted("route file is linked or still recording")
   fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
   try:

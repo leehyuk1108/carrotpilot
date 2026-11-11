@@ -6,6 +6,9 @@ import numpy as np
 from opendbc.can.packer import CANPacker
 from opendbc.car import Bus, DT_CTRL, apply_driver_steer_torque_limits, structs, create_gas_interceptor_command
 from opendbc.car.gm import gmcan
+from opendbc.car.gm.auto_resume import GMAutoResume
+from opendbc.car.gm.auto_stop_off import AutoStopOff, BUTTON_MAX_AGE_NS, LATCH_MAX_AGE_NS, feature_now_ns, fresh
+from openpilot.common.swaglog import cloudlog
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.gm.cluster_speed import gm_raw_display_kph_from_cluster_display_kph
 from opendbc.car.gm.manual_auto_hold import manual_hold_supported
@@ -18,6 +21,7 @@ from openpilot.selfdrive.car.cruise import VCruiseCarrot
 VisualAlert = structs.CarControl.HUDControl.VisualAlert
 NetworkLocation = structs.CarParams.NetworkLocation
 LongCtrlState = structs.CarControl.Actuators.LongControlState
+GearShifter = structs.CarState.GearShifter
 
 # Camera cancels up to 0.1s after brake is pressed, ECM allows 0.5s
 CAMERA_CANCEL_DELAY_FRAMES = 10
@@ -28,6 +32,15 @@ MIN_STEER_MSG_INTERVAL_MS = 15
 PITCH_DEADZONE = 0.01 # [radians] 0.01 ? 1% grade
 BRAKE_PITCH_FACTOR_BP = [5., 10.] # [m/s] smoothly revert to planned accel at low speeds
 BRAKE_PITCH_FACTOR_V = [0., 1.] # [unitless in [0,1]]; don't touch
+
+
+def cluster_take_steering_requested(mode, hud_control):
+  """GmClusterTakeSteering: 0 off, 1 while openpilot's DM alert is audible (level >= 2),
+  2 from the first DM alert (level >= 1). driverMonitoringAlert is 0 unless a fresh, enabled DM warns."""
+  if mode not in (1, 2):
+    return False
+  level = int(getattr(hud_control, "driverMonitoringAlert", 0))
+  return level >= (2 if mode == 1 else 1)
 
 
 def get_acc_dashboard_speed_kph(CP, cluster_target_kph):
@@ -68,12 +81,23 @@ class CarController(CarControllerBase):
 
     self.long_pitch = False
     self.use_ev_tables = False
+    self.cluster_take_steering_mode = 0
+    self.cluster_take_steering_supported = self.traverse_sdgm_long
 
     self.pitch = FirstOrderFilter(0., 0.09 * 4, DT_CTRL * 4)  # runs at 25 Hz
     self.accel_g = 0.0
     # GM: AutoResume
     self.activateCruise_after_brake = False
     self.v_cruise_carrot = VCruiseCarrot(self.CP)
+    # 트래버스 오픈파일럿 롱컨: 오토리쥼/오토크루즈 모듈 사용
+    self.traverse_long = CP.carFingerprint == CAR.CHEVROLET_TRAVERSE and CP.openpilotLongitudinalControl
+    self.auto_resume = GMAutoResume(self.CP, self.params) if self.traverse_long else None
+    self.btn_rc_pt = -1
+    # 오토스톱 자동 끄기(AutoStopOff, 기본 0). 판다는 오파 롱컨(pcmCruise=False)에서만 0x1E1 UNPRESS 송신을 허용
+    self.auto_stop_off = AutoStopOff() if self.traverse_long and not CP.pcmCruise else None
+    self._params_rw = Params()
+    self.auto_stop_off_enabled = self._read_auto_stop_off()
+    self.last_other_btn_frame = -1000
 
   @staticmethod
   def calc_pedal_command(accel: float, long_active: bool, car_velocity) -> tuple[float, bool]:
@@ -104,11 +128,12 @@ class CarController(CarControllerBase):
       steerDeltaUp = params.get_int("CustomSteerDeltaUp")
       steerDeltaDown = params.get_int("CustomSteerDeltaDown")
       if steerMax > 0:
-        self.params.STEER_MAX = steerMax
+        self.params.STEER_MAX = min(steerMax, self.params.STEER_MAX_EPS)
       if steerDeltaUp > 0:
         self.params.STEER_DELTA_UP = steerDeltaUp
       if steerDeltaDown > 0:
         self.params.STEER_DELTA_DOWN = steerDeltaDown
+      self.cluster_take_steering_mode = params.get_int("GmClusterTakeSteering")
     self.long_pitch = Params().get_bool("LongPitch")
     self.use_ev_tables = Params().get_bool("EVTable")
 
@@ -180,6 +205,8 @@ class CarController(CarControllerBase):
             can_sends.append(gmcan.create_brake_command(self.packer_ch, CanBus.CHASSIS, apply_brake, idx))
             Params().put_bool_nonblocking("ActivateCruiseAfterBrake", True) # cruise.py에 브레이크 ON신호 전달
             self.activateCruise_after_brake = True # 브레이크신호는 한번만 보내고 초기화
+      elif self.traverse_long:
+        self.auto_resume.latch_activate(CS.out.activateCruise)
       else:
         auto_cruise_control = self.v_cruise_carrot.autoCruiseControl
         if not manual_brake and (CS.out.activateCruise or auto_cruise_control > 0) and \
@@ -188,9 +215,12 @@ class CarController(CarControllerBase):
             self.last_button_frame = self.frame
             can_sends.append(gmcan.create_buttons(self.packer_pt, CanBus.POWERTRAIN, (CS.buttons_counter + 1) % 4, CruiseButtons.DECEL_SET))
         
-      # Gas/regen, brakes, and UI commands - all at 25Hz
-      if self.frame % 4 == 0:
-      # GM: softHold
+      # Gas/regen, brakes, and UI commands - all at 25Hz. The 2021-22
+      # Trailblazer changes the 0x2CB counter phase between cold/inactive and
+      # active ACC states, so follow that stock command rather than ASCM_2CD.
+      longitudinal_command_due, idx = gmcan.get_longitudinal_command_timing(self.CP, CS, self.frame)
+      if longitudinal_command_due:
+        # GM: softHold
         stopping = actuators.longControlState == LongCtrlState.stopping or CS.out.softHoldActive > 0
 
         # Pitch compensated acceleration;
@@ -237,8 +267,6 @@ class CarController(CarControllerBase):
           press_regen_paddle = False
           self.apply_gas = self.params.INACTIVE_REGEN
 
-        idx = (self.frame // 4) % 4
-
         if self.CP.flags & GMFlags.CC_LONG.value:
           if CC.longActive and CS.out.vEgo > self.CP.minEnableSpeed:
             # Using extend instead of append since the message is only sent intermittently
@@ -268,12 +296,31 @@ class CarController(CarControllerBase):
           else:
             acc_engaged = CC.enabled
 
-          if not manual_brake and actuators.longControlState in [LongCtrlState.stopping, LongCtrlState.starting]:
+          self.apply_gas, self.apply_brake, at_full_stop, near_stop = gmcan.apply_driver_gas_override(
+            self.CP.carFingerprint, CS.out.gasPressed, self.params.INACTIVE_REGEN,
+            self.apply_gas, self.apply_brake, at_full_stop, near_stop,
+          )
+          self.apply_gas, self.apply_brake, at_full_stop, near_stop, acc_engaged = gmcan.apply_stock_longitudinal_gate(
+            self.CP.carFingerprint, CS.cam_stock_long_active, self.params.INACTIVE_REGEN,
+            self.apply_gas, self.apply_brake, at_full_stop, near_stop, acc_engaged,
+          )
+
+          send_gas = self.apply_gas
+          if self.traverse_long:
+            send_gas, self.apply_brake, at_full_stop, acc_engaged = self.auto_resume.update(
+              CC, CS, self.frame, self.apply_gas, self.apply_brake, at_full_stop, lambda btn: self.send_btn(CS, can_sends, btn),
+              bool(manual_brake))
+            # 판다는 2CB apply 상승 에지로 권한을 주므로, 오픈파일럿이 꺼져 있으면 apply와 가스 펄스를 내보내지 않음
+            acc_engaged = acc_engaged and CC.enabled
+            if not CC.longActive:
+              send_gas = self.apply_gas
+          elif not manual_brake and actuators.longControlState in [LongCtrlState.stopping, LongCtrlState.starting]:
             if (self.frame - self.last_button_frame) * DT_CTRL > 0.04:
               self.last_button_frame = self.frame
               can_sends.append(gmcan.create_buttons(self.packer_pt, CanBus.POWERTRAIN, (CS.buttons_counter + 1) % 4, CruiseButtons.RES_ACCEL))
           # GasRegenCmdActive needs to be 1 to avoid cruise faults. It describes the ACC state, not actuation
-          can_sends.append(gmcan.create_gas_regen_command(self.packer_pt, CanBus.POWERTRAIN, self.apply_gas, idx, acc_engaged, at_full_stop))
+          can_sends.append(gmcan.create_gas_regen_command(self.packer_pt, CanBus.POWERTRAIN, send_gas, idx,
+                                                          acc_engaged, at_full_stop, self.CP.carFingerprint))
           if manual_brake:
             self.apply_brake = manual_brake
             near_stop, at_full_stop = True, False
@@ -287,8 +334,21 @@ class CarController(CarControllerBase):
           if self.traverse_sdgm_long:
             # Request up to three display bars even in standby, without asserting ACC active.
             dashboard_gap_level = min(hud_control.leadDistanceBars, 3) if CS.out.canValid and CS.out.cruiseState.available else 0
-          can_sends.append(gmcan.create_acc_dashboard_command(self.packer_pt, CanBus.POWERTRAIN, CC.enabled,
-                                                              dashboard_speed_kph, hud_control, send_fcw, gap_level=dashboard_gap_level))
+          is_trailblazer = self.CP.carFingerprint == CAR.CHEVROLET_TRAILBLAZER
+          stock_acc_status = CS.cam_acc_status if is_trailblazer else None
+          # Reverse/park and a stock ACC veto must retain the Trailblazer
+          # camera state instead of reasserting ACCCmdActive from CC.enabled.
+          dashboard_enabled = gmcan.get_acc_dashboard_enabled(
+            self.CP.carFingerprint, CC.enabled, CS.out.gearShifter == GearShifter.drive,
+            CS.cam_stock_long_active, stock_acc_status,
+          )
+
+          # Do not emit the generic invalid Trailblazer state during startup;
+          # wait at most one camera cycle for a stock 0x370 template.
+          if not is_trailblazer or stock_acc_status is not None:
+            can_sends.append(gmcan.create_acc_dashboard_command(self.packer_pt, CanBus.POWERTRAIN, dashboard_enabled,
+                                                                dashboard_speed_kph, hud_control, send_fcw,
+                                                                stock_acc_status, gap_level=dashboard_gap_level))
       else:
         # to keep accel steady for logs when not sending gas
         accel += self.accel_g
@@ -334,9 +394,16 @@ class CarController(CarControllerBase):
           can_sends.append(gmcan.create_buttons(self.packer_pt, CanBus.CAMERA, (CS.buttons_counter + 1) % 4, CruiseButtons.CANCEL))
 
     if self.CP.networkLocation == NetworkLocation.fwdCamera:
-      # Silence "Take Steering" alert sent by camera, forward PSCMStatus with HandsOffSWlDetectionStatus=1
+      # Silence "Take Steering" alert sent by camera, forward PSCMStatus with HandsOffSWlDetectionStatus=1.
+      # GmClusterTakeSteering instead reports hands-off while openpilot's own DM alert is up, so the stock
+      # camera can show its "Take Steering" message on the cluster. Steering commands are unchanged.
       if self.frame % 10 == 0:
-        can_sends.append(gmcan.create_pscm_status(self.packer_pt, CanBus.CAMERA, CS.pscm_status))
+        hands_off = self.cluster_take_steering_supported and \
+          cluster_take_steering_requested(self.cluster_take_steering_mode, hud_control)
+        can_sends.append(gmcan.create_pscm_status(self.packer_pt, CanBus.CAMERA, CS.pscm_status, hands_off=hands_off))
+
+    if self.auto_stop_off is not None:
+      self._update_auto_stop_off(CC, CS, can_sends, now_nanos)
 
     new_actuators = actuators.as_builder()
     new_actuators.accel = accel
@@ -348,6 +415,62 @@ class CarController(CarControllerBase):
 
     self.frame += 1
     return new_actuators, can_sends
+
+  def _read_auto_stop_off(self):
+    try:
+      return self._params_rw.get_int("AutoStopOff") == 1
+    except Exception:
+      return False
+
+  def _update_auto_stop_off(self, CC, CS, can_sends, now_nanos):
+    if self.frame % 10 == 0:
+      self.auto_stop_off_enabled = self._read_auto_stop_off()
+    # Other 0x1E1 senders (auto cruise SET, auto resume RES) keep their own counters. While we press and briefly
+    # after, drop their frames so no two injected frames share a counter slot; otherwise keep 1 s away from them.
+    # CANCEL is never dropped: it stays queued and aborts our attempt instead.
+    others = [dat for addr, dat, _ in can_sends if addr == 0x1E1]
+    if others:
+      cancel = any(((dat[5] >> 4) & 0x7) == CruiseButtons.CANCEL for dat in others)
+      if self.auto_stop_off.holds_bus() and not cancel:
+        can_sends[:] = [m for m in can_sends if m[0] != 0x1E1]
+        cloudlog.warning(f"[gm autostopoff] dropped other 0x1E1 while pressing: {[d.hex() for d in others]}")
+      else:
+        self.last_other_btn_frame = self.frame
+    now = feature_now_ns(now_nanos)
+    # A CarState without these inputs (e.g. a test stand-in) reads as stale, so nothing is pressed.
+    latch_ts = getattr(CS, 'auto_stop_off_ts', 0)
+    latch = getattr(CS, 'auto_stop_off', 0)
+    latch_fresh = fresh(latch_ts, now, LATCH_MAX_AGE_NS)
+    can_ok = (getattr(CS.out, 'canValid', False) and not getattr(CS.out, 'canTimeout', True) and
+              fresh(getattr(CS, 'button_frame_ts', 0), now, BUTTON_MAX_AGE_NS))
+    press = self.auto_stop_off.update(
+      enabled=self.auto_stop_off_enabled,
+      latch_fresh=latch_fresh,
+      latch=latch,
+      counter=int(CS.buttons_counter),
+      standstill=CS.out.standstill,
+      cruise_engaged=CS.out.cruiseState.enabled,
+      op_enabled=CC.enabled,
+      can_ok=can_ok,
+      buttons_idle=getattr(CS, 'buttons_idle', False),
+      driver_switch=getattr(CS, 'button_auto_stop_pressed', False),
+      other_btn_recent=(self.frame - self.last_other_btn_frame) < 100,
+      latch_zero_seen=getattr(CS, 'auto_stop_off_zero_seen', False),
+    )
+    if press:
+      can_sends.append(gmcan.create_buttons(self.packer_pt, CanBus.POWERTRAIN, (int(CS.buttons_counter) + 1) % 4,
+                                            CruiseButtons.UNPRESS, park_brake=getattr(CS, 'button_park_brake', 0),
+                                            auto_stop_off=1))
+    if self.auto_stop_off.event is not None:
+      cloudlog.warning(f"[gm autostopoff] {self.auto_stop_off.event} latch={latch} fresh={latch_fresh}")
+
+  # 버튼 송신 (첫 송신때만 BCM 카운터를 읽고 이후 자체 증가)
+  def send_btn(self, CS, can_sends, cruise_btn):
+    bus = self.auto_resume.button_bus()
+    if self.btn_rc_pt < 0:
+      self.btn_rc_pt = int(CS.buttons_counter) & 0x3
+    self.btn_rc_pt = (self.btn_rc_pt + 1) & 0x3
+    can_sends.append(gmcan.create_buttons(self.packer_pt, bus, self.btn_rc_pt, cruise_btn))
 
   # GM: AutoResume
   def brake_input(self, brake_force):

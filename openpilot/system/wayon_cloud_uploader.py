@@ -6,6 +6,7 @@ import json
 import math
 import os
 import shutil
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -33,9 +34,11 @@ from openpilot.system.wayon_cloud_policy import UploadBackoff, bounded_interval
 from openpilot.system.wayon_ambient_delivery import AmbientCommandDelivery
 from openpilot.system.wayon_camera import sample_fresh
 from openpilot.system.wayon_drive_report import DriveReportAccumulator
+from openpilot.system.wayon_vehicle_care import TripFuelTracker, VehicleCareStore
+from openpilot.selfdrive.car.vehicle_care import vehicle_care_snapshot
 from openpilot.system.wayon_event_blackbox import (
   BLACKBOX_SCHEMA, CAMERA_LAYOUT, DEFAULT_BLACKBOX_ROOT, WorkAborted, WorkBudget, WorkLimits,
-  ResourceLimitExceeded, build_blackbox_archive, prune_blackbox_archives,
+  ResourceLimitExceeded, build_blackbox_archive, prune_blackbox_archives, recording_lock,
 )
 from openpilot.system.wayon_live_archive import upload_live_capture
 from openpilot.system.wayon_drive_quality import (
@@ -86,6 +89,8 @@ DEFAULT_ROUTE_POINT_MIN_DISTANCE_M = 15.0
 DEFAULT_ROUTE_POINT_LIMIT = 720
 DEFAULT_SNAPSHOT_INTERVAL_OFFROAD = 3600.0
 AMBIENT_OVERRIDE_PATH = Path(os.getenv("WAYON_AMBIENT_OVERRIDE_PATH", "/data/params/d/WayonAmbientOverride"))
+VEHICLE_CARE_PATH = Path(os.getenv("WAYON_VEHICLE_CARE_PATH", str(CONFIG_PATH.with_name("vehicle_care.json"))))
+VEHICLE_CARE_STORE = VehicleCareStore(VEHICLE_CARE_PATH)
 CONFIG_RELOAD_INTERVAL = 60.0
 LOOP_SLEEP_ONROAD = 1.0
 LOOP_SLEEP_OFFROAD = 1.0
@@ -93,12 +98,21 @@ LOG_FILE_CANDIDATES = ("qlog.zst", "qlog.bz2", "qlog")
 ROUTE_LOG_MAX_BYTES = 8 * 1024 * 1024
 ROUTE_LOG_MAX_DECOMPRESSED_BYTES = 32 * 1024 * 1024
 ROUTE_MIN_AVAILABLE_BYTES = 256 * 1024 * 1024
-ROUTE_UPLOAD_SCHEMA = "wayon-carrot-analysis-v4-coverage-receipt-v1"
+# v2: whole-route analysis budget (routes were cut at ~32 minutes); bumping it re-reads recent routes once.
+ROUTE_UPLOAD_SCHEMA = "wayon-carrot-analysis-v4-coverage-receipt-v2"
 ROUTE_RECEIPT_SCHEMA = "wayon-route-upload-receipt-v1"
 ROUTE_RETRY_INTERVAL_S = 300.0
+# A published report whose blackbox packages failed is retried hourly, not every 5 minutes, so it
+# cannot crowd older routes out of the per-cycle limit for its whole 24 h window.
+ROUTE_INCOMPLETE_RETRY_S = 3600.0
+# One qlog decodes in ~0.9 s on the comma (11/08 67-segment route: 61 s). The old single 30 s route
+# deadline cut every route after ~32 segments; scale it with the route, bounded.
+ROUTE_SECONDS_PER_SEGMENT = 2.0
+ROUTE_MAX_SECONDS = 900.0
+ROUTE_MAX_SEGMENTS = 720
 ROUTE_WORK_LIMITS = WorkLimits(max_log_bytes=ROUTE_LOG_MAX_BYTES,
                                max_decoded_log_bytes=ROUTE_LOG_MAX_DECOMPRESSED_BYTES,
-                               max_seconds=30.0)
+                               max_seconds=30.0, max_route_segments=ROUTE_MAX_SEGMENTS)
 DEFAULT_BLACKBOX_UPLOAD_LIMIT_PER_ROUTE = 4
 DEFAULT_BLACKBOX_MAX_UPLOAD_BYTES = 48 * 1024 * 1024
 STATE_SERVICES = ["deviceState", "pandaStates", "gpsLocationExternal", "gpsLocation", "selfdriveState"]
@@ -1111,7 +1125,22 @@ def resolve_onroad_state(device_state_started: bool, started_override: bool | No
   return bool(device_state_started) if started_override is None else bool(started_override)
 
 
-def telemetry_payload(sm, params, device_id, started_override: bool | None = None):
+def vehicle_care_payload(sm, started, store=None):
+  """Fresh CAN maintenance readings while driving, else the last known ones (marked not fresh)."""
+  store = VEHICLE_CARE_STORE if store is None else store
+  snapshot = None
+  if started and sample_fresh(sm, "carState"):
+    try:
+      snapshot = vehicle_care_snapshot(sm["carState"])
+    except Exception:
+      snapshot = None
+  try:
+    return store.update(snapshot)
+  except Exception:
+    return None
+
+
+def telemetry_payload(sm, params, device_id, started_override: bool | None = None, care_store=None):
   device_state = sm["deviceState"]
   device_fresh = sample_fresh(sm, "deviceState")
   panda_state = first_panda_state(sm["pandaStates"]) if sample_fresh(sm, "pandaStates") else None
@@ -1172,6 +1201,7 @@ def telemetry_payload(sm, params, device_id, started_override: bool | None = Non
     "vehicle": vehicle,
     "openpilot": openpilot,
     "cutInRisk": radar_cutin_payload(sm) if started else cutin_risk_stage(0.0),
+    "vehicleCare": vehicle_care_payload(sm, started, care_store),
   }
 
 
@@ -1292,11 +1322,12 @@ def write_route_state(state):
     raise
 
 
-def save_route_progress(route_name, signature, packages, *, complete=False, uploaded=False, receipt=None, skip_reason=None):
+def save_route_progress(route_name, signature, packages, *, complete=False, uploaded=False, receipt=None, skip_reason=None,
+                        retry_s=ROUTE_RETRY_INTERVAL_S):
   state = read_route_state()
   progress = state.get("route_uploads", {})
   entry = {"signature": signature, "packages": packages, "complete": complete,
-           "retryAfter": 0 if complete else time.time() + ROUTE_RETRY_INTERVAL_S}
+           "retryAfter": 0 if complete else time.time() + retry_s}
   confirmed = receipt if receipt is not None else progress.get(route_name, {}).get("confirmedReport")
   if isinstance(confirmed, dict):
     entry["confirmedReport"] = confirmed
@@ -1310,7 +1341,9 @@ def save_route_progress(route_name, signature, packages, *, complete=False, uplo
 
 def mark_route_uploaded(route_name, signature=None, packages=None, complete=True, receipt=None):
   if signature is not None:
-    save_route_progress(route_name, signature, packages or {}, complete=complete, uploaded=True, receipt=receipt)
+    # The report itself was confirmed; only blackbox packages can still be missing here.
+    save_route_progress(route_name, signature, packages or {}, complete=complete, uploaded=True, receipt=receipt,
+                        retry_s=ROUTE_INCOMPLETE_RETRY_S)
     return
   state = read_route_state()
   uploaded_routes = [route for route in state.get("uploaded_routes", []) if route != route_name]
@@ -1360,7 +1393,15 @@ def segment_log_file(segment_dir):
   return None
 
 
+# Set when wayon_cloud stops normally: route work in the background worker stops at its next guard
+# check, so ffmpeg children it owns are still terminated and reaped by _run_ffmpeg's finally.
+ROUTE_WORK_STOP = threading.Event()
+ROUTE_WORKER_STOP_TIMEOUT_S = 3.0
+
+
 def route_summary_allowed(params=None):
+  if ROUTE_WORK_STOP.is_set():
+    return False
   try:
     params = Params() if params is None else params
     return (not params.get_bool("IsOnroad") and params.get_bool("IsOffroad")
@@ -1379,7 +1420,7 @@ def route_log_messages(path, *, budget=None):
   budget.check()
   if path.name not in LOG_FILE_CANDIDATES or not route_summary_allowed():
     raise ValueError("route summary unavailable")
-  if path.is_symlink() or path.parent.is_symlink() or any(path.parent.glob("*.lock")):
+  if path.is_symlink() or path.parent.is_symlink() or recording_lock(path.parent):
     raise WorkAborted("route file is linked or still recording")
   with path.open("rb") as stream:
     compressed = stream.read(ROUTE_LOG_MAX_BYTES + 1)
@@ -1545,13 +1586,18 @@ def should_add_route_point(route, point, last_point_mono, point_mono, point_inte
   return haversine_m(route[-1], point) >= min_distance_m
 
 
+def route_analysis_seconds(segment_count):
+  """CPU deadline for reading one whole route: per segment, never below the old 30 s, bounded."""
+  return min(ROUTE_MAX_SECONDS, max(ROUTE_WORK_LIMITS.max_seconds, ROUTE_SECONDS_PER_SEGMENT * max(0, int(segment_count))))
+
+
 def summarize_route_from_logs(route_group, config, device_id, *, allowed=None):
   if not route_summary_allowed():
     return None
   allowed = route_summary_allowed if allowed is None else allowed
   budget = WorkBudget(allowed, ROUTE_WORK_LIMITS)
-  deadline = budget.deadline
   segments = route_group["segments"]
+  deadline = time.monotonic() + route_analysis_seconds(len(segments))
   indices = [segment for segment, _, _ in segments]
   if (not segments or indices[0] != 0 or len(segments) > budget.limits.max_route_segments
       or any(type(index) is not int or not 0 <= index < budget.limits.max_route_segments for index in indices)
@@ -1577,6 +1623,7 @@ def summarize_route_from_logs(route_group, config, device_id, *, allowed=None):
   cutin_event_count = 0
   previous_cutin_stage = 0
   accumulator = None
+  fuel_tracker = TripFuelTracker()
   read_segments = []
   partial_reasons = set()
   decoded_bytes = 0
@@ -1615,6 +1662,10 @@ def summarize_route_from_logs(route_group, config, device_id, *, allowed=None):
           continue
 
         if which == "carState":
+          try:
+            fuel_tracker.update(msg_mono, msg.carState)
+          except Exception:
+            pass
           try:
             last_vehicle_speed = car_state_speed_payload(msg.carState)
             if last_vehicle_speed.get("speedMps") is not None:
@@ -1742,6 +1793,11 @@ def summarize_route_from_logs(route_group, config, device_id, *, allowed=None):
               "decodedBytes": decoded_bytes, "messagesRead": message_count,
               "processingDurationS": round(time.monotonic() - started_mono, 3)}
   analysis["dataQuality"].update(source="sampled_qlog", **coverage)
+  fuel = fuel_tracker.summary()
+  if fuel is not None:
+    # Stored with the analysis blob (the trips API keeps it whole); partial routes undercount.
+    fuel["partial"] = coverage["partial"]
+    analysis["fuel"] = fuel
 
   return {
     "id": f"{device_id}-{route_name}",
@@ -1840,7 +1896,7 @@ def route_upload_signature(route_group, config, *, allowed=None, device_id=None)
   for segment, directory, log_file in route_group["segments"]:
     budget.check()
     directory, log_file = Path(directory), Path(log_file)
-    if directory.is_symlink() or any(directory.glob("*.lock")):
+    if directory.is_symlink() or recording_lock(directory):
       raise WorkAborted("route is linked or still recording")
     for path in (log_file, *(directory / name for name in ("rlog", "rlog.bz2", "rlog.zst", "qcamera.ts"))):
       if path.is_symlink():
@@ -1963,32 +2019,59 @@ def upload_recent_route_summary(config, device_id):
   max_age = bounded_interval(config.get("route_summary_max_age_s"), DEFAULT_ROUTE_SUMMARY_MAX_AGE, 60, DEFAULT_ROUTE_SUMMARY_MAX_AGE)
   grace = bounded_interval(config.get("route_summary_grace_period_s"), DEFAULT_ROUTE_SUMMARY_GRACE_PERIOD, 0, 3600)
   limit = int(bounded_interval(config.get("route_summary_limit_per_cycle"), 2, 1, 4))
-  deadline = time.monotonic() + bounded_interval(config.get("route_summary_work_seconds"), 90, 1, 120)
+  work_seconds = bounded_interval(config.get("route_summary_work_seconds"), 90, 1, 120)
+  deadline = [time.monotonic() + work_seconds]
 
   def allowed():
-    return time.monotonic() < deadline and route_summary_allowed()
+    return time.monotonic() < deadline[0] and route_summary_allowed()
 
   uploaded = False
   attempted = 0
+  # Order the cycle's work so retries cannot starve history: routes never tried with their current
+  # files first (newest first), then due retries, least recently scheduled first.
+  candidates = []
   for group in recent_route_groups(max_age)[:100]:
-    if attempted >= limit or not allowed():
+    if not allowed():
       break
     if not grace <= time.time() - group["mtime"] <= max_age:
       continue
-    name = group["route_name"]
     try:
       signature = route_upload_signature(group, config, allowed=allowed, device_id=device_id)
-      previous = state.get("route_uploads", {}).get(name, {})
-      if previous.get("signature") == signature:
-        if previous.get("complete") or previous.get("retryAfter", 0) > time.time():
-          continue
+    except WorkAborted:
+      if not allowed():
+        break
+      continue
+    except Exception as exc:
+      print(f"Wayon cloud: route analysis deferred ({type(exc).__name__})")
+      continue
+    previous = state.get("route_uploads", {}).get(group["route_name"], {})
+    if previous.get("signature") == signature:
+      if previous.get("complete") or previous.get("retryAfter", 0) > time.time():
+        continue
+      candidates.append(((1, previous.get("retryAfter", 0)), group, signature, previous))
+    else:
+      candidates.append(((0, -group["mtime"]), group, signature, previous))
+  candidates.sort(key=lambda item: item[0])
+
+  for _, group, signature, previous in candidates:
+    if attempted >= limit or not allowed():
+      break
+    name = group["route_name"]
+    try:
       packages = previous.get("packages", {})
       packages = {key: dict(value) for key, value in packages.items()
                   if isinstance(value, dict) and value.get("status") == "uploaded" and value.get("captureId")} if isinstance(packages, dict) else {}
       attempted += 1
       save_route_progress(name, signature, packages)
+      # Give this route its whole analysis budget plus the usual upload/package time.
+      deadline[0] = max(deadline[0], time.monotonic() + route_analysis_seconds(len(group["segments"])) + work_seconds)
       payload = summarize_route_from_logs(group, config, device_id, allowed=allowed)
-      if payload is None or not allowed():
+      if not allowed():
+        continue
+      if payload is None:
+        # Usually deterministic for these unchanged files (no GPS track, segment 0 unreadable or gone),
+        # so retry hourly instead of every 5 minutes; changed files change the signature at once.
+        save_route_progress(name, signature, packages, skip_reason="no_route_report", retry_s=ROUTE_INCOMPLETE_RETRY_S)
         continue
       if route_report_would_lose_coverage(previous.get("confirmedReport"), payload):
         # Complete only this rejected attempt, not a new upload receipt. Keep the
@@ -2105,7 +2188,56 @@ def capture_offroad_images():
   return enhance_wide_snapshot(wide), driver
 
 
-def main():
+class RouteSummaryWorker:
+  """Runs upload_recent_route_summary off the main loop.
+
+  Reading a long route now takes minutes; done inline it held up ambient commands (60 s expiry),
+  telemetry and event uploads. The work keeps its own offroad/deadline guards.
+  """
+  def __init__(self, target=None):
+    self.target = target
+    self.thread = None
+    self.result = None
+
+  def busy(self):
+    """Running, or finished with a result not collected yet (so a due cycle cannot overwrite it)."""
+    return self.thread is not None
+
+  def start(self, config, device_id):
+    if self.thread is not None:
+      return False
+    target = self.target or upload_recent_route_summary
+    self.result = None
+    ROUTE_WORK_STOP.clear()
+
+    def run():
+      try:
+        target(config, device_id)
+        self.result = True
+      except Exception as exc:
+        self.result = exc
+
+    self.thread = threading.Thread(target=run, name="wayon-route-summary", daemon=True)
+    self.thread.start()
+    return True
+
+  def stop(self, timeout=ROUTE_WORKER_STOP_TIMEOUT_S):
+    """Ask running route work to stop and wait briefly; True once no worker thread is alive."""
+    ROUTE_WORK_STOP.set()
+    thread = self.thread
+    if thread is not None and thread.is_alive():
+      thread.join(timeout)
+    return thread is None or not thread.is_alive()
+
+  def collect(self):
+    """The finished run's result once: True, or the exception it raised. None while idle or running."""
+    if self.thread is None or self.thread.is_alive():
+      return None
+    self.thread = None
+    return self.result
+
+
+def _main_loop(route_worker):
   from openpilot.system.wayon_parking import ApproachSession
   set_core_affinity([0, 1, 2, 3])
   params = Params()
@@ -2234,14 +2366,15 @@ def main():
         })
         next_telemetry = time.monotonic() + telemetry_backoff.failure_delay()
 
-    if not started and now >= next_route_summary:
-      try:
-        upload_recent_route_summary(config, device_id)
-        route_backoff.success()
-        next_route_summary = now + route_summary_interval
-      except Exception as exc:
-        print(f"Wayon cloud: route summary upload failed: {exc}")
-        next_route_summary = time.monotonic() + max(route_summary_interval, route_backoff.failure_delay())
+    finished = route_worker.collect()
+    if finished is True:
+      route_backoff.success()
+      next_route_summary = time.monotonic() + route_summary_interval
+    elif finished is not None:
+      print(f"Wayon cloud: route summary upload failed: {finished}")
+      next_route_summary = time.monotonic() + max(route_summary_interval, route_backoff.failure_delay())
+    if not started and now >= next_route_summary and not route_worker.busy():
+      route_worker.start(config, device_id)
 
     if not started and config.get("snapshots_enabled", True) and now >= next_snapshot:
       if upload_offroad_snapshot(config, device_id, multiframe=parking_burst_pending,
@@ -2253,6 +2386,15 @@ def main():
     previous_started = started
     time.sleep(LOOP_SLEEP_ONROAD if started else LOOP_SLEEP_OFFROAD)
 
+
+def main():
+  route_worker = RouteSummaryWorker()
+  try:
+    _main_loop(route_worker)
+  finally:
+    # Normal SIGINT stop: the worker is a daemon thread, so let its route work (and any ffmpeg child
+    # it owns) wind down at the next guard check instead of vanishing with the process.
+    route_worker.stop()
 
 if __name__ == "__main__":
   main()

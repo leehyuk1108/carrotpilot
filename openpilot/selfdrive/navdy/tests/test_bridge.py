@@ -4,6 +4,7 @@ from types import SimpleNamespace as NS
 import pytest
 
 from openpilot.selfdrive.navdy import bridge
+from openpilot.selfdrive.navdy.ambient_dark import DarkAmbient
 from openpilot.selfdrive.navdy.tests.test_display import car, model, selfdrive
 
 
@@ -37,6 +38,12 @@ def sm(monkeypatch):
 def no_hardware_door_thread(monkeypatch):
   monkeypatch.setattr(bridge, 'DoorMonitor', lambda: NS(start=lambda: None, close=lambda: None,
                                                      door_open=False, gm=True, error=''))
+
+
+@pytest.fixture(autouse=True)
+def dark_ambient_off(monkeypatch):
+  # The device's real NavdyAmbientDarkOff must not leak into run() payload tests.
+  monkeypatch.setattr(bridge, 'DarkAmbient', lambda: DarkAmbient(read=lambda: False))
 
 
 def test_offroad_without_car_messages_keeps_ambient_heartbeat(sm):
@@ -90,11 +97,97 @@ def test_ignition_before_onroad_wakes_without_fabricating_active_telemetry(sm):
   assert not payload['active'] and payload['vEgoKph'] == 0
 
 
+def test_wayon_override_colors_reach_the_hud_gamma_corrected(sm):
+  command = {'mode': 'manual', 'id': 'phone', 'zone1': {'enabled': True, 'rgb': [255, 98, 92], 'brightness': 100},
+             'zone2': {'enabled': True, 'rgb': [255, 255, 255], 'brightness': 99}}
+  payload = bridge.live_payload(sm, 1, ambient_override=command)
+  assert payload['ambientOverride']['zone1']['rgb'] == [255, 31, 27]
+  assert payload['ambientOverride']['zone2']['rgb'] == [255, 255, 255]
+  assert command['zone1']['rgb'] == [255, 98, 92]
+
+
 def test_ambient_override_is_carried_without_changing_display_state(sm):
   command = {'mode': 'profile', 'id': 'test'}
   payload = bridge.live_payload(sm, 1, ambient_override=command)
   assert payload['ambientOverride'] == command
   assert payload['active']
+
+
+class RecordingDark:
+  def __init__(self, result):
+    self.result = result
+    self.calls = []
+
+  def update(self, **kwargs):
+    self.calls.append(kwargs)
+    return self.result
+
+
+def test_dark_ambient_override_replaces_profile_with_car_light_inputs(sm):
+  sm.data['carState'] = car(ambientLight=NS(valid=True, dark=True, cameraValid=True, cameraLights=2))
+  dark = RecordingDark({'mode': 'manual', 'id': 'carrot-dark-1'})
+  payload = bridge.live_payload(sm, 1, ambient_override={'mode': 'profile'}, dark_ambient=dark)
+  assert payload['ambientOverride'] == {'mode': 'manual', 'id': 'carrot-dark-1'}
+  call = dark.calls[0]
+  assert (call['dark'], call['onroad'], call['door_open'], call['camera']) == (True, True, False, 2)
+  assert call['user_override'] == {'mode': 'profile'}
+  assert payload['active'] and payload['ambientState'] == 'onroad'
+
+
+def test_dark_ambient_without_command_keeps_user_override(sm):
+  command = {'mode': 'manual', 'id': 'phone'}
+  payload = bridge.live_payload(sm, 1, ambient_override=command, dark_ambient=RecordingDark(None))
+  assert payload['ambientOverride'] == command
+  assert 'ambientOverride' not in bridge.live_payload(sm, 2, dark_ambient=RecordingDark(None))
+
+
+@pytest.mark.parametrize('state', [car(), car(ambientLight=NS(valid=False, dark=True)),
+                                   car(ambientLight=NS(valid=True, dark=True), canValid=False)])
+def test_dark_ambient_gets_unknown_without_a_valid_reading(sm, state):
+  sm.data['carState'] = state
+  dark = RecordingDark(None)
+  bridge.live_payload(sm, 1, dark_ambient=dark)
+  assert dark.calls[0]['dark'] is None
+
+
+@pytest.mark.parametrize('light,camera', [
+  (NS(valid=True, dark=True), None),
+  (NS(valid=True, dark=True, cameraValid=False, cameraLights=1), None),
+  (NS(valid=True, dark=True, cameraValid=True, cameraLights=0), 0),
+  (NS(valid=True, dark=True, cameraValid=True, cameraLights=1), 1),
+  (NS(valid=True, dark=True, cameraValid=True, cameraLights=7), None),
+])
+def test_dark_ambient_gets_the_camera_light_view(sm, light, camera):
+  sm.data['carState'] = car(ambientLight=light)
+  dark = RecordingDark(None)
+  bridge.live_payload(sm, 1, dark_ambient=dark)
+  assert dark.calls[0]['camera'] == camera
+
+
+def test_dark_ambient_camera_unknown_with_invalid_can(sm):
+  sm.data['carState'] = car(ambientLight=NS(valid=True, dark=True, cameraValid=True, cameraLights=0), canValid=False)
+  dark = RecordingDark(None)
+  bridge.live_payload(sm, 1, dark_ambient=dark)
+  assert dark.calls[0]['camera'] is None
+
+
+@pytest.mark.parametrize('gear,parked', [('park', True), ('drive', False), ('reverse', False)])
+def test_dark_ambient_gets_park_from_the_gear(sm, gear, parked):
+  sm.data['carState'] = car(ambientLight=NS(valid=True, dark=True), gearShifter=gear)
+  dark = RecordingDark(None)
+  bridge.live_payload(sm, 1, dark_ambient=dark)
+  assert dark.calls[0]['parked'] is parked
+
+
+def test_dark_ambient_offroad_and_car_door(sm):
+  sm.data['carState'] = car(ambientLight=NS(valid=True, dark=True), doorOpen=True)
+  dark = RecordingDark(None)
+  bridge.live_payload(sm, 1, dark_ambient=dark)
+  assert dark.calls[0]['door_open'] is True
+  sm.data['deviceState'].started = False
+  sm.data['carState'] = car(ambientLight=NS(valid=True, dark=True))
+  bridge.live_payload(sm, 2, dark_ambient=dark)
+  assert (dark.calls[1]['onroad'], dark.calls[1]['dark'], dark.calls[1]['camera']) == (False, None, None)
 
 
 @pytest.mark.parametrize('service', ['carState', 'selfdriveState'])
@@ -524,6 +617,50 @@ def test_jetson_remains_available_without_working_bluetooth(monkeypatch, tmp_pat
   monkeypatch.setattr(bridge, 'SshTransport', Jetson)
   bridge.run(feedback=tmp_path/'feedback.json', status=tmp_path/'status.json', duration=3)
   assert attempted == (['bluetooth', 'jetson'] if peer else ['jetson'])
+
+
+def test_dark_ambient_camera_record_follows_the_car_while_the_navdy_link_is_down(monkeypatch, tmp_path):
+  from openpilot import cereal
+  clock = NS(ns=100_000_000_000)  # integer nanoseconds: message and clock times stay equal
+  sm = Messages()
+
+  def update(_):
+    for service in bridge.SERVICES:
+      sm.recv_time[service] = clock.ns / 1e9
+      sm.logMonoTime[service] = clock.ns
+    if clock.ns >= 101_500_000_000:
+      sm.data['deviceState'] = NS(started=False)  # ignition off; the link never comes up
+
+  sm.update = update
+  sm.data['carState'] = car(ambientLight=NS(valid=True, dark=True, cameraValid=True, cameraLights=1))
+  ambient = DarkAmbient(read=lambda: True)
+  seen = []
+  observe = ambient.observe
+
+  def recording_observe(**kwargs):
+    observe(**kwargs)
+    seen.append((kwargs['onroad'], kwargs['camera'], ambient.camera_seen))
+
+  ambient.observe = recording_observe
+  ambient.update = lambda **kwargs: pytest.fail('no payload goes out without a link')
+  monkeypatch.setattr(bridge, 'DarkAmbient', lambda: ambient)
+  monkeypatch.setattr(bridge.time, 'monotonic', lambda: clock.ns / 1e9)
+  monkeypatch.setattr(bridge.time, 'monotonic_ns', lambda: clock.ns)
+  monkeypatch.setattr(bridge.time, 'sleep', lambda seconds: setattr(clock, 'ns', clock.ns + round(seconds * 1e9)))
+  monkeypatch.setattr(cereal, 'messaging', NS(SubMaster=lambda _: sm), raising=False)
+  monkeypatch.setattr(bridge, 'configured_connection', lambda _: (None, False))
+  monkeypatch.setattr(bridge, 'jetson_candidates', lambda: [])
+
+  class MissingUsb:
+    def connect(self):
+      raise ConnectionError('No USB')
+    def close(self):
+      pass
+
+  monkeypatch.setattr(bridge, 'AdbTransport', MissingUsb)
+  bridge.run(feedback=tmp_path/'feedback.json', status=tmp_path/'status.json', duration=3)
+  assert (True, 1, True) in seen
+  assert seen[-1] == (False, None, False)
 
 
 def test_jetson_connection_bootstraps_only_inactive_state():

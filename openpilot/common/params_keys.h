@@ -152,6 +152,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"ScreenRecord", {CLEAR_ON_MANAGER_START | CLEAR_ON_OFFROAD_TRANSITION, BOOL} },
     {"CarrotNaviSource", {PERSISTENT, INT, "0"}},
     {"NavdyConnectionMode", {PERSISTENT, INT, "0"}},
+    {"NavdyAmbientDarkOff", {PERSISTENT, BOOL, "0"}},
     {"CarrotNaviDebug", {CLEAR_ON_MANAGER_START, STRING} },
     {"CarrotNaviImage", {CLEAR_ON_MANAGER_START, STRING} },
     {"CarrotNaviWebBootstrapRequest", {CLEAR_ON_MANAGER_START, STRING} },
@@ -231,6 +232,9 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"AutoGasSyncSpeed", {PERSISTENT, INT, "1"} },
     {"ApplyModelSpeed", {PERSISTENT, INT, "0"} },
     {"AutoEngage", {PERSISTENT, INT, "0"}},
+    {"CruiseDelay", {PERSISTENT, INT, "12"}},
+    {"ResumeDelay", {PERSISTENT, INT, "6"}},
+    {"AccelForce", {PERSISTENT, INT, "1346"}},
     {"AlwaysLateral", {PERSISTENT, INT, "1"} },
     {"DisableMinSteerSpeed", {PERSISTENT, INT, "0"}},
     {"AutoCurveSpeedLowerLimit", {PERSISTENT, INT, "30"}},
@@ -390,6 +394,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"CustomSteerDeltaDownLC", {PERSISTENT, INT, "0"}},
 
     {"SpeedFromPCM", {PERSISTENT, INT, "2"}},
+    {"AutoStopOff", {PERSISTENT, INT, "0"}},
     {"MaxTimeOffroadMin", {PERSISTENT, INT, "60"}},
     {"TeslaWakeOnCAN", {PERSISTENT, BOOL, "1"}},
 
@@ -398,6 +403,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"SimulationIgnorePhoneDM", {PERSISTENT, BOOL, "0"}},
     {"DriverMonitoringSessionDisabled", {CLEAR_ON_MANAGER_START | CLEAR_ON_IGNITION_ON, BOOL}},
     {"DriverMonitoringMode", {PERSISTENT, INT, "0"}},
+    {"GmClusterTakeSteering", {PERSISTENT, INT, "0"}},
     {"CarrotVisionEnabled", {PERSISTENT, BOOL, "0"}},
     {"MuteDoor", {PERSISTENT, INT, "0"}},
     {"MuteSeatbelt", {PERSISTENT, INT, "0"}},

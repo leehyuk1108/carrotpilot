@@ -11,6 +11,10 @@ import time
 DOOR_PATH = Path('/dev/shm/params/d/OffroadDoorOpen')
 OVERRIDE_PATHS = (Path('/dev/shm/params/d/WayonAmbientOverride'), Path('/data/params/d/WayonAmbientOverride'))
 WATCH_BUSES = (0, 1, 2, 128, 130)
+# The Wayon app picks colors on an sRGB phone screen; the strips' PWM output is linear, so the
+# same channel values look washed out on the car. Each RGB triple is gamma-corrected on its way
+# to the Navdy (0 and 255 are unchanged).
+LED_GAMMA = 2.2
 DOOR_SIGNALS = {
   'Door_Open_Switch_Status_LS': ('DrDoorOpenSwAct', 'PsDoorOpenSwAct'),
   'DriverDoorStatus': ('DriverDoorOpened',),
@@ -43,6 +47,25 @@ def read_override(paths=OVERRIDE_PATHS, now=None):
     except (ValueError, TypeError, OverflowError, RecursionError):
       return None
   return None
+
+
+def led_gamma(override):
+  """Copy of a Wayon ambient override with every valid `rgb` triple gamma-corrected for the strips.
+
+  Applies to manual zones and to every section of a profile; anything else (including invalid
+  triples, booleans and the comma's own dark-off override, which has no rgb) passes unchanged.
+  """
+  def fix(value):
+    if isinstance(value, dict):
+      out = {key: fix(item) for key, item in value.items()}
+      rgb = value.get('rgb')
+      if isinstance(rgb, list) and len(rgb) == 3 and all(type(c) is int and 0 <= c <= 255 for c in rgb):
+        out['rgb'] = [round(255 * (c / 255) ** LED_GAMMA) for c in rgb]
+      return out
+    if isinstance(value, list):
+      return [fix(item) for item in value]
+    return value
+  return fix(override) if isinstance(override, dict) else override
 
 
 def road_state(device, pandas):

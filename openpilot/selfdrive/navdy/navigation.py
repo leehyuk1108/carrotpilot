@@ -138,6 +138,23 @@ class FeedbackTracker:
       self.revisions[name] += 1
     return None, 0
 
+  def section_end(self, now):
+    """Explicit, fresh producer evidence that a section cap must end: 'stopped', 'off_route' or ''.
+
+    Expiry, suspension, a missing section or a lost link are not evidence of the
+    physical section ending (GPS loss in a tunnel produces exactly these), so they
+    return '' and Carrot may keep its distance-bounded hold.
+    """
+    if not 0 <= now - self.received_at < LINK_TTL:
+      return ''
+    raw_guidance, _ = self._fresh('guidance', now)
+    guidance = raw_guidance.get('guidance') if raw_guidance else None
+    if not isinstance(guidance, dict):
+      return ''
+    if guidance.get('active') is False:
+      return 'stopped'
+    return 'off_route' if self.section.off_route else ''
+
   def snapshot(self, now):
     if not 0 <= now - self.received_at < LINK_TTL:
       self.section.clear()
@@ -272,6 +289,10 @@ class NavigationReader:
         self._invalidate_model('model_feedback_missing')
     self.model_tracker._fresh(time.monotonic() if realtime else now)
     return self.tracker.snapshot(now)
+
+  def section_end(self, now=None):
+    with self.lock:
+      return self.tracker.section_end(time.monotonic() if now is None else now)
 
   def _invalidate_model(self, reason):
     self.model_tracker.clear(reason)

@@ -202,6 +202,12 @@ VW MEB(ID.4 포함)에도 수동 조향비와 학습 비율이 적용됩니다. 
 
 `LateralTorqueCustom`과 `CustomSteer*` 계열은 차량의 기본 조향 튜닝과 안전 제한에 영향을 줄 수 있는 고급 항목입니다. 차종별 검증값과 복구 방법이 없으면 변경하지 마세요.
 
+GM 차량의 `CustomSteerMax`는 300을 넘겨도 300으로 제한됩니다. 트래버스 로그에서는 명령이 약 300을 넘는 동안 EPS가 보고한 토크(`LKATorqueDelivered`)가 약 3.00에 머물렀고, 300~400 명령은 토크를 줄일 때 지연만 만들었습니다.
+
+쉐보레 트래버스·트레일블레이저·트랙스는 LKA 토크 명령을 약 33 Hz(3프레임마다)로 보내고, 기본 변화량은 증가 10·감소 15입니다(FrogPilot과 같음). 트레일블레이저·트랙스는 트래버스와 같은 값으로 맞췄을 뿐 실차 검증은 하지 않았습니다. 0에서 300까지 약 0.9초가 걸립니다. `CustomSteerDeltaUp`/`CustomSteerDeltaDown`을 0보다 크게 두면 이 값을 덮어씁니다. 트래버스에서 검증한 값은 정확히 10/15입니다. 이보다 크게 하면 판다 안전 검사 범위를 따로 확인해야 합니다. 낮은 값(예: 6/8)에서는 큰 커브에서 토크가 요청을 따라가지 못해 핸들을 감았다 풀었다 하는 현상이 로그로 확인됐습니다.
+
+트래버스에서 `NNFF`를 켜면 트레일블레이저 NNFF 모델을 대신 씁니다. 트래버스·트레일블레이저·트랙스에서 NNFF를 켜면 FrogPilot NNFF와 같게 저속 보정 표·조향 속도 저크 입력·지연 기준 저크 시간을 씁니다. 다른 차종의 NNFF 동작은 바뀌지 않습니다.
+
 #### NNFF 토크 제어
 
 `NNFF`는 기본값이 꺼짐인 신경망 피드포워드 옵션입니다. 켜면 조향각 제어가 아닌 차량에 토크 제어 튜닝을 사용하며, 대응 모델이 있으면 NNFF를 적용합니다. comma 자체 NNFF 지원 차종은 기존 자체 경로가 우선하고, 조향각 제어 차량에는 적용되지 않습니다.
@@ -289,8 +295,8 @@ VW MEB(ID.4 포함)에도 수동 조향비와 학습 비율이 적용됩니다. 
 | 현대·기아 | `HyundaiCameraSCC`, `IsLdwsCar`, `HapticFeedbackWhenSpeedCamera` | SCC 연결 방식, LDWS 차량과 카메라 구간 햅틱 |
 | CANFD·HDA | `CanfdHDA2`, `HyundaiCanfdClusterDirectTx`, `CanfdDebug`, `HDPuse` | HDA2 차량, 계기판 직접 송신과 CAN FD 디버그·HDP 기능 |
 | 레이더 | `EnableRadarTracks`, `RadarTrackFlip`, `EnableCornerRadar`, `CarrotRadarMode`, `CarrotRadarCutInSensitivity` | SCC 레이더, 전방 트랙 좌우 보정, 코너 레이더와 당근레이더 처리·컷인 감도 |
-| 운전자 모니터링 | `DriverMonitoringEnabled`(검색 전용), `DriverMonitoringMode`, `CarrotVisionEnabled`, `MuteDoor`, `MuteSeatbelt` | 운전자 모니터링과 일부 차량 경고음 처리 |
-| 차량 보조 | `MaxAngleFrames`, `SpeedFromPCM` | 최대 조향각 관련 프레임과 순정 SCC 속도 제어 방식 |
+| 운전자 모니터링 | `DriverMonitoringEnabled`(검색 전용), `DriverMonitoringMode`, `GmClusterTakeSteering`, `CarrotVisionEnabled`, `MuteDoor`, `MuteSeatbelt` | 운전자 모니터링, GM 계기판 핸들 경고와 일부 차량 경고음 처리 |
+| 차량 보조 | `MaxAngleFrames`, `SpeedFromPCM`, `AutoStopOff` | 최대 조향각 관련 프레임, 순정 SCC 속도 제어 방식과 트래버스 오토스톱 자동 끄기 |
 | 기기 하드웨어 | `HardwareC3xLite` | 스피커가 없는 C3X Lite의 알림음과 프로세스 구성 |
 
 > [!CAUTION]
@@ -314,8 +320,14 @@ Bosch MRRevo14F 수신을 지원하는 버전에서 Bosch MRRevo14F 후보 차�
 기어와 속도에 관계없이 정차 중에도 실제 차량 CANCEL 버튼을 놓았다 다시 누르는 방식으로 3초 안에 세 번 누르면 `DriverMonitoringEnabled` 설정을 바꾸지 않고 현재 시동 구간 동안 감시를 끕니다. 기어 또는 속도가 바뀌어도 횟수를 초기화하지 않습니다. 자동 제어 CANCEL 반사와 BT CANCEL은 세지 않습니다. 다른 차량 버튼의 누름 또는 놓음 신호, 무효·오래된 차량 상태, 입력 스트림 끊김이나 시간 초과는 횟수를 초기화하며, 실제 입력과 구분할 수 없는 순정 ACC 속도 버튼 반사도 보수적으로 초기화할 수 있습니다. 다음 시동을 켜거나 manager/기기를 재시작하면 임시 꺼짐 상태만 해제하므로, 저장된 설정이 켜짐일 때만 감시가 다시 켜집니다. `DriverMonitoringMode`와 `CarrotVisionEnabled`는 바꾸지 않습니다.
 
 - `DriverMonitoringMode`: 운전자 감시가 켜져 있을 때 적용됩니다. 기본값 0은 카메라 사용 시 콤마 순정 감시 기준이며, 카메라 미장착·고장 시에는 15·30·45초 조작 감시로 전환합니다. 1은 빈 도로 시간 완화와 조작 후 카메라 경고 유예를 적용하는 시험 전용 실험 모드입니다. 공통 예외로 P단·완전 정차·인게이지 해제가 유효한 신호로 1초간 확인되면 재사용 제한을 초기화합니다. 모드 변경은 재부팅 없이 약 0.5초 주기로 적용됩니다. 전환해도 누적 감시시간·경고 횟수·재사용 제한은 초기화되지 않으며, 이전 조작 유예와 전방주시 연속 판정은 종료됩니다. [운전자 감시와 실험 모드 조건](driver-monitoring.md)을 확인하세요. 현대·기아·제네시스 CAN-FD의 검증된 원본 `STEER_TOUCH_2AF` 수신 신호를 차종명 제한 없이 처리하며 카메라·모드에 따라 유지와 새 접촉을 구분합니다.
+- **GM 계기판 핸들 경고 (실험)** (`GmClusterTakeSteering`): 트래버스 SDGM 카메라 하네스에서 오픈파일럿 롱컨을 쓸 때만 동작하는 실험 기능입니다. 다른 차종이나 순정 롱컨에서는 저장해도 아무것도 바꾸지 않습니다. 기본값 `0`은 끔입니다. 오픈파일럿은 평소 순정 카메라에 손이 핸들에 있다고 알려 순정 'Take Steering' 경고를 숨깁니다. `1`은 경고음이 나는 운전자 감시 경고(2단계 이상)부터, `2`는 첫 감시 경고(1단계)부터, 경고가 떠 있는 동안만 손을 뗐다고 알려 순정 카메라의 계기판 핸들 경고 표시를 유도합니다. 조향 명령, 운전자 감시 판단과 실제 핸들 토크 신호는 바뀌지 않습니다. 제조사 매뉴얼에 따르면 Take Steering 경고가 반복되면 순정 차선유지(LKA)가 잠시 사용할 수 없게 될 수 있습니다. 순정 카메라의 반응 시간, 경고음, 순정 차선유지 설정 필요 여부, 다른 계기판 메시지와 반복 경고 뒤 복구는 실차에서 확인되지 않았습니다. 약 0.5초 안에 재부팅 없이 적용됩니다.
 - `CarrotVisionEnabled`: 운전자 감시와 별도로 웹 도로 영상을 켭니다. `DisableDM`은 이관 전용이며, 기존 `DisableDM=2`의 영상 기능만 최초 전환 시 `CarrotVisionEnabled`로 승계합니다.
 - `SpeedFromPCM`: 기본값은 `2`(커브·카메라 감속)이며, PCM 차량의 버튼 스패밍과 속도 선택에 영향을 줍니다. `3`에서 토요타·렉서스는 순정 설정속도를 사용하며 가감속 제어 방식은 바뀌지 않습니다. `TOYOTA_RAV4_TSS2_2022`의 PCM 직접 가감속에서는 `0`도 유효한 순정 설정속도 변경·크루즈 재개를 반영하며 낮은 감속 목표를 유지합니다. [버튼 전송 상세](buttons-presets.md#button-spam)를 참고하세요.
+- `AutoStopOff`: 기본값은 `0`(사용 안 함)입니다. `1`이면 시동마다 엔진 오토스톱을 자동으로 끕니다. 트래버스에서 오픈파일럿 롱컨을 쓸 때만 동작하는 시험 기능입니다.
+  - 시동 5초 뒤, 정차 중이고 크루즈와 오픈파일럿이 꺼져 있을 때 오토스톱 끄기 버튼 누름(`0x1E1`)을 대신 보냅니다. 그다음 오토스톱 꺼짐 상태(`0x1F4`)가 1이 됐는지 확인합니다.
+  - 운전대 버튼을 누르고 있거나, 차가 움직이거나, CAN 상태가 나쁘거나, 다른 버튼 신호를 막 보냈으면 누르지 않고 진행 중이던 시도도 멈춥니다.
+  - 이미 꺼져 있으면 누르지 않습니다. 주행마다 최대 3번만 시도하고, 성공하면 그 주행 동안 다시 누르지 않습니다. 운전자가 직접 다시 켠 오토스톱도 건드리지 않습니다.
+  - 실제 버튼 신호 사이에 끼워 넣는 방식이라, 차에서 실제로 꺼지는지와 경고가 뜨는지는 아직 검증하지 않았습니다. 켜고 끄는 변경은 약 0.1초 안에 반영됩니다.
 
 `HardwareC3xLite`는 일반 C3/C3X에서는 반드시 꺼 두고 C3X Lite에서만 켠 뒤 기기를 재부팅하세요. 이 설정을 켜면 존재하지 않는 앰프를 초기화하지 않아 I2C 재시도로 인한 시작 지연을 없애고, 경고음을 GPIO 부저로 출력합니다. 또한 `micd`, `soundd`, `loggerd`를 실행하지 않고 `RecordAudio`를 끄므로 이 하드웨어 모드에서는 일반 주행 로그 기록을 사용할 수 없습니다.
 
@@ -335,12 +347,14 @@ Jetson HUD에는 `jetSON` 아래에 Jetson 내부 센서의 최고 온도가 표
 
 `CarrotVisionEnabled`를 켜면 외부 HUD와 웹 카메라뷰를 함께 사용할 수 있습니다. 동시 영상 사용 시 기기 부하가 증가할 수 있습니다. 사용 방법은 [웹당근 안내](carrot-web.md)를 참고하세요.
 
+`NavdyAmbientDarkOff`(불빛 없는 어두운 길에서 Navdy 앰비언트 끄기, 기본 0)를 켜면 주행 중 어둡고 주변에 가로등·도심 불빛이 없는 길에서 Navdy에 연결한 앰비언트 라이트를 끕니다. 어두움은 차의 오토라이트 조도 센서, 불빛 여부는 오토 하이빔 카메라의 판단이며 현재 쉐보레 트래버스에서만 읽습니다. 어두움이 5초, 카메라의 불빛 없음이 10초 이어지면 끄고, 도심 불빛이 15초 이어지거나 밝음이 10초 이어지면 원래 조명으로 돌아옵니다. 카메라 신호가 15초 없을 때도 원래 조명으로 돌아옵니다. 카메라는 낮에는 불빛을 판단하지 않고 늘 불빛 없음을 보내므로, 이 값은 어두워진 뒤 카메라가 불빛이나 상향등 권장을 한 번이라도 보고한 다음부터만 믿습니다. 그래서 낮 터널에서는 끄지 않고, 밤에 시동 직후처럼 카메라가 아직 판단하지 않았을 때도 끄지 않습니다. 밝음이 1분 넘게 이어지거나 시동을 끄면 이 기록을 지웁니다. 밤 터널은 카메라가 터널 조명을 도심 불빛으로 보므로 15초가 넘으면 원래 조명으로 돌아옵니다. P단에 넣거나 주행 중 문을 열면 바로 원래 조명으로 돌아오므로, 시동을 끈 뒤의 하차 조명과 주차 중 조명은 그대로 동작합니다. 과속 경고 깜빡임은 Navdy 앱 쪽 동작이라 꺼진 동안에도 켜질 수 있습니다. 끄는 동안 Wayon 조명 프로필을 바꾸면 새 프로필을 한 번 전달한 뒤 다시 끕니다. P단에 넣은 뒤 시동을 끌 때까지 Navdy 연결이 끊겨 있었다면 그때의 하차 조명은 생략될 수 있습니다. Wayon 앱에서 직접 켠 앰비언트 수동 조명이 있으면 그쪽이 우선합니다. Navdy 앱은 바꾸지 않고 기존 수동 조명 명령으로 끄므로 Navdy 시계가 크게 틀리면 꺼지지 않을 수 있습니다. 약 2초 안에 재부팅 없이 적용됩니다.
+
 | 중분류 | 파라미터 | 용도 |
 |---|---|---|
 | 정보 표시 | `ShowDebugUI`, `ShowTpms`, `ShowDateTime`, `ShowPathEnd`, `ShowDeviceState`, `ShowLaneInfo`, `ShowRadarInfo`, `ShowRouteInfo`, `ShowPlotMode` | 주행 화면의 디버그, 타이어, 시간, 차선, 레이더와 경로 정보 |
 | 경로 표시 | `ShowPathMode`, `ShowPathColor`, `ShowPathColorCruiseOff`, `ShowPathModeLane`, `ShowPathColorLane` | 레인리스·레인모드·크루즈 OFF 상태의 경로 모양과 색상 |
 | 밝기·주행화면 | `ShowCustomBrightness`, `ShowModelView`, `ShowCameraWithCluster` | 주행 중 밝기, 카메라·모델 표시 조합과 외부 HUD 연결 중 본체 카메라 표시 |
-| 외부 HUD·기본 | `ClusterHud`, `ClusterHudBrightness`, `ClusterHudOrientation`, `ClusterHudMirror`, `ClusterHudTheme`, `ClusterNaviMapTheme`, `ClusterNaviMapType`, `ClusterNaviMapFps` | TURZX 외부 HUD, 밝기, 화면 회전, 미러링과 지도 테마 |
+| 외부 HUD·기본 | `ClusterHud`, `ClusterHudBrightness`, `ClusterHudOrientation`, `ClusterHudMirror`, `ClusterHudTheme`, `ClusterNaviMapTheme`, `ClusterNaviMapType`, `ClusterNaviMapFps`, `NavdyAmbientDarkOff` | TURZX 외부 HUD, 밝기, 화면 회전, 미러링과 지도 테마, 불빛 없는 어두운 길에서 Navdy 앰비언트 끄기 |
 | 외부 HUD·화면·카메라 | `ClusterHudEncoder`, `ClusterHudScreenMode`, `ClusterHudPanelLayout`, `ClusterHudCameraViewMode` | 인코더와 화면·카메라·좌우 패널 구성 |
 | 외부 HUD·레이더 표시 | `ClusterHudRadarInfo`, `ClusterHudRadarDisplay`, `ClusterHudRadarSourceColor` | 외부 HUD의 레이더 정보와 색상 |
 | 외부 HUD·디버그 | `ClusterHudDebug` | 진단 정보 |
