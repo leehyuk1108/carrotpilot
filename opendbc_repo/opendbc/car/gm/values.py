@@ -65,7 +65,7 @@ class CarControllerParams:
     self.BRAKE_LOOKUP_BP = [self.ACCEL_MIN, max_regen_acceleration]
     self.BRAKE_LOOKUP_V = [self.MAX_BRAKE, 0.]
 
-    if CP.carFingerprint == CAR.CHEVROLET_TRAVERSE:
+    if CP.carFingerprint in FROGPILOT_STEER_TIMING_CAR:
       # Same LKA command timing as upstream openpilot and FrogPilot GM: ~33 Hz, +10/-15 per command.
       # At 25 Hz a +5 ramp needs 2.4 s for 0->300 (2.0 s with CustomSteerDeltaUp 6), which kept
       # large-curve requests rate limited long enough for the torque loop to wind and unwind the wheel.
@@ -354,6 +354,9 @@ FW_QUERY_CONFIG = FwQueryConfig(
 EV_CAR = {CAR.CHEVROLET_VOLT, CAR.CHEVROLET_VOLT_2019, CAR.CHEVROLET_BOLT_EUV, CAR.CHEVROLET_VOLT_CC, CAR.CHEVROLET_BOLT_CC}
 CC_ONLY_CAR = {CAR.CHEVROLET_VOLT_CC, CAR.CHEVROLET_BOLT_CC, CAR.CHEVROLET_EQUINOX_CC, CAR.CHEVROLET_SUBURBAN_CC, CAR.GMC_YUKON_CC, CAR.CADILLAC_CT6_CC, CAR.CHEVROLET_TRAILBLAZER_CC, CAR.CADILLAC_XT5_CC, CAR.CHEVROLET_MALIBU_CC}
 CC_REGEN_PADDLE_CAR = {CAR.CHEVROLET_BOLT_CC}
+# LKA command timing taken from FrogPilot GM (~33 Hz, +10/-15). Measured on the Traverse; the Trax and
+# Trailblazer use the same timing at the user's request.
+FROGPILOT_STEER_TIMING_CAR = {CAR.CHEVROLET_TRAVERSE, CAR.CHEVROLET_TRAILBLAZER, CAR.CHEVROLET_TRAILBLAZER_CC, CAR.CHEVROLET_TRAX}
 # We're integrated at the Safety Data Gateway Module on these cars
 SDGM_CAR = {CAR.CADILLAC_XT4, CAR.CHEVROLET_TRAVERSE, CAR.BUICK_BABYENCLAVE, CAR.CHEVROLET_VOLT_2019}
 

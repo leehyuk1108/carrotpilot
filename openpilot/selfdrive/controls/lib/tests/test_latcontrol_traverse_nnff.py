@@ -55,16 +55,21 @@ def step(controller, CP, rate, plan_jerk, lat_accel=2.0, v=20.0, frames=1):
   return torque, pid_log
 
 
-def test_parity_only_for_traverse_full_nnff(make_controller):
-  assert make_controller()[0].nnff_frogpilot_parity
-  assert not make_controller(fingerprint=CAR.CHEVROLET_TRAILBLAZER)[0].nnff_frogpilot_parity
-  assert not make_controller(use_nnff=False)[0].nnff_frogpilot_parity
+@pytest.mark.parametrize("fingerprint", [CAR.CHEVROLET_TRAVERSE, CAR.CHEVROLET_TRAILBLAZER, CAR.CHEVROLET_TRAILBLAZER_CC,
+                                         CAR.CHEVROLET_TRAX])
+def test_parity_for_traverse_trailblazer_trax_full_nnff(make_controller, fingerprint):
+  assert make_controller(fingerprint=fingerprint)[0].nnff_frogpilot_parity
+  assert not make_controller(fingerprint=fingerprint, use_nnff=False)[0].nnff_frogpilot_parity
+
+
+def test_parity_not_for_other_cars(make_controller):
+  assert not make_controller(fingerprint=CAR.CHEVROLET_EQUINOX)[0].nnff_frogpilot_parity
 
 
 def test_parity_takes_desired_jerk_over_lateral_delay(make_controller):
   controller, CP = make_controller()
   assert controller.desired_lat_jerk_time == pytest.approx(CP.steerActuatorDelay + 0.2)
-  other, _ = make_controller(fingerprint=CAR.CHEVROLET_TRAILBLAZER)
+  other, _ = make_controller(fingerprint=CAR.CHEVROLET_EQUINOX)
   assert other.desired_lat_jerk_time == pytest.approx(0.3)  # SteerActuatorDelay Param 0 + 0.3 s
 
 
@@ -81,7 +86,7 @@ def test_measured_jerk_reaches_nn_when_plan_has_jerk(make_controller):
 def test_other_cars_still_drop_steering_angle_jerk(make_controller):
   requests = []
   for rate in (-20.0, 20.0):
-    controller, CP = make_controller(fingerprint=CAR.CHEVROLET_TRAILBLAZER)
+    controller, CP = make_controller(fingerprint=CAR.CHEVROLET_EQUINOX)
     torque, _ = step(controller, CP, rate, plan_jerk=0.5)
     requests.append(torque)
   assert requests[0] == pytest.approx(requests[1], abs=1e-9)

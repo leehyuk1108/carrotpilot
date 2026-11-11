@@ -208,9 +208,9 @@ Previously ignored ID.4 values now take effect. For example, with `CustomSR=0`, 
 
 On GM vehicles `CustomSteerMax` is capped at 300. In Traverse logs the torque the EPS reported (`LKATorqueDelivered`) stayed at about 3.00 while commands were above roughly 300; commands between 300 and 400 only delayed torque release.
 
-The Chevrolet Traverse sends LKA torque commands at about 33 Hz (every 3 frames) with default steps of +10 up and -15 down, matching FrogPilot, so 0 to 300 takes about 0.9 s. A `CustomSteerDeltaUp`/`CustomSteerDeltaDown` above 0 overrides these steps. The values validated on the Traverse are exactly 10/15; larger values need their own check against the panda safety limits. With lower values such as 6/8, logs show torque lagging the request in large curves and the wheel winding and unwinding.
+The Chevrolet Traverse, Trailblazer and Trax send LKA torque commands at about 33 Hz (every 3 frames) with default steps of +10 up and -15 down, matching FrogPilot (the Trailblazer and Trax use the Traverse values and have not been checked in the car), so 0 to 300 takes about 0.9 s. A `CustomSteerDeltaUp`/`CustomSteerDeltaDown` above 0 overrides these steps. The values validated on the Traverse are exactly 10/15; larger values need their own check against the panda safety limits. With lower values such as 6/8, logs show torque lagging the request in large curves and the wheel winding and unwinding.
 
-With `NNFF` on, the Traverse uses the Trailblazer NNFF model as a substitute and, like FrogPilot's NNFF, the NN low-speed table, the steering-rate jerk input and a jerk window based on the lateral delay. NNFF on other vehicles is unchanged.
+With `NNFF` on, the Traverse uses the Trailblazer NNFF model as a substitute. With `NNFF` on, the Traverse, Trailblazer and Trax use, like FrogPilot's NNFF, the NN low-speed table, the steering-rate jerk input and a jerk window based on the lateral delay. NNFF on other vehicles is unchanged.
 
 #### NNFF torque control
 

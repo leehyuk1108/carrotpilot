@@ -32,6 +32,8 @@ LOW_SPEED_Y_NN = [12, 3, 1, 0]
 
 LAT_PLAN_MIN_IDX = 5
 
+NNFF_FROGPILOT_PARITY_CARS = ("CHEVROLET_TRAVERSE", "CHEVROLET_TRAILBLAZER", "CHEVROLET_TRAILBLAZER_CC", "CHEVROLET_TRAX")
+
 def get_low_speed_factor(v_ego, nn_table):
   # FrogPilot's NNFF (and twilsonco's original) uses the smaller NN low-speed table.
   return np.interp(v_ego, LOW_SPEED_X, LOW_SPEED_Y_NN if nn_table else LOW_SPEED_Y)**2
@@ -134,10 +136,10 @@ class LatControlTorque(LatControl):
       self.error_deque = deque(maxlen=history_check_frames[0])
       self.past_future_len = len(self.past_times) + len(self.nn_future_times)
 
-    # The Traverse runs FrogPilot's donor NNFF model (Trailblazer). On that car only, match FrogPilot's
-    # NNFF where it differs: NN low-speed factor, steering-rate/planned jerk kept on a steering-angle
-    # car, and desired jerk taken over the lateral delay instead of SteerActuatorDelay + 0.3 s.
-    self.nnff_frogpilot_parity = self.use_nnff and CP.carFingerprint == "CHEVROLET_TRAVERSE"
+    # The Traverse runs FrogPilot's donor NNFF model (Trailblazer). On the Traverse, Trailblazer and Trax,
+    # match FrogPilot's NNFF where it differs: NN low-speed factor, steering-rate/planned jerk kept on a
+    # steering-angle car, and desired jerk taken over the lateral delay instead of SteerActuatorDelay + 0.3 s.
+    self.nnff_frogpilot_parity = self.use_nnff and CP.carFingerprint in NNFF_FROGPILOT_PARITY_CARS
     if self.nnff_frogpilot_parity:
       self.desired_lat_jerk_time = self.nn_time_offset
 

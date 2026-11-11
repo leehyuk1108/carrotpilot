@@ -4,7 +4,7 @@ from types import SimpleNamespace as NS
 import pytest
 
 from opendbc.car import DT_CTRL, apply_driver_steer_torque_limits, structs
-from opendbc.car.gm.values import CAR, DBC, CarControllerParams
+from opendbc.car.gm.values import CAR, DBC, FROGPILOT_STEER_TIMING_CAR, CarControllerParams
 from opendbc.car.gm.tests.test_display_speed import MemoryParams, runtime, build_cp, controller_state  # noqa: F401
 
 
@@ -16,12 +16,17 @@ def ramp_commands(params, target, start=0, limit=500):
   return commands
 
 
-def test_traverse_uses_upstream_frogpilot_command_timing():
-  p = CarControllerParams(NS(carFingerprint=CAR.CHEVROLET_TRAVERSE))
+def test_frogpilot_timing_cars_are_traverse_trailblazer_and_trax():
+  assert FROGPILOT_STEER_TIMING_CAR == {CAR.CHEVROLET_TRAVERSE, CAR.CHEVROLET_TRAILBLAZER, CAR.CHEVROLET_TRAILBLAZER_CC, CAR.CHEVROLET_TRAX}
+
+
+@pytest.mark.parametrize("candidate", sorted(FROGPILOT_STEER_TIMING_CAR))
+def test_traverse_trailblazer_trax_use_upstream_frogpilot_command_timing(candidate):
+  p = CarControllerParams(NS(carFingerprint=candidate))
   assert (p.STEER_STEP, p.STEER_DELTA_UP, p.STEER_DELTA_DOWN, p.STEER_MAX) == (3, 10, 15, 300)
 
 
-@pytest.mark.parametrize("candidate", [c for c in CAR if c != CAR.CHEVROLET_TRAVERSE])
+@pytest.mark.parametrize("candidate", [c for c in CAR if c not in FROGPILOT_STEER_TIMING_CAR])
 def test_other_gm_cars_keep_existing_timing(candidate):
   p = CarControllerParams(NS(carFingerprint=candidate))
   assert (p.STEER_STEP, p.STEER_DELTA_UP, p.STEER_DELTA_DOWN, p.STEER_MAX) == (4, 5, 7, 300)
