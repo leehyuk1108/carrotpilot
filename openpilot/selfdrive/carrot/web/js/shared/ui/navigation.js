@@ -704,6 +704,12 @@ function showSettingScreen(which, pushHistory = false) {
   syncSettingSplitLayoutClass(splitLandscape);
   document.getElementById("pageSetting")?.classList.toggle("setting-profile-active", isProfileItems);
 
+  if (!splitLandscape) {
+    // Announced at the start, before any slide, so a panel holding something sensitive (the My Traverse
+    // key) can clear it before it slides out of view.
+    window.dispatchEvent(new CustomEvent("carrot:settingscreenchange", { detail: { screen: which } }));
+  }
+
   if (splitLandscape) {
     settingTitle.textContent = UI_STRINGS[LANG].setting || "Setting";
     if (pushHistory) {

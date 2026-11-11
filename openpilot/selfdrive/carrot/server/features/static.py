@@ -310,13 +310,28 @@ async def handle_index(request: web.Request) -> web.Response:
   response.headers["Pragma"] = "no-cache"
   response.headers["Expires"] = "0"
   response.headers["X-Carrot-Asset-Status"] = "degraded" if manifest_degraded else "ready"
-  # Other sites must not frame Carrot Web (clickjacking onto its buttons, e.g. the My Traverse key copy).
-  response.headers["Content-Security-Policy"] = "frame-ancestors 'self'"
-  response.headers["X-Frame-Options"] = "SAMEORIGIN"
+  _guard_main_page_frame(response)
   return response
 
 
+MAIN_PAGE_PATHS: Final = ("/", "/index.html")
+
+
+def _guard_main_page_frame(response: web.StreamResponse) -> None:
+  # Other sites must not frame Carrot Web (clickjacking onto its buttons, e.g. the My Traverse key copy).
+  # 'self' keeps same-origin frames working.
+  response.headers["Content-Security-Policy"] = "frame-ancestors 'self'"
+  response.headers["X-Frame-Options"] = "SAMEORIGIN"
+
+
+async def _guard_main_page_alias(request: web.Request, response: web.StreamResponse) -> None:
+  # /index.html is served as a plain file by the web root; it is the same page as /.
+  if request.path in MAIN_PAGE_PATHS:
+    _guard_main_page_frame(response)
+
+
 def register(app: web.Application) -> None:
+  app.on_response_prepare.append(_guard_main_page_alias)
   app.router.add_get("/", handle_index)
   if os.path.isdir(TRAINING_ASSETS_DIR):
     app.router.add_static("/training/", TRAINING_ASSETS_DIR, show_index=False)
