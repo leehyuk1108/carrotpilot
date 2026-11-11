@@ -103,6 +103,17 @@ The Settings page is divided into `Device` and `carrotpilot` tabs.
 
 See [Understanding Settings](settings.md) for ranges, units, and a safe tuning order.
 
+
+### My Traverse key
+
+`Settings → Device → My Traverse key` shows this comma's My Traverse (Wayon) device ID and key. The comma uses the key to upload drives and photos to the My Traverse cloud.
+
+- At first only the first and last four characters of the key are shown.
+- `Copy key`, after confirmation, copies the whole key to the clipboard. Carrot Web runs over plain http, so the browser may block automatic copying; the key is then shown in a field below for you to copy by long-press. It is cleared after 60 seconds or when you leave the app.
+- The page only opens when you reach the comma's own address, from the same Wi-Fi or your own Tailscale at `http://<comma address>:7000`. Requests embedded in other sites or relayed through another server are refused.
+- Anyone holding the key can reach the cloud as this comma. Do not send it to others or paste it anywhere public.
+- If no key is reported, the comma has no `/data/wayon_cloud/config.json`. That file is not part of the git branch, so a new comma needs it installed separately.
+
 ## Tools page
 
 Tools contains management actions that can immediately change device or repository state.
