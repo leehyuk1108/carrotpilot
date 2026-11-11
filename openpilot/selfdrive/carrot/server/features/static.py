@@ -310,6 +310,9 @@ async def handle_index(request: web.Request) -> web.Response:
   response.headers["Pragma"] = "no-cache"
   response.headers["Expires"] = "0"
   response.headers["X-Carrot-Asset-Status"] = "degraded" if manifest_degraded else "ready"
+  # Other sites must not frame Carrot Web (clickjacking onto its buttons, e.g. the My Traverse key copy).
+  response.headers["Content-Security-Policy"] = "frame-ancestors 'self'"
+  response.headers["X-Frame-Options"] = "SAMEORIGIN"
   return response
 
 

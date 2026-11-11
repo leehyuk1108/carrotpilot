@@ -2,10 +2,13 @@
 
 // My Traverse (Wayon) device key. The status call returns only a masked key; the full key is fetched
 // once per explicit copy and, when the browser cannot copy on plain http, shown for 60 s and cleared.
+// Hiding the tab, leaving the page or re-rendering the panel bumps the generation, so a reveal that is still
+// in flight is dropped instead of putting the key back on screen.
 
 const WAYON_KEY_REVEAL_MS = 60000;
 let wayonKeyState = null;
 let wayonKeyHideTimer = null;
+let wayonKeyGeneration = 0;
 
 function renderWayonKeyPanel() {
   return `<section id="wayonKeyPanel" class="remote-support" aria-label="My Traverse 키">
@@ -42,12 +45,27 @@ function wayonKeyReasonText(reason) {
 }
 
 function hideWayonKey() {
+  wayonKeyGeneration += 1;
   if (wayonKeyHideTimer) clearTimeout(wayonKeyHideTimer);
   wayonKeyHideTimer = null;
   const area = document.getElementById("wayonKeyReveal");
   if (area) { area.value = ""; area.hidden = true; }
   const label = document.getElementById("wayonKeyRevealLabel");
   if (label) label.hidden = true;
+}
+
+function wayonKeyStillWanted(generation) {
+  if (generation !== wayonKeyGeneration || document.hidden) return false;
+  const panel = document.getElementById("wayonKeyPanel");
+  return Boolean(panel) && !panel.closest?.("[hidden], [inert]");
+}
+
+function wayonKeyFramed() {
+  try {
+    return Boolean(window.top) && window.top !== window.self;
+  } catch {
+    return true;
+  }
 }
 
 function updateWayonKeyPanel(value) {
@@ -102,16 +120,22 @@ async function refreshWayonKey() {
 async function copyWayonKey() {
   wayonKeyText("wayonKeyError", " ");
   if (!wayonKeyState?.csrf) throw new Error("화면을 새로 고친 뒤 다시 시도해 주세요.");
+  if (wayonKeyFramed()) throw new Error("다른 화면 안에 열린 당근웹에서는 키를 복사할 수 없습니다.");
+  hideWayonKey();
+  const generation = wayonKeyGeneration;
   const confirmed = await appConfirm("My Traverse 키를 클립보드에 복사합니다. 이 키가 있으면 콤마처럼 클라우드에 접속할 수 있으니 본인 기기에만 붙여 넣으세요. 복사할까요?", { title: "My Traverse 키 복사", confirmLabel: "복사" });
-  if (!confirmed) return;
+  if (!confirmed || !wayonKeyStillWanted(generation)) return;
   const result = await requestJson("/api/wayon_key/reveal", {
     method: "POST",
     headers: { "Content-Type": "application/json", "X-Carrot-CSRF": wayonKeyState.csrf },
     body: JSON.stringify({ confirmed: true }),
   });
-  if (await wayonCopyText(result.key)) {
+  if (!wayonKeyStillWanted(generation)) return;
+  const copied = await wayonCopyText(result.key);
+  if (!wayonKeyStillWanted(generation)) return;
+  if (copied) {
     hideWayonKey();
-    wayonKeyText("wayonKeyMessage", "키를 복사했습니다.");
+    wayonKeyText("wayonKeyMessage", "키를 복사했습니다. 붙여 넣은 뒤에는 다른 글을 복사해 클립보드를 덮어 두세요.");
     return;
   }
   const area = document.getElementById("wayonKeyReveal");
@@ -146,3 +170,5 @@ function bindWayonKeyPanel(container) {
 }
 
 document.addEventListener("visibilitychange", () => { if (document.hidden) hideWayonKey(); });
+window.addEventListener("pagehide", hideWayonKey);
+window.addEventListener("carrot:pagechange", hideWayonKey);
