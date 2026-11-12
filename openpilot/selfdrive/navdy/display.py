@@ -256,6 +256,17 @@ def _longitudinal_actuator(active: bool, car_control: Any, car_output: Any) -> t
   return "coast", 0.0
 
 
+def fuel_percent(car_state: Any) -> float | None:
+  """Tank level 0..100 from carState.vehicleCare (Traverse ECM 0x4D1), or None when not valid."""
+  care = getattr(car_state, "vehicleCare", None)
+  if care is None or not bool(getattr(care, "fuelLevelValid", False)):
+    return None
+  level = finite_float(getattr(care, "fuelLevel", None), math.nan)
+  if not 0.0 <= level <= 1.05:
+    return None
+  return rounded(min(level, 1.0) * 100.0, 1)
+
+
 def payload_from_messages(*, car_state: Any = None, selfdrive_state: Any = None,
                           controls_state: Any = None, car_control: Any = None,
                           car_output: Any = None, model: Any = None,
@@ -340,6 +351,10 @@ def payload_from_messages(*, car_state: Any = None, selfdrive_state: Any = None,
   if outside_c is not None:
     # Absent key keeps the HUD on its own OBD 0x46 reading.
     payload['outsideTempC'] = rounded(outside_c, 1)
+  fuel = fuel_percent(car_state) if car_valid else None
+  if fuel is not None:
+    # Absent key hides the HUD fuel gauge next to the clock.
+    payload['fuelPercent'] = fuel
   if payload['longActive'] and payload['alertSize'] == 'none' and payload['alertStatus'] == 'normal':
     payload['decel'] = badge_code(car_state, selfdrive_state, car_control, longitudinal_plan, carrot_man)
   if active:
