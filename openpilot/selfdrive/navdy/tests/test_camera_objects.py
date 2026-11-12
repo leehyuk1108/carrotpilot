@@ -267,6 +267,38 @@ def test_radar_tunnel_flag_is_read_and_expires():
   assert camera.tunnel(11.1) is None
 
 
+def test_live_tunnel_reads_the_can_clock_after_the_snapshot(monkeypatch):
+  from openpilot.selfdrive.navdy import camera_objects as mod
+  camera = mod.CameraObjects()
+  clock = {'boot': 500.0}
+  monkeypatch.setattr(mod, 'boottime_seconds', lambda: clock['boot'])
+  monkeypatch.setattr(mod.time, 'monotonic', lambda: 100.0)  # after a suspend: far behind the CAN clock
+  camera.feed([(mod.TUNNEL_ADDRESS, radar_header(True), 1)], 500.0)
+  assert camera.tunnel() is True
+  clock['boot'] = 500.0 + mod.TUNNEL_MAX_AGE + 0.01
+  assert camera.tunnel() is None
+
+  # The CAN clock moves on every read, and the door-monitor thread stores a newer header while the
+  # bridge waits for the lock: a time taken before the snapshot would make that header "future".
+  clock['boot'] = 600.0
+
+  def ticking():
+    clock['boot'] += 0.5
+    return clock['boot']
+  monkeypatch.setattr(mod, 'boottime_seconds', ticking)
+  real_lock = camera.lock
+
+  class FeedWhileLocking:
+    def __enter__(self):
+      real_lock.__enter__()
+      camera.tunnel_seen = (clock['boot'] + 0.25, True)
+    def __exit__(self, *exc):
+      return real_lock.__exit__(*exc)
+
+  camera.lock = FeedWhileLocking()
+  assert camera.tunnel() is True
+
+
 def test_frames_from_events_keeps_the_radar_header():
   from types import SimpleNamespace as NS
   from openpilot.selfdrive.navdy.camera_objects import TUNNEL_ADDRESS, frames_from_events

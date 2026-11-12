@@ -317,7 +317,7 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
         if observe_dark:
           try:
             # Also while the Navdy link is down, so a stop or daylight in between clears the camera record.
-            dark_ambient.observe(now=time.monotonic(), **dark_ambient_inputs(sm, tunnel=camera.tunnel(time.monotonic())))
+            dark_ambient.observe(now=time.monotonic(), **dark_ambient_inputs(sm, tunnel=camera.tunnel()))
           except Exception:
             observe_dark = False
             cloudlog.exception('navdy dark ambient observe failed; observing only with payloads')
@@ -440,7 +440,7 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
           camera_on = doors.gm and device is not None and bool(device.started)
           payload = live_payload(sm, sequence, sources=sources, door_open=doors.door_open,
                                  ambient_override=read_override(), vehicles=vehicles, dark_ambient=dark_ambient,
-                                 camera=camera if camera_on else None, tunnel=camera.tunnel(time.monotonic()))
+                                 camera=camera if camera_on else None, tunnel=camera.tunnel())
           payload['modelRoute'] = model_navigation.request(time.monotonic())
           car_state = sm['carState']
           diagnostics.sources(sources, payload,

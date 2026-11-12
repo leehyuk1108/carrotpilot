@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import math
 import threading
+import time
 
 OBJECT_BUS = 1
 TRACK_ADDRESSES = (0x421, 0x422, 0x423, 0x424, 0x425, 0x426, 0x441, 0x442, 0x443, 0x444, 0x445, 0x446)
@@ -23,6 +24,11 @@ LAMP_ADDRESS = 0x427
 # this bus-1 feed; only the dark-ambient tunnel exception uses it.
 TUNNEL_ADDRESS = 0x460
 TUNNEL_MAX_AGE = 1.0  # about a dozen bursts; this feed parses only the newest events per loop
+
+
+def boottime_seconds() -> float:
+  """The clock of the CAN events' logMonoTime (pandad nanos_since_boot); time.monotonic() lags it after a suspend."""
+  return time.clock_gettime(getattr(time, "CLOCK_BOOTTIME", time.CLOCK_MONOTONIC))
 WANTED = frozenset(TRACK_ADDRESSES + (LAMP_ADDRESS, TUNNEL_ADDRESS))
 KINDS = {1: 'car', 2: 'truck', 3: 'moto', 4: 'ped'}
 OBJECT_MAX_AGE = 0.25  # tracks arrive at 25 Hz
@@ -123,10 +129,16 @@ class CameraObjects:
         out.append(track)
     return out
 
-  def tunnel(self, now: float) -> bool | None:
-    """Front radar tunnel flag, or None when no header arrived within TUNNEL_MAX_AGE."""
+  def tunnel(self, now: float | None = None) -> bool | None:
+    """Front radar tunnel flag, or None when no header arrived within TUNNEL_MAX_AGE.
+
+    Live callers pass no time: it is read on the CAN clock after the snapshot, so a header stored
+    meanwhile is never "from the future". Replays and tests pass their own CAN-clock time.
+    """
     with self.lock:
       seen, value = self.tunnel_seen
+    if now is None:
+      now = boottime_seconds()
     return value if 0 <= now - seen <= TUNNEL_MAX_AGE else None
 
   def snapshot(self, now: float) -> tuple[list[dict], dict | None]:
