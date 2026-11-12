@@ -192,7 +192,7 @@ def controller_state():
             cam_lka_steering_cmd_counter=0, pt_lka_steering_cmd_counter=0, buttons_counter=0,
             pcm_acc_status=0, pscm_status=defaultdict(int),
             cam_ascm_2cb_counter=0, cam_ascm_2cb_counter_updated=False, cam_ascm_2cb_counter_ts_nanos=0,
-            cam_stock_long_active=None, cam_stock_long_cancel=False, cam_acc_status=None)
+            cam_stock_long_active=None, cam_stock_long_cancel=False, cam_acc_status=None, cam_fcw_alert=0)
 
 
 @pytest.mark.parametrize("active", [False, True])

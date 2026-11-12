@@ -194,7 +194,8 @@ def create_friction_brake_command(packer, bus, apply_brake, idx, enabled, near_s
   return packer.make_can_msg("EBCMFrictionBrakeCmd", bus, values)
 
 
-def create_acc_dashboard_command(packer, bus, enabled, target_speed_kph, hud_control, fcw, stock_acc_status=None, *, gap_level=None):
+def create_acc_dashboard_command(packer, bus, enabled, target_speed_kph, hud_control, fcw, stock_acc_status=None, *, gap_level=None,
+                                 stock_fcw_alert=0):
   target_speed = min(target_speed_kph, 255)
 
   if stock_acc_status is not None:
@@ -219,7 +220,8 @@ def create_acc_dashboard_command(packer, bus, enabled, target_speed_kph, hud_con
     "ACCGapLevel": hud_control.leadDistanceBars * enabled if gap_level is None else gap_level,  # 3 "far", 0 "inactive"
     "ACCCmdActive": enabled,
     "ACCLeadCar": hud_control.leadVisible,
-    "FCWAlert": 0x3 if fcw else 0,
+    # openpilot's own FCW wins; otherwise carry the camera's FCWAlert (Traverse only, 0 elsewhere).
+    "FCWAlert": 0x3 if fcw else (stock_fcw_alert if stock_fcw_alert in (1, 2, 3) else 0),
   })
 
   return packer.make_can_msg("ASCMActiveCruiseControlStatus", bus, values)

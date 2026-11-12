@@ -8,6 +8,7 @@ from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.gm import gmcan
 from opendbc.car.gm.cluster_speed import gm_cluster_cruise_speed_from_raw_ms
 from opendbc.car.gm.manual_auto_hold import ManualAutoHold, manual_hold_supported
+from opendbc.car.gm.stock_fcw import StockFcw, stock_fcw_supported
 from opendbc.car.gm.values import DBC, AccState, CruiseButtons, STEER_THRESHOLD, CAR, DBC, CanBus, GMFlags, CC_ONLY_CAR, CAMERA_ACC_CAR
 from opendbc.car.interfaces import CarStateBase
 
@@ -51,6 +52,8 @@ class CarState(CarStateBase):
     self.cam_stock_long_active = None
     self.cam_stock_long_cancel = False
     self.cam_acc_status = None
+    self.stock_fcw = StockFcw() if stock_fcw_supported(CP) else None
+    self.cam_fcw_alert = 0
     self.is_metric = False
     self.manual_auto_hold = ManualAutoHold() if manual_hold_supported(CP) else None
     self.manual_hold_controls_active = True  # Wait for an actual CarControl before arming.
@@ -240,8 +243,13 @@ class CarState(CarStateBase):
         ret.cruiseState.speed = cam_cp.vl["ASCMActiveCruiseControlStatus"]["ACCSpeedSetpoint"] * CV.KPH_TO_MS
       ret.stockAeb = False
       # openpilot controls nonAdaptive when not pcmCruise
-      if self.CP.pcmCruise and self.CP.carFingerprint not in CC_ONLY_CAR: 
+      if self.CP.pcmCruise and self.CP.carFingerprint not in CC_ONLY_CAR:
         ret.cruiseState.nonAdaptive = cam_cp.vl["ASCMActiveCruiseControlStatus"]["ACCCruiseState"] not in (2, 3)
+    if self.stock_fcw is not None:
+      # The camera 0x370 is already registered by the set-speed read above; a plain
+      # dict lookup never adds a parser requirement. Only the dashboard FCW uses this.
+      camera_status = cam_cp.vl_all.get("ASCMActiveCruiseControlStatus")
+      self.cam_fcw_alert = self.stock_fcw.update(camera_status.get("FCWAlert", ()) if camera_status else ())
     if self.CP.carFingerprint in CC_ONLY_CAR:
       ret.accFaulted = False
       ret.cruiseState.speed = pt_cp.vl["ECMCruiseControl"]["CruiseSetSpeed"] * CV.KPH_TO_MS

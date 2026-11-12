@@ -343,12 +343,16 @@ class CarController(CarControllerBase):
             CS.cam_stock_long_active, stock_acc_status,
           )
 
+          # The panda blocks the camera 0x370 here, so its FCW only reaches the red LED through this frame.
+          stock_fcw_alert = CS.cam_fcw_alert if self.traverse_sdgm_long else 0
+
           # Do not emit the generic invalid Trailblazer state during startup;
           # wait at most one camera cycle for a stock 0x370 template.
           if not is_trailblazer or stock_acc_status is not None:
             can_sends.append(gmcan.create_acc_dashboard_command(self.packer_pt, CanBus.POWERTRAIN, dashboard_enabled,
                                                                 dashboard_speed_kph, hud_control, send_fcw,
-                                                                stock_acc_status, gap_level=dashboard_gap_level))
+                                                                stock_acc_status, gap_level=dashboard_gap_level,
+                                                                stock_fcw_alert=stock_fcw_alert))
       else:
         # to keep accel steady for logs when not sending gas
         accel += self.accel_g
