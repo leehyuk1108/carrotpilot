@@ -318,3 +318,119 @@ test("the real settings back-to-groups transition during a reveal leaves nothing
   assert.equal(legacy.exec, 0);
   assert.equal(element("wayonKeyReveal").value, "");
 });
+
+// Registering another comma with a one-time code.
+const INVITE_CODE = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+const inviteFor = (data) => "mtinv1." + Buffer.from(JSON.stringify(data)).toString("base64url");
+const VALID_INVITE = inviteFor({ v: 1, e: "https://cloud.example.com", c: INVITE_CODE, x: "2026-11-12T03:30:00.000Z" });
+
+function inviteContext(options = {}) {
+  const ctx = panelContext(options);
+  const asked = [];
+  ctx.context.atob = (value) => Buffer.from(value, "base64").toString("binary");
+  ctx.context.URL = URL;
+  ctx.context.appConfirm = async (message, opts) => { asked.push({ message, opts }); return options.confirm ?? true; };
+  ctx.asked = asked;
+  return ctx;
+}
+
+test("a comma without a key file but with a DongleId shows its ID and the register field only", () => {
+  const { context, element } = inviteContext();
+  context.updateWayonKeyPanel({ ok: true, configured: false, reason: "missing", can_register: true, local_device_id: "a1b2c3d4e5f60718", csrf: "tok" });
+  assert.equal(element("wayonRegisterBox").hidden, false);
+  assert.equal(element("wayonInviteBox").hidden, true);
+  assert.equal(element("wayonKeyDeviceId").textContent, "a1b2c3d4e5f60718");
+  assert.match(element("wayonKeyError").textContent, /설정돼 있지 않습니다.*등록 코드로/);
+  context.updateWayonKeyPanel({ ok: true, configured: false, reason: "missing", can_register: false, local_device_id: "", csrf: "tok" });
+  assert.equal(element("wayonRegisterBox").hidden, true);
+  assert.match(element("wayonKeyError").textContent, /DongleId/);
+  context.updateWayonKeyPanel({ ok: true, configured: false, reason: "unreadable", can_register: false, local_device_id: "a1b2c3d4e5f60718", csrf: "tok" });
+  assert.equal(element("wayonRegisterBox").hidden, true);
+});
+
+test("a registered comma offers the invite button and hides the register field", async () => {
+  const { context, element } = inviteContext();
+  await context.refreshWayonKey();
+  assert.equal(element("wayonInviteBox").hidden, false);
+  assert.equal(element("wayonKeyInvite").disabled, false);
+  assert.equal(element("wayonRegisterBox").hidden, true);
+});
+
+test("making an invite asks first, sends the CSRF token, copies the code and clears it when the tab hides", async () => {
+  const { context, element, posted, copied, timers, hideTab, asked } = inviteContext({ secure: true });
+  await context.refreshWayonKey();
+  context.requestJson = async (url, options) => {
+    posted.push({ url, options });
+    return { ok: true, invite: VALID_INVITE, expires_at: "2026-11-12T03:30:00.000Z", endpoint_host: "cloud.example.com" };
+  };
+  await context.createWayonInvite();
+  assert.equal(asked.length, 1);
+  assert.match(asked[0].message, /1회용/);
+  assert.equal(posted[0].url, "/api/wayon_key/invite");
+  assert.equal(posted[0].options.headers["X-Carrot-CSRF"], "tok");
+  assert.deepEqual(JSON.parse(posted[0].options.body), { confirmed: true });
+  assert.deepEqual(copied, [VALID_INVITE]);
+  assert.equal(element("wayonInviteCode").value, VALID_INVITE);
+  assert.equal(element("wayonInviteCode").hidden, false);
+  assert.match(element("wayonKeyMessage").textContent, /복사했습니다.*한 번 쓸 수 있습니다/);
+  assert.ok(timers.some((t) => t.ms === 300000));
+  hideTab();
+  assert.equal(element("wayonInviteCode").value, "");
+  assert.equal(element("wayonInviteCode").hidden, true);
+});
+
+test("declining the invite question sends nothing", async () => {
+  const { context, posted } = inviteContext({ confirm: false });
+  await context.refreshWayonKey();
+  await context.createWayonInvite();
+  assert.equal(posted.length, 0);
+});
+
+test("registering refuses text that is not an invite before asking or sending anything", async () => {
+  const { context, element, posted, asked } = inviteContext();
+  context.updateWayonKeyPanel({ ok: true, configured: false, reason: "missing", can_register: true, local_device_id: "a1b2c3d4e5f60718", csrf: "tok" });
+  for (const value of ["", "wayon_" + "x".repeat(48), "mtinv1.***",
+    inviteFor({ v: 1, e: "http://cloud.example.com", c: INVITE_CODE }), inviteFor({ v: 2, e: "https://cloud.example.com", c: INVITE_CODE }),
+    inviteFor({ v: 1, e: "https://cloud.example.com", c: "short" })]) {
+    element("wayonRegisterInput").value = value;
+    await assert.rejects(context.registerWayonDevice(), /등록 코드 형식이 아닙니다/);
+  }
+  assert.equal(asked.length, 0);
+  assert.equal(posted.length, 0);
+});
+
+test("registering names the cloud and this comma's ID, posts the pasted code and then reloads the status", async () => {
+  const { context, element, posted, asked } = inviteContext();
+  let statusCalls = 0;
+  context.getJson = async () => {
+    statusCalls += 1;
+    return statusCalls === 1
+      ? { ok: true, configured: false, reason: "missing", can_register: true, local_device_id: "a1b2c3d4e5f60718", csrf: "tok" }
+      : { ok: true, configured: true, device_id: "a1b2c3d4e5f60718", endpoint_host: "cloud.example.com", key_masked: "wayo…abcd", key_length: 70, csrf: "tok" };
+  };
+  context.requestJson = async (url, options) => { posted.push({ url, options }); return { ok: true, device_id: "a1b2c3d4e5f60718" }; };
+  await context.refreshWayonKey();
+  const pasted = "  " + VALID_INVITE.slice(0, 30) + "\n" + VALID_INVITE.slice(30) + "\n";
+  element("wayonRegisterInput").value = pasted;
+  await context.registerWayonDevice();
+  assert.match(asked[0].message, /a1b2c3d4e5f60718/);
+  assert.match(asked[0].message, /cloud\.example\.com/);
+  assert.equal(posted[0].url, "/api/wayon_key/register");
+  assert.equal(posted[0].options.headers["X-Carrot-CSRF"], "tok");
+  assert.deepEqual(JSON.parse(posted[0].options.body), { confirmed: true, invite: pasted });
+  assert.equal(element("wayonRegisterInput").value, "");
+  assert.equal(statusCalls, 2);
+  assert.equal(element("wayonKeyCopy").disabled, false);
+  assert.equal(element("wayonRegisterBox").hidden, true);
+  assert.match(element("wayonKeyMessage").textContent, /등록했습니다/);
+});
+
+test("a refused registration keeps the pasted code and re-enables the button", async () => {
+  const { context, element } = inviteContext();
+  context.updateWayonKeyPanel({ ok: true, configured: false, reason: "missing", can_register: true, local_device_id: "a1b2c3d4e5f60718", csrf: "tok" });
+  context.requestJson = async () => { throw new Error("코드가 틀렸거나, 30분이 지났거나, 이미 사용됐습니다."); };
+  element("wayonRegisterInput").value = VALID_INVITE;
+  await assert.rejects(context.registerWayonDevice(), /이미 사용됐습니다/);
+  assert.equal(element("wayonRegisterInput").value, VALID_INVITE);
+  assert.equal(element("wayonKeyRegister").disabled, false);
+});
