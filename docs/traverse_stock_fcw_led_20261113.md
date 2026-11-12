@@ -23,6 +23,7 @@
   - `openpilot/selfdrive/car/car_specific.py` GM 분기: `stockFcw`면 기존 `fcw` 이벤트를 추가한다. C4에는 오픈파일럿 FCW와 같은 "전방 추돌 주의 / 전방 차량과 추돌 위험이 있습니다" 경보와 stopStop 소리가 뜬다.
   - 공용 `stockFcw` 이벤트는 그대로(경보 없음) 둔다. 다른 차종의 화면·소리는 바뀌지 않는다. 처음에는 `stockFcw`에 새 경보를 넣었는데, Codex 리뷰에서 다른 7개 브랜드에도 경보가 생기고 같은 우선순위의 자체 FCW LED 요청을 가린다는 지적을 받아 바꿨다.
   - `fcw` 경보는 HUD에 FCW를 요청하므로 오픈파일럿 0x370 FCWAlert도 3이 된다. 그래서 순정 FCW 때 LED는 경보 최소 표시 시간인 2초 이상 켜진다(카메라만 따르면 약 1.1초).
+  - `selfdrived.py`: 모델·플래너 FCW를 추가할 때 이미 `fcw`가 있으면 다시 넣지 않는다. 같은 프레임에 두 번 들어가면 경보 관리자가 매 프레임 새 경보로 다시 시작해, 뒤에 생긴 같은 우선순위의 긴급 인수 경보(예: `controlsMismatch` 즉시 해제)를 가렸다(Codex 4차 리뷰에서 재현).
   - `fcw` 이벤트를 읽는 제어 경로는 없다. 다른 곳(주행 리포트 등)은 플래너의 `longitudinalPlan.fcw`를 직접 읽으므로 순정 FCW는 거기 집계되지 않는다. 블랙박스 리포트는 원래 `stockFcw`도 FCW로 센다.
 
 ## 검증
@@ -36,4 +37,5 @@
   - 85번 `stockFcw` 이벤트: 카메라 FCW와 같은 순간부터 1.11초.
   - 84번·86번: 카메라 FCW 0, 재생 출력 FCW 0, 이벤트 없음이다.
 - GM 이벤트 테스트(`openpilot/selfdrive/car/tests/test_gm_stock_fcw_event.py`, 콤마에서 수정한 car_specific.py를 불러와 실행): 수정본 8 통과. 기준은 GM 1개만 실패하고 다른 7개 브랜드는 통과(다른 차종 동작 그대로).
+- FCW 한 번만 등록 테스트(`selfdrived/tests/test_fcw_single_event.py`, 콤마에서 수정한 selfdrived.py 사본으로 실행): 수정본 7 통과, 기준은 순정+자체 FCW가 겹치는 2개 실패(긴급 인수 경보가 FCW에 가려짐). 기존 selfdrived 테스트 4개 파일(phone_forward_risk_integration, alert_presentation, alertmanager, state_machine)은 수정본·기준 모두 58 통과.
 - 실제 주행 중 LED 점등과 콤마 경보는 아직 못 봤다. 다음 순정 FCW 때 확인해야 한다.

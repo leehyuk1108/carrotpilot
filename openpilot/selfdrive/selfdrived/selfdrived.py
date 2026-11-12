@@ -561,7 +561,9 @@ class SelfdriveD:
     stock_long_is_braking = self.enabled and not self.CP.openpilotLongitudinalControl and CS.aEgo < -1.25
     model_fcw = self.sm['modelV2'].meta.hardBrakePredicted and not CS.brakePressed and not stock_long_is_braking
     planner_fcw = self.sm['longitudinalPlan'].fcw and self.enabled
-    if (planner_fcw or model_fcw) and not self.CP.notCar:
+    # Car events may already carry fcw (the GM Traverse stock camera FCW). A second copy in the
+    # same frame restarts the alert, so it would outrank later takeover alerts of equal priority.
+    if (planner_fcw or model_fcw) and not self.CP.notCar and EventName.fcw not in self.events.names:
       self.events.add(EventName.fcw)
 
     # TODO: fix simulator
