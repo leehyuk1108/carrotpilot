@@ -45,10 +45,8 @@ def vehicle_lane(model, distance, lateral):
   return ''
 
 
-def vehicle_yaw(model, lane, distance, screen_x):
-  offset = abs(screen_x - 160.0)
-  angle = next((angle for bound, angle in ((24, 0), (48, 8), (72, 12), (104, 16)) if offset < bound), 24)
-  yaw = -angle if lane == 'left' else angle if lane == 'right' else 0
+def lane_heading(model, lane, distance):
+  """Direction of the vehicle's lane (radians, right-positive) around distance, 0 when unknown."""
   near, far = max(0.0, distance - 4.0), min(MAX_DISTANCE, distance + 4.0)
   lanes = list(islice(getattr(model, 'laneLines', ()), 4))
   indices = {'left': (0, 1), 'right': (2, 3)}.get(lane)
@@ -61,9 +59,35 @@ def vehicle_yaw(model, lane, distance, screen_x):
     return model_line_y_at(getattr(model, 'position', None), d)
 
   y0, y1 = center(near), center(far)
-  if y0 is not None and y1 is not None and far - near >= 1.0:
-    yaw -= math.degrees(math.atan2(y1 - y0, far - near))
-  return rounded(max(-24.0, min(24.0, yaw)))
+  if y0 is None or y1 is None or far - near < 1.0:
+    return 0.0
+  return math.atan2(y1 - y0, far - near)
+
+
+def projection_scale(distance):
+  """Screen units per lateral metre that navdy_project_point uses at this distance."""
+  warped = (max(0.0, min(MAX_DISTANCE, distance)) / MAX_DISTANCE) ** 0.65
+  return 44.0 * (1.0 - warped) + 8.0 * warped
+
+
+def vehicle_yaw(model, lane, distance, lateral):
+  """Sprite yaw that makes a vehicle drive along its lane in the Navdy road drawing.
+
+  The HUD road is navdy_project_point, which squeezes distance far more than width, so the right
+  answer is small (adjacent lanes ~3-5 degrees). Derive it from that projection: step one metre
+  along the lane and see how far the vehicle moves sideways on screen, relative to its width scale.
+  Payload sign is unchanged: negative when the vehicle's front leans left on screen (right lane).
+  """
+  heading = lane_heading(model, lane, distance)
+  step = 1.0 if distance + 1.0 <= MAX_DISTANCE else -1.0
+  position = getattr(model, 'position', None)
+  start = navdy_project_point(distance, lateral, model_line_y_at(position, distance))
+  end = navdy_project_point(distance + step, lateral + math.tan(heading) * step, model_line_y_at(position, distance + step))
+  if not start or not end:
+    return 0.0
+  ratio = (end[0] - start[0]) / step / projection_scale(distance)
+  yaw = math.degrees(math.asin(max(-1.0, min(1.0, ratio))))
+  return rounded(max(-24.0, min(24.0, -yaw)))
 
 
 class VehicleOverlay:
@@ -150,10 +174,79 @@ class VehicleOverlay:
         continue
       surrounding.append({
         'trackId': ident, 'screenX': rounded(max(4.0, min(316.0, screen[0]))), 'screenY': screen[1],
-        'yawDeg': vehicle_yaw(model, lane, distance, screen[0]), 'distanceM': rounded(distance),
+        'yawDeg': vehicle_yaw(model, lane, distance, lateral), 'distanceM': rounded(distance),
         'relativeSpeedMps': rounded(track['vRel']), 'lateralM': rounded(lateral, 2),
         'lane': lane, 'source': 'radar', 'longitudinalLead': False, 'confidence': 0.65,
       })
     surrounding.sort(key=lambda vehicle: vehicle['distanceM'])
     selected = leads + surrounding[:max(0, MAX_VEHICLES - len(leads))]
     payload['navVehicles'] = sorted(selected, key=lambda vehicle: vehicle['distanceM'], reverse=True)
+
+
+CAMERA_GATE_DISTANCE = 5.0  # metres, same gates as the phone live view
+CAMERA_GATE_LATERAL = 1.8
+CAMERA_TRACK_ID_BASE = 900000
+
+
+def _camera_vehicle(model, obj):
+  distance, lateral = obj['distance'], obj['lateral']
+  if not 2.0 <= distance <= MAX_DISTANCE or not abs(lateral) <= 15.0:
+    return None
+  lane = vehicle_lane(model, distance, lateral)
+  if not lane:
+    return None
+  screen = navdy_project_point(distance, lateral, model_line_y_at(getattr(model, 'position', None), distance))
+  if not screen:
+    return None
+  return {
+    'trackId': CAMERA_TRACK_ID_BASE + int(obj['id']), 'screenX': rounded(max(4.0, min(316.0, screen[0]))),
+    'screenY': screen[1], 'yawDeg': vehicle_yaw(model, lane, distance, lateral), 'distanceM': rounded(distance),
+    'relativeSpeedMps': 0.0, 'lateralM': rounded(lateral, 2), 'lane': lane, 'source': 'vision',
+    'longitudinalLead': False, 'confidence': 0.6, 'kind': obj['kind'],
+  }
+
+
+def annotate_camera(payload, model, objects, lamps):
+  """Give navVehicles the stock camera's kind and lead lamps, and add camera-only objects.
+
+  Display only. Radar/lead entries keep their positions; a camera object within 5 m / 1.8 m lends
+  its kind. Track 1's lamps go to whichever entry carries track 1. Camera objects nobody covers
+  (pedestrians, motorcycles, vehicles radar missed) are added like the phone live view does.
+  """
+  vehicles = payload.get('navVehicles')
+  if not isinstance(vehicles, list):
+    return
+  for vehicle in vehicles:
+    if 'yawDeg' not in vehicle:
+      vehicle['yawDeg'] = vehicle_yaw(model, vehicle.get('lane', ''), vehicle['distanceM'], vehicle['lateralM'])
+  pairs = []
+  for v_index, vehicle in enumerate(vehicles):
+    for o_index, obj in enumerate(objects):
+      dd, dl = abs(vehicle['distanceM'] - obj['distance']), abs(vehicle['lateralM'] - obj['lateral'])
+      if dd < CAMERA_GATE_DISTANCE and dl < CAMERA_GATE_LATERAL:
+        pairs.append((dd / CAMERA_GATE_DISTANCE + dl / CAMERA_GATE_LATERAL, v_index, o_index))
+  matched_vehicles, matched_objects, track1 = set(), set(), None
+  for _, v_index, o_index in sorted(pairs):
+    if v_index in matched_vehicles or o_index in matched_objects:
+      continue
+    matched_vehicles.add(v_index)
+    matched_objects.add(o_index)
+    vehicles[v_index]['kind'] = objects[o_index]['kind']
+    if objects[o_index].get('track1'):
+      track1 = vehicles[v_index]
+  extra = []
+  if payload.get('active') and payload.get('navPathLeft'):
+    for o_index, obj in enumerate(objects):
+      if o_index in matched_objects:
+        continue
+      vehicle = _camera_vehicle(model, obj)
+      if vehicle is not None:
+        extra.append(vehicle)
+        if obj.get('track1'):
+          track1 = vehicle
+  if lamps is not None and track1 is not None:
+    track1['brakeLight'] = bool(lamps['brake'])
+    track1['turnSignal'] = lamps['turn']
+  extra.sort(key=lambda vehicle: vehicle['distanceM'])
+  selected = vehicles + extra[:max(0, MAX_VEHICLES - len(vehicles))]
+  payload['navVehicles'] = sorted(selected, key=lambda vehicle: vehicle['distanceM'], reverse=True)
