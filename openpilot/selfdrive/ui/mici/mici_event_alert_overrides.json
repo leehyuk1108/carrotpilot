@@ -390,6 +390,15 @@
       "titleFontPx": 79,
       "subtitleFontPx": 31
     },
+    "EVENTS.stockFcw.PERMANENT": {
+      "eventName": "stockFcw",
+      "eventType": "PERMANENT",
+      "source": "EVENTS",
+      "title": "전방 추돌 주의",
+      "subtitle": "순정 카메라 경고: 추돌 위험",
+      "titleFontPx": 79,
+      "subtitleFontPx": 31
+    },
     "EVENTS.invalidLkasSetting.NO_ENTRY": {
       "eventName": "invalidLkasSetting",
       "eventType": "NO_ENTRY",
