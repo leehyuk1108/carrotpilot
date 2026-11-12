@@ -17,6 +17,12 @@ Releasing in Park, before the ignition goes off, lets the HUD's own
 onroad-to-offroad transition (exit courtesy lighting) run unmodified. If the link
 is down from Park until the ignition is off, that transition can still be missed.
 
+Tunnels are an exception. The camera reads most lit tunnels as city lights but not all
+(11/12 20:50: a lit tunnel read "nothing" for 25 s and the light went off). While the front
+radar reports a tunnel (bus1 0x460 byte3 bit3), "nothing" never counts, and a light that was
+already off comes back on after TUNNEL_ON_HOLD_S in the tunnel. A missing or stale radar
+reading only means "not known to be a tunnel", which keeps the camera rules above.
+
 HUD behavior this relies on (AmbientLightController.setManualOverride):
 - A repeat of the active override id is ignored, so the id rotates every ROTATE_S
   and each new id re-arms the HUD expiry.
@@ -42,6 +48,7 @@ LIT_HOLD_S = 10.0       # bright or unknown this long before switching back on
 NO_LIGHTS_HOLD_S = 10.0  # camera sees no street/city lights this long before switching off
 LIGHTS_HOLD_S = 15.0    # camera sees city lights (or nothing usable) this long before switching on
 CAMERA_RESET_S = 60.0   # bright this long: forget that the camera was active (daytime)
+TUNNEL_ON_HOLD_S = 2.0  # in a radar-reported tunnel this long: an off light comes back on
 RELEASE_S = 20 * 60     # HUD caps a manual override at 20 minutes from receipt
 ROTATE_S = 300          # new override id every 5 minutes
 LEASE_ROTATIONS = 3     # expiresAt lands 10-15 minutes ahead
@@ -83,6 +90,7 @@ class DarkAmbient:
     self.camera_seen = False               # camera reported lights or high beam in this darkness
     self.no_lights_since: float | None = None  # start of the current camera "no lights" run
     self.lights_since: float | None = None     # start of the current city lights/no camera run
+    self.tunnel_since: float | None = None     # start of the current radar-reported tunnel run
     self.active = False
     self.release_until: float | None = None
     self.forwarded_profile: str | None = None  # last Wayon profile the payload carried
@@ -96,16 +104,17 @@ class DarkAmbient:
     except Exception:
       self.enabled = False
 
-  def observe(self, *, now: float, dark: bool | None, onroad: bool | None, camera: int | None) -> None:
+  def observe(self, *, now: float, dark: bool | None, onroad: bool | None, camera: int | None,
+              tunnel: bool | None = None) -> None:
     """Track the car on ticks without a payload (Navdy link down).
 
     Keeps the hold timers and the camera record current and applies every reason to
     switch back on, so a stop or city lights while the link was down are not missed.
     It never switches off by itself; update() decides that with the full inputs.
     """
-    self._track(now, dark, onroad, camera)
+    self._track(now, dark, onroad, camera, tunnel)
 
-  def _track(self, now, dark, onroad, camera) -> bool:
+  def _track(self, now, dark, onroad, camera, tunnel=None) -> bool:
     """Shared per-tick tracking; returns whether the camera currently means "no lights".
 
     Idempotent per tick: run() observes every loop and update() repeats it when a payload goes out.
@@ -124,7 +133,9 @@ class DarkAmbient:
       self.camera_seen = False  # a new drive or daylight: the camera has to report again
     elif dark is True and camera in (CAMERA_CITY_LIGHTS, CAMERA_HIGH_BEAM):
       self.camera_seen = True
-    no_lights = self.camera_seen and camera in (CAMERA_NONE, CAMERA_HIGH_BEAM)
+    in_tunnel = onroad is True and tunnel is True
+    self.tunnel_since = (now if self.tunnel_since is None else self.tunnel_since) if in_tunnel else None
+    no_lights = self.camera_seen and camera in (CAMERA_NONE, CAMERA_HIGH_BEAM) and not in_tunnel
     if no_lights:
       self.lights_since = None
       self.no_lights_since = now if self.no_lights_since is None else self.no_lights_since
@@ -132,26 +143,28 @@ class DarkAmbient:
       self.no_lights_since = None
       self.lights_since = now if self.lights_since is None else self.lights_since
     if self.active and (onroad is not True or (dark is not True and now - self.lit_since >= LIT_HOLD_S)
-                        or (not no_lights and now - self.lights_since >= LIGHTS_HOLD_S)):
+                        or (not no_lights and now - self.lights_since >= LIGHTS_HOLD_S)
+                        or (in_tunnel and now - self.tunnel_since >= TUNNEL_ON_HOLD_S)):
       self.active = False
     return no_lights
 
   def update(self, *, now: float, wall: float, dark: bool | None, onroad: bool | None, door_open: bool,
-             parked: bool = False, user_override=None, camera: int | None = None) -> dict | None:
+             parked: bool = False, user_override=None, camera: int | None = None,
+             tunnel: bool | None = None) -> dict | None:
     """Override to send instead of the user's, or None to leave the payload alone."""
-    result = self._decide(now, wall, dark, onroad, door_open, parked, user_override, camera)
+    result = self._decide(now, wall, dark, onroad, door_open, parked, user_override, camera, tunnel)
     if result is None:
       self.forwarded_profile = profile_key(user_override)
     return result
 
-  def _decide(self, now, wall, dark, onroad, door_open, parked, user_override, camera):
+  def _decide(self, now, wall, dark, onroad, door_open, parked, user_override, camera, tunnel=None):
     self._refresh(now)
     if not self._started:
       self._started = True
       if self.enabled:
         # A previous bridge may have left the HUD dark; clear it unless conditions hold.
         self.release_until = now + RELEASE_S
-    no_lights = self._track(now, dark, onroad, camera)
+    no_lights = self._track(now, dark, onroad, camera, tunnel)
     user_blocks = isinstance(user_override, dict) and user_override.get('mode') in USER_OVERRIDE_MODES
     gated = self.enabled and onroad is True and not door_open and not parked and not user_blocks
     if self.active:
@@ -178,7 +191,7 @@ class DarkAmbient:
 
   def state(self) -> dict:
     return {'enabled': self.enabled, 'active': self.active, 'releasing': self.release_until is not None,
-            'cameraSeen': self.camera_seen}
+            'cameraSeen': self.camera_seen, 'tunnel': self.tunnel_since is not None}
 
 
 def profile_key(override) -> str | None:

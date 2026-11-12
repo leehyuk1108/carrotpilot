@@ -19,7 +19,11 @@ import threading
 OBJECT_BUS = 1
 TRACK_ADDRESSES = (0x421, 0x422, 0x423, 0x424, 0x425, 0x426, 0x441, 0x442, 0x443, 0x444, 0x445, 0x446)
 LAMP_ADDRESS = 0x427
-WANTED = frozenset(TRACK_ADDRESSES + (LAMP_ADDRESS,))
+# Front radar object header (13.5 Hz): byte3 bit3 = tunnel detected. Read here because it shares
+# this bus-1 feed; only the dark-ambient tunnel exception uses it.
+TUNNEL_ADDRESS = 0x460
+TUNNEL_MAX_AGE = 1.0  # about a dozen bursts; this feed parses only the newest events per loop
+WANTED = frozenset(TRACK_ADDRESSES + (LAMP_ADDRESS, TUNNEL_ADDRESS))
 KINDS = {1: 'car', 2: 'truck', 3: 'moto', 4: 'ped'}
 OBJECT_MAX_AGE = 0.25  # tracks arrive at 25 Hz
 TURN_HOLD = 1.2  # the code drops between flashes; keep the side while it keeps coming back
@@ -63,6 +67,7 @@ class CameraObjects:
     self.track1 = (0, -1, -math.inf)       # (object id, burst id, time) of the newest track-1 frame A
     self.lamps = None                      # (time, brake, turn code, object id) from a B paired with A
     self.turn_seen = (0, -math.inf, 0)     # (code, time, object id) of the last left/right observation
+    self.tunnel_seen = (-math.inf, False)  # (time, tunnel bit) of the newest radar header
 
   def clear(self):
     with self.lock:
@@ -70,6 +75,7 @@ class CameraObjects:
       self.track1 = (0, -1, -math.inf)
       self.lamps = None
       self.turn_seen = (0, -math.inf, 0)
+      self.tunnel_seen = (-math.inf, False)
 
   def feed(self, frames, now: float) -> None:
     """frames: iterable of (address, data, src)."""
@@ -78,6 +84,10 @@ class CameraObjects:
         if src != OBJECT_BUS or address not in WANTED or len(data) != 8:
           continue
         data = bytes(data)
+        if address == TUNNEL_ADDRESS:
+          if now >= self.tunnel_seen[0]:
+            self.tunnel_seen = (now, bool(data[3] & 0x08))
+          continue
         if address == LAMP_ADDRESS:
           self._lamp_frame(data, now)
           continue
@@ -112,6 +122,12 @@ class CameraObjects:
         track['track1'] = address == TRACK_ADDRESSES[0]
         out.append(track)
     return out
+
+  def tunnel(self, now: float) -> bool | None:
+    """Front radar tunnel flag, or None when no header arrived within TUNNEL_MAX_AGE."""
+    with self.lock:
+      seen, value = self.tunnel_seen
+    return value if 0 <= now - seen <= TUNNEL_MAX_AGE else None
 
   def snapshot(self, now: float) -> tuple[list[dict], dict | None]:
     """Objects and track-1 lamps from one consistent state (one lock), lamps tagged with their object id."""

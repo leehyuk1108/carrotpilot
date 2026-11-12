@@ -237,3 +237,39 @@ def test_camera_only_entries_need_an_active_drive_and_respect_the_vehicle_limit(
   assert len(result['navVehicles']) == MAX_VEHICLES
   distances = [v['distanceM'] for v in result['navVehicles']]
   assert distances == sorted(distances, reverse=True)
+
+
+# ---- Radar tunnel flag (bus1 0x460 byte3 bit3), for the dark-ambient tunnel exception ----
+
+def radar_header(tunnel, length=8):
+  data = bytearray(length)
+  if length > 3 and tunnel:
+    data[3] = 0x08
+  return bytes(data)
+
+
+def test_radar_tunnel_flag_is_read_and_expires():
+  from openpilot.selfdrive.navdy.camera_objects import CameraObjects, TUNNEL_ADDRESS, TUNNEL_MAX_AGE
+  camera = CameraObjects()
+  assert camera.tunnel(10.0) is None
+  camera.feed([(TUNNEL_ADDRESS, radar_header(True), 1)], 10.0)
+  assert camera.tunnel(10.0) is True
+  assert camera.tunnel(10.0 + TUNNEL_MAX_AGE) is True
+  assert camera.tunnel(10.0 + TUNNEL_MAX_AGE + 0.01) is None
+  camera.feed([(TUNNEL_ADDRESS, radar_header(False), 1)], 11.0)
+  assert camera.tunnel(11.0) is False
+  # Other buses, short frames and an older frame never change it.
+  camera.feed([(TUNNEL_ADDRESS, radar_header(True), 0), (TUNNEL_ADDRESS, radar_header(True, 4), 1)], 11.1)
+  camera.feed([(TUNNEL_ADDRESS, radar_header(True), 1)], 10.5)
+  assert camera.tunnel(11.1) is False
+  assert camera.objects(11.1) == []
+  camera.clear()
+  assert camera.tunnel(11.1) is None
+
+
+def test_frames_from_events_keeps_the_radar_header():
+  from types import SimpleNamespace as NS
+  from openpilot.selfdrive.navdy.camera_objects import TUNNEL_ADDRESS, frames_from_events
+  event = NS(valid=True, logMonoTime=2_000_000_000,
+             can=[NS(address=TUNNEL_ADDRESS, dat=radar_header(True), src=1), NS(address=0x123, dat=b'x', src=1)])
+  assert frames_from_events([event]) == [(2.0, [(TUNNEL_ADDRESS, radar_header(True), 1)])]

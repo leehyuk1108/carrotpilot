@@ -5,7 +5,7 @@ import pytest
 
 from openpilot.selfdrive.navdy import ambient_dark as mod
 from openpilot.selfdrive.navdy.ambient_dark import (
-  CAMERA_RESET_S, DARK_HOLD_S, LIGHTS_HOLD_S, LIT_HOLD_S, NO_LIGHTS_HOLD_S, RELEASE_S, ROTATE_S, DarkAmbient,
+  CAMERA_RESET_S, DARK_HOLD_S, LIGHTS_HOLD_S, LIT_HOLD_S, NO_LIGHTS_HOLD_S, RELEASE_S, ROTATE_S, TUNNEL_ON_HOLD_S, DarkAmbient,
   off_override, read_enabled,
 )
 
@@ -23,9 +23,9 @@ def driver(enabled=True):
 
 
 def step(ambient, now, *, dark=True, onroad=True, door_open=False, parked=False, user_override=None, wall=None,
-         camera=HIGH_BEAM):
+         camera=HIGH_BEAM, tunnel=None):
   return ambient.update(now=now, wall=WALL + now if wall is None else wall, dark=dark, onroad=onroad,
-                        door_open=door_open, parked=parked, user_override=user_override, camera=camera)
+                        door_open=door_open, parked=parked, user_override=user_override, camera=camera, tunnel=tunnel)
 
 
 def run(ambient, start, duration, **kwargs):
@@ -377,3 +377,70 @@ def test_observe_applies_releases_but_never_switches_off():
     ambient.observe(now=t + i * 0.2, dark=True, onroad=True, camera=CITY)
   assert not ambient.state()['active']
   assert step(ambient, t + LIGHTS_HOLD_S + 0.4, camera=CITY) == AUTO
+
+
+# ---- Radar tunnel exception (11/12 20:50: a lit tunnel read "nothing" and the light went off) ----
+
+def test_lit_tunnel_read_as_nothing_never_switches_off():
+  """The 20:50 sequence: city lights, radar tunnel 5 s before the camera drops to nothing for 25 s."""
+  ambient, _ = driver()
+  assert run(ambient, 0.0, 30, camera=CITY) == [AUTO]
+  assert run(ambient, 30.0, 5, camera=CITY, tunnel=True) == [AUTO]
+  assert run(ambient, 35.2, 25, camera=NONE, tunnel=True) == [AUTO]
+  assert run(ambient, 60.4, 5, camera=CITY, tunnel=True) == [AUTO]
+  assert run(ambient, 65.6, 30, camera=CITY, tunnel=False) == [AUTO]
+  assert not ambient.active
+
+
+def test_long_tunnel_without_lights_stays_on():
+  ambient, _ = driver()
+  run(ambient, 0.0, 30, camera=CITY)
+  assert not any(is_off(r) for r in run(ambient, 30.2, 300, camera=NONE, tunnel=True))
+
+
+def test_off_light_comes_back_on_inside_a_tunnel():
+  ambient, _ = driver()
+  run(ambient, 0.0, 30, camera=CITY)
+  result, t = settle(ambient, 30.2, camera=NONE)
+  assert is_off(result)
+  for i in range(int(TUNNEL_ON_HOLD_S / 0.2)):
+    assert is_off(step(ambient, t + i * 0.2, camera=NONE, tunnel=True))
+  assert step(ambient, t + TUNNEL_ON_HOLD_S + 0.01, camera=NONE, tunnel=True) == AUTO
+
+
+def test_dark_road_after_the_tunnel_switches_off_after_the_full_hold():
+  ambient, _ = driver()
+  run(ambient, 0.0, 30, camera=CITY)
+  run(ambient, 30.2, 20, camera=NONE, tunnel=True)
+  exit_at = 50.4
+  assert not any(is_off(r) for r in run(ambient, exit_at, NO_LIGHTS_HOLD_S - 0.2, camera=NONE, tunnel=False))
+  assert is_off(step(ambient, exit_at + NO_LIGHTS_HOLD_S + 0.2, camera=NONE, tunnel=False))
+
+
+@pytest.mark.parametrize("tunnel", [None, False])
+def test_unknown_or_no_tunnel_keeps_the_camera_rules(tunnel):
+  ambient, _ = driver()
+  run(ambient, 0.0, 30, camera=CITY, tunnel=tunnel)
+  result, _ = settle(ambient, 30.2, camera=NONE, tunnel=tunnel)
+  assert is_off(result)
+
+
+def test_short_tunnel_blip_does_not_switch_on():
+  ambient, _ = driver()
+  run(ambient, 0.0, 30, camera=CITY)
+  result, t = settle(ambient, 30.2, camera=NONE)
+  assert is_off(result)
+  assert is_off(step(ambient, t, camera=NONE, tunnel=True))
+  assert is_off(step(ambient, t + TUNNEL_ON_HOLD_S - 0.2, camera=NONE, tunnel=True))
+  assert is_off(step(ambient, t + TUNNEL_ON_HOLD_S, camera=NONE, tunnel=False))
+  assert ambient.active
+
+
+def test_tunnel_offroad_is_ignored_and_state_reports_it():
+  ambient, _ = driver()
+  step(ambient, 0.0, onroad=False, camera=None, tunnel=True)
+  assert ambient.state()['tunnel'] is False
+  step(ambient, 0.2, camera=CITY, tunnel=True)
+  assert ambient.state()['tunnel'] is True
+  ambient.observe(now=0.4, dark=True, onroad=True, camera=NONE, tunnel=False)
+  assert ambient.state()['tunnel'] is False
