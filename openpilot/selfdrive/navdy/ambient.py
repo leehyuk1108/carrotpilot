@@ -8,6 +8,8 @@ from pathlib import Path
 import threading
 import time
 
+from openpilot.selfdrive.navdy.camera_objects import PARSE_EVENTS, frames_from_events
+
 DOOR_PATH = Path('/dev/shm/params/d/OffroadDoorOpen')
 OVERRIDE_PATHS = (Path('/dev/shm/params/d/WayonAmbientOverride'), Path('/data/params/d/WayonAmbientOverride'))
 WATCH_BUSES = (0, 1, 2, 128, 130)
@@ -105,8 +107,10 @@ def updated_door_state(parsers, frames):
 
 class DoorMonitor:
   """Keep offroad CAN reception independent of slow USB/BT discovery."""
-  def __init__(self, path=DOOR_PATH):
+  def __init__(self, path=DOOR_PATH, camera=None):
     self.path = path
+    self.camera = camera  # optional CameraObjects fed from this same subscription (no extra msgq reader)
+    self.camera_error = ''
     try:
       self.door_open = path.read_bytes().strip() == b'1'
       self.saved_value = self.door_open
@@ -140,6 +144,18 @@ class DoorMonitor:
     self.stop.set()
     if self.thread is not None:
       self.thread.join(timeout=2)
+
+  def feed_camera(self, events, state):
+    """Onroad GM only: hand the newest drained events' camera frames to the overlay. Never raises."""
+    if self.camera is None:
+      return
+    try:
+      if self.gm and state is True:
+        for seconds, frames in frames_from_events(events):
+          self.camera.feed(frames, seconds)
+      self.camera_error = ''
+    except Exception as error:
+      self.camera_error = f'{type(error).__name__}: {error}'[:160]
 
   def _run(self):
     while not self.stop.is_set():
@@ -183,11 +199,15 @@ class DoorMonitor:
         if state is True and live is not None and live.canValid and not live.canTimeout:
           self.remember(live.doorOpen)
         frames = []
+        newest = []
         # Bounded draining also prevents an old door edge replay after a stall.
         for _ in range(512):
           event = messaging.recv_one_or_none(can)
           if event is None:
             break
+          if self.camera is not None:
+            newest.append(event)
+            del newest[:-PARSE_EVENTS]
           age = time.monotonic() - event.logMonoTime / 1e9
           if self.gm and state is False and event.valid and 0 <= age < 1.0:
             frames.append((event.logMonoTime, [(m.address, bytes(m.dat), m.src) for m in event.can]))
@@ -195,6 +215,7 @@ class DoorMonitor:
           value = updated_door_state(parsers, frames)
           if value is not None:
             self.remember(value)
+        self.feed_camera(newest, state)
       except Exception as error:
         # Ambient input must not take down telemetry or navigation forwarding.
         self.error = f'{type(error).__name__}: {error}'[:160]

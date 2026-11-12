@@ -1,5 +1,4 @@
 import math
-from contextlib import contextmanager
 from types import SimpleNamespace as NS
 
 import pytest
@@ -10,11 +9,11 @@ from openpilot.selfdrive.navdy.tests.test_display import model, payload
 from openpilot.selfdrive.navdy.vehicles import MAX_VEHICLES, SPRITE_PITCH_DEG, annotate_camera, vehicle_yaw
 
 
-def track_frame(ident=5, kind=1, azimuth_deg=0.0, range_m=30.0, width_m=1.75):
+def track_frame(ident=5, kind=1, azimuth_deg=0.0, range_m=30.0, width_m=1.75, burst=0):
   az = round(azimuth_deg / 0.1) & 0x3FF
   rng = round(range_m / 0.1) & 0xFFF
   data = bytearray(8)
-  data[0] = (ident & 0x3F) << 2
+  data[0] = ((ident & 0x3F) << 2) | (burst & 3)
   data[1] = ((kind & 0xF) << 3) | (az >> 7)
   data[2] = ((az & 0x7F) << 1) | (rng >> 11)
   data[3] = (rng >> 3) & 0xFF
@@ -23,11 +22,19 @@ def track_frame(ident=5, kind=1, azimuth_deg=0.0, range_m=30.0, width_m=1.75):
   return bytes(data)
 
 
-def lamp_frame(brake=False, turn=0):
+def lamp_frame(brake=False, turn=0, burst=0):
   data = bytearray(8)
+  data[0] = (burst & 3) << 6
   data[3] = (turn >> 1) & 3
   data[4] = ((turn & 1) << 7) | ((2 if brake else 0) << 5)
   return bytes(data)
+
+
+def observe(cam, t, ident=7, brake=False, turn=0, burst=None):
+  """One camera observation: track-1 frame A then its lamp frame B 5 ms later (same burst)."""
+  burst = int(t * 25) & 3 if burst is None else burst
+  cam.feed([(0x421, track_frame(ident=ident, burst=burst), 1)], t)
+  cam.feed([(0x427, lamp_frame(brake=brake, turn=turn, burst=burst), 1)], t + 0.005)
 
 
 def test_track_decoding_matches_the_dbc_layout_and_left_positive_azimuth():
@@ -39,6 +46,7 @@ def test_track_decoding_matches_the_dbc_layout_and_left_positive_azimuth():
   right = co.decode_track(track_frame(azimuth_deg=-6.0))
   assert right['lateral'] > 0
   assert [co.decode_track(track_frame(kind=k))['kind'] for k in (1, 2, 3, 4)] == ['car', 'truck', 'moto', 'ped']
+  assert co.decode_track(track_frame(burst=3))['id'] == 5
 
 
 @pytest.mark.parametrize('frame', [track_frame(ident=0), track_frame(kind=0), track_frame(kind=5),
@@ -49,7 +57,7 @@ def test_invalid_tracks_are_ignored(frame):
 
 def test_lamp_bits():
   assert co.decode_lamps(lamp_frame(brake=True)) == (True, 0)
-  assert co.decode_lamps(lamp_frame(turn=2)) == (False, 2)
+  assert co.decode_lamps(lamp_frame(turn=2, burst=3)) == (False, 2)
   assert co.decode_lamps(lamp_frame(brake=True, turn=3)) == (True, 3)
   assert co.decode_lamps(lamp_frame()[:6]) is None
 
@@ -65,30 +73,42 @@ def test_objects_keep_only_fresh_object_bus_frames_and_mark_track_one():
 
 def test_turn_side_is_held_between_flashes_and_hazard_is_ignored():
   cam = co.CameraObjects()
-  cam.feed([(0x421, track_frame(ident=7), 1)], 9.99)
-  cam.feed([(0x427, lamp_frame(turn=2), 1)], 10.0)
-  cam.feed([(0x421, track_frame(ident=7), 1), (0x427, lamp_frame(turn=0), 1)], 10.2)
-  assert cam.lead_lamps(10.2) == {'brake': False, 'turn': 'left'}
-  cam.feed([(0x421, track_frame(ident=7), 1), (0x427, lamp_frame(turn=0), 1)], 11.15)
+  observe(cam, 10.0, turn=2)
+  observe(cam, 10.2)
+  assert cam.lead_lamps(10.21) == {'brake': False, 'turn': 'left'}
+  observe(cam, 11.12)
   assert cam.lead_lamps(11.15) == {'brake': False, 'turn': 'left'}
-  cam.feed([(0x421, track_frame(ident=7), 1), (0x427, lamp_frame(turn=0), 1)], 11.25)
+  observe(cam, 11.24)
   assert cam.lead_lamps(11.25)['turn'] == ''
-  cam.feed([(0x421, track_frame(ident=7), 1), (0x427, lamp_frame(brake=True, turn=4), 1)], 12.0)
-  assert cam.lead_lamps(12.0) == {'brake': True, 'turn': ''}
+  observe(cam, 12.0, brake=True, turn=4)
+  assert cam.lead_lamps(12.01) == {'brake': True, 'turn': ''}
+  assert cam.lead_lamps(12.01 + co.OBJECT_MAX_AGE + 0.01) is None
 
 
-def test_a_new_lead_does_not_inherit_the_previous_lead_turn_signal():
+def test_a_new_lead_inherits_neither_turn_nor_brake():
   cam = co.CameraObjects()
-  cam.feed([(0x421, track_frame(ident=7), 1), (0x427, lamp_frame(turn=2), 1)], 10.0)
-  assert cam.lead_lamps(10.0)['turn'] == 'left'
-  cam.feed([(0x421, track_frame(ident=8), 1), (0x427, lamp_frame(turn=0), 1)], 10.2)
-  assert cam.lead_lamps(10.2)['turn'] == ''
-  cam.feed([(0x421, track_frame(ident=8), 1), (0x427, lamp_frame(turn=3), 1)], 10.4)
-  assert cam.lead_lamps(10.4)['turn'] == 'right'
-  # Track 1 going stale also ends the held side.
-  cam.feed([(0x427, lamp_frame(turn=0), 1)], 10.4 + co.OBJECT_MAX_AGE + 0.05)
-  assert cam.lead_lamps(10.4 + co.OBJECT_MAX_AGE + 0.05)['turn'] == ''
-  assert cam.lead_lamps(12.0 + co.OBJECT_MAX_AGE + 0.01) is None
+  observe(cam, 10.0, ident=7, brake=True, turn=2)
+  assert cam.lead_lamps(10.01) == {'brake': True, 'turn': 'left'}
+  cam.feed([(0x421, track_frame(ident=8, burst=1), 1)], 10.04)   # new object, its B not here yet
+  assert cam.lead_lamps(10.05) is None
+  cam.feed([(0x427, lamp_frame(turn=0, burst=1), 1)], 10.045)
+  assert cam.lead_lamps(10.05) == {'brake': False, 'turn': ''}
+  observe(cam, 10.4, ident=8, turn=3)
+  assert cam.lead_lamps(10.41)['turn'] == 'right'
+  # Track 1 going stale also ends everything it showed.
+  assert cam.lead_lamps(10.4 + co.OBJECT_MAX_AGE + 0.05) is None
+
+
+def test_lamp_frames_from_another_burst_or_too_late_are_never_attached():
+  cam = co.CameraObjects()
+  observe(cam, 10.0, ident=7, burst=1, brake=False)
+  cam.feed([(0x421, track_frame(ident=8, burst=2), 1)], 10.2)
+  cam.feed([(0x427, lamp_frame(turn=2, brake=True, burst=1), 1)], 10.21)   # the old object's late B
+  cam.feed([(0x427, lamp_frame(burst=2), 1)], 10.215)                       # this burst's B
+  assert cam.lead_lamps(10.22) == {'brake': False, 'turn': ''}
+  cam.feed([(0x421, track_frame(ident=8, burst=3), 1)], 10.24)
+  cam.feed([(0x427, lamp_frame(turn=3, burst=3), 1)], 10.24 + co.LAMP_PAIR_WINDOW + 0.01)
+  assert cam.lead_lamps(10.29)['turn'] == ''
 
 
 class FakeEvent:
@@ -98,64 +118,29 @@ class FakeEvent:
     self.can = [NS(address=a, dat=d, src=s) for a, d, s in frames]
 
 
-class FakeLog:
-  class Event:
-    @staticmethod
-    @contextmanager
-    def from_bytes(raw):
-      yield raw
-
-
-def test_camera_frames_reads_only_wanted_addresses():
+def test_frames_from_events_keeps_camera_addresses_of_valid_events():
   events = [FakeEvent(1.0, [(0x421, b'a' * 8, 1), (0x1E9, b'b' * 8, 0)]), FakeEvent(1.01, [(0x427, b'c' * 8, 1)]),
             FakeEvent(1.02, [(0x421, b'd' * 8, 1)], valid=False)]
-  assert co.camera_frames(events, FakeLog) == [(1.0, [(0x421, b'a' * 8, 1)]), (1.01, [(0x427, b'c' * 8, 1)])]
+  assert co.frames_from_events(events) == [(1.0, [(0x421, b'a' * 8, 1)]), (1.01, [(0x427, b'c' * 8, 1)])]
 
 
-class FakeMessaging:
-  def __init__(self, batches):
-    self.batches = list(batches)
-    self.subscribed = 0
-
-  def sub_sock(self, name, conflate=False):
-    assert name == 'can' and conflate is False
-    self.subscribed += 1
-    return object()
-
-  def drain_sock_raw(self, sock):
-    return self.batches.pop(0) if self.batches else []
-
-
-def test_feed_parses_only_the_newest_events_and_closes_when_disabled():
-  seen = []
-  raw = [FakeEvent(10.0 + i * 0.01, [(0x421, track_frame(ident=1 + i % 3), 1)]) for i in range(20)]
-  feed = co.CameraFeed(FakeMessaging([raw]), parse=lambda r: seen.append(len(r)) or co.camera_frames(r, FakeLog),
-                       clock=lambda: 50.0)
-  feed.poll(True)
-  assert seen == [co.PARSE_EVENTS]
-  assert [o['id'] for o in feed.objects.objects(10.2)] == [1 + 19 % 3]
-  feed.poll(False)
-  assert feed.sock is None and feed.objects.objects(10.2) == []
-
-
-def test_feed_resubscribes_after_missed_polls_instead_of_draining_the_backlog():
-  clock = [100.0]
-  messaging = FakeMessaging([[], [], []])
-  feed = co.CameraFeed(messaging, parse=lambda r: [], clock=lambda: clock[0])
-  feed.poll(True)
-  clock[0] += 0.2
-  feed.poll(True)
-  assert messaging.subscribed == 1
-  clock[0] += co.STALE_POLL + 0.5
-  feed.poll(True)
-  assert messaging.subscribed == 2
-
-
-def test_feed_errors_never_escape():
-  feed = co.CameraFeed(FakeMessaging([[object()]]), parse=lambda r: 1 / 0, clock=lambda: 0.0)
-  feed.poll(True)
-  assert feed.error.startswith('ZeroDivisionError') and feed.sock is None
-  assert feed.status(0.0) == {'objects': 0, 'lamps': False, 'error': feed.error}
+def test_door_monitor_feeds_the_camera_only_onroad_on_gm_and_never_raises():
+  from openpilot.selfdrive.navdy.ambient import DoorMonitor
+  cam = co.CameraObjects()
+  doors = DoorMonitor(path=__import__('pathlib').Path('/nonexistent/navdy-door-test'), camera=cam)
+  events = [FakeEvent(10.0, [(0x421, track_frame(ident=3), 1)])]
+  doors.gm = True
+  doors.feed_camera(events, False)
+  assert cam.objects(10.05) == []
+  doors.feed_camera(events, True)
+  assert [o['id'] for o in cam.objects(10.05)] == [3]
+  doors.gm = False
+  cam.clear()
+  doors.feed_camera(events, True)
+  assert cam.objects(10.05) == []
+  doors.gm = True
+  doors.feed_camera([object()], True)
+  assert doors.camera_error.startswith('AttributeError')
 
 
 def road_motion(distance, lateral):

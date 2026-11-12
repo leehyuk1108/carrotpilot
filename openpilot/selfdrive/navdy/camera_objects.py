@@ -5,10 +5,16 @@ F_Vision_Obj_Track_1..12 (0x421-0x426, 0x441-0x446) and the lamps of track 1 in 
 (0x427), see gm_global_a_object.dbc. Field meanings were checked against road video (Nov 2026 CAN map):
 object type 1 car, 2 truck/bus, 3 motorcycle, 4 pedestrian; track-1 brake lamp value 2 = lit; turn code
 2 left, 3 right (4 hazard is unreliable and ignored). The same decoding drives the phone live view.
+
+Frames come from the bridge's existing door-monitor CAN subscription (no extra msgq reader: readers are
+never released, and more than 40 resets every reader of the 'can' queue, card included). Track 1's lamp
+frame (B) is used only when it carries the same burst id as the newest track-1 frame (A) and arrives
+within 20 ms of it; real logs: 8,888/8,888 B frames matched the preceding A burst, at most 13 ms later.
 """
 from __future__ import annotations
 
 import math
+import threading
 
 OBJECT_BUS = 1
 TRACK_ADDRESSES = (0x421, 0x422, 0x423, 0x424, 0x425, 0x426, 0x441, 0x442, 0x443, 0x444, 0x445, 0x446)
@@ -18,8 +24,8 @@ KINDS = {1: 'car', 2: 'truck', 3: 'moto', 4: 'ped'}
 OBJECT_MAX_AGE = 0.25  # tracks arrive at 25 Hz
 TURN_HOLD = 1.2  # the code drops between flashes; keep the side while it keeps coming back
 CAMERA_AHEAD_OF_RADAR = -1.6  # camera ranges are ~1.6 m longer than front-radar dRel
-PARSE_EVENTS = 8  # newest 'can' events (10 ms each) parsed per display tick
-STALE_POLL = 1.0  # seconds without a poll (link down, reconnect): resubscribe instead of draining the backlog
+PARSE_EVENTS = 8  # newest 'can' events (10 ms each) fed per door-monitor loop (100 ms)
+LAMP_PAIR_WINDOW = 0.02  # B must follow its A burst within this (seen: <= 13 ms)
 
 
 def _signed(value: int, bits: int) -> int:
@@ -50,126 +56,83 @@ def decode_lamps(data: bytes) -> tuple[bool, int] | None:
 
 
 class CameraObjects:
+  """Latest camera frames; fed by the door-monitor thread, read by the bridge loop (locked)."""
   def __init__(self):
+    self.lock = threading.Lock()
     self.frames: dict[int, tuple[float, bytes]] = {}
-    self.track1_id = 0
-    self.turn_seen = (0, -math.inf, 0)  # (code, time, track-1 object id it belongs to)
+    self.track1 = (0, -1, -math.inf)       # (object id, burst id, time) of the newest track-1 frame A
+    self.lamps = None                      # (time, brake, turn code, object id) from a B paired with A
+    self.turn_seen = (0, -math.inf, 0)     # (code, time, object id) of the last left/right observation
 
   def clear(self):
-    self.frames.clear()
-    self.track1_id = 0
-    self.turn_seen = (0, -math.inf, 0)
+    with self.lock:
+      self.frames.clear()
+      self.track1 = (0, -1, -math.inf)
+      self.lamps = None
+      self.turn_seen = (0, -math.inf, 0)
 
   def feed(self, frames, now: float) -> None:
-    """frames: iterable of (address, data, src) as in can_capnp_to_list."""
-    for address, data, src in frames:
-      if src != OBJECT_BUS or address not in WANTED or len(data) != 8:
-        continue
-      data = bytes(data)
-      self.frames[address] = (now, data)
-      if address == TRACK_ADDRESSES[0]:
-        ident = data[0] >> 2
-        if ident != self.track1_id:
-          # Track 1 now carries another object (or none): its predecessor's turn side must not carry over.
-          self.track1_id = ident
-          self.turn_seen = (0, -math.inf, 0)
-      elif address == LAMP_ADDRESS:
-        lamps = decode_lamps(data)
-        if lamps is not None and lamps[1] in (2, 3) and self.track1_id:
-          self.turn_seen = (lamps[1], now, self.track1_id)
+    """frames: iterable of (address, data, src)."""
+    with self.lock:
+      for address, data, src in frames:
+        if src != OBJECT_BUS or address not in WANTED or len(data) != 8:
+          continue
+        data = bytes(data)
+        if address == LAMP_ADDRESS:
+          self._lamp_frame(data, now)
+          continue
+        self.frames[address] = (now, data)
+        if address == TRACK_ADDRESSES[0]:
+          ident = data[0] >> 2
+          if ident != self.track1[0]:
+            # Track 1 now carries another object (or none): nothing seen for its predecessor carries over.
+            self.lamps = None
+            self.turn_seen = (0, -math.inf, 0)
+          self.track1 = (ident, data[0] & 3, now)
+
+  def _lamp_frame(self, data: bytes, now: float) -> None:
+    ident, burst, seen = self.track1
+    if ident == 0 or (data[0] >> 6) != burst or not 0 <= now - seen <= LAMP_PAIR_WINDOW:
+      return  # not this observation's B (late, early or from another burst): never attach it
+    brake, code = decode_lamps(data)
+    self.lamps = (now, brake, code, ident)
+    if code in (2, 3):
+      self.turn_seen = (code, now, ident)
 
   def _fresh(self, address: int, now: float) -> bytes | None:
     entry = self.frames.get(address)
     return entry[1] if entry is not None and 0 <= now - entry[0] <= OBJECT_MAX_AGE else None
 
   def objects(self, now: float) -> list[dict]:
-    out = []
-    for address in TRACK_ADDRESSES:
-      data = self._fresh(address, now)
-      track = decode_track(data) if data is not None else None
-      if track is not None:
-        track['track1'] = address == TRACK_ADDRESSES[0]
-        out.append(track)
-    return out
+    with self.lock:
+      out = []
+      for address in TRACK_ADDRESSES:
+        data = self._fresh(address, now)
+        track = decode_track(data) if data is not None else None
+        if track is not None:
+          track['track1'] = address == TRACK_ADDRESSES[0]
+          out.append(track)
+      return out
 
   def lead_lamps(self, now: float) -> dict | None:
-    """Lamps of camera track 1, or None when that frame is stale."""
-    data = self._fresh(LAMP_ADDRESS, now)
-    lamps = decode_lamps(data) if data is not None else None
-    if lamps is None:
-      return None
-    code, seen, ident = self.turn_seen
-    track1 = self._fresh(TRACK_ADDRESSES[0], now)
-    same_object = track1 is not None and ident != 0 and (track1[0] >> 2) == ident
-    turn = {2: 'left', 3: 'right'}.get(code, '') if same_object and 0 <= now - seen < TURN_HOLD else ''
-    return {'brake': lamps[0], 'turn': turn}
+    """Lamps of the object now in camera track 1, or None when there is no fresh paired lamp frame."""
+    with self.lock:
+      track1 = self._fresh(TRACK_ADDRESSES[0], now)
+      if track1 is None or self.lamps is None:
+        return None
+      seen, brake, _, ident = self.lamps
+      if ident != (track1[0] >> 2) or not 0 <= now - seen <= OBJECT_MAX_AGE:
+        return None
+      code, turn_at, turn_ident = self.turn_seen
+      turn = {2: 'left', 3: 'right'}.get(code, '') if turn_ident == ident and 0 <= now - turn_at < TURN_HOLD else ''
+      return {'brake': brake, 'turn': turn}
 
 
-def camera_frames(raw_events, log_module):
-  """Raw 'can' events -> [(seconds, [(address, data, src)])] keeping only the camera addresses.
-
-  Reads one field per frame and the rest only for the 13 wanted addresses, so a 200 ms drain
-  (~1000 frames) stays far cheaper than converting every frame.
-  """
+def frames_from_events(events):
+  """Parsed 'can' events -> [(seconds, [(address, data, src)])] for the camera addresses, valid events only."""
   out = []
-  for raw in raw_events:
-    with log_module.Event.from_bytes(raw) as event:
-      if not event.valid:
-        continue
-      frames = [(frame.address, frame.dat, frame.src) for frame in event.can if frame.address in WANTED]
-      out.append((event.logMonoTime / 1e9, frames))
+  for event in events:
+    if not event.valid:
+      continue
+    out.append((event.logMonoTime / 1e9, [(frame.address, frame.dat, frame.src) for frame in event.can if frame.address in WANTED]))
   return out
-
-
-class CameraFeed:
-  """Drains raw 'can' once per display tick (GM, onroad) and keeps the latest camera frames."""
-  def __init__(self, messaging=None, parse=None, clock=None):
-    self.messaging = messaging
-    self.parse = parse
-    self.clock = clock
-    self.sock = None
-    self.polled_at = -math.inf
-    self.objects = CameraObjects()
-    self.error = ''
-
-  def close(self):
-    self.sock = None
-    self.objects.clear()
-
-  def poll(self, enabled: bool) -> None:
-    if not enabled:
-      if self.sock is not None:
-        self.close()
-      return
-    try:
-      if self.messaging is None:
-        from openpilot.cereal import messaging
-        self.messaging = messaging
-      if self.parse is None:
-        from openpilot.cereal import log
-        self.parse = lambda raw: camera_frames(raw, log)
-      if self.clock is None:
-        import time
-        self.clock = time.monotonic
-      now = self.clock()
-      if self.sock is not None and now - self.polled_at > STALE_POLL:
-        # The bridge skipped polls (Navdy link down or slow connect): a fresh subscription starts at the
-        # newest message, so the queued seconds of CAN are never copied or parsed.
-        self.close()
-      self.polled_at = now
-      if self.sock is None:
-        self.sock = self.messaging.sub_sock('can', conflate=False)
-      raw = self.messaging.drain_sock_raw(self.sock)
-      if raw:
-        # Tracks and lamps repeat every 40 ms: the newest ~80 ms hold all of them, so skip parsing older events.
-        for seconds, frames in self.parse(raw[-PARSE_EVENTS:]):
-          self.objects.feed(frames, seconds)
-      self.error = ''
-    except Exception as error:
-      # The camera overlay must never take down telemetry or navigation forwarding.
-      self.error = f'{type(error).__name__}: {error}'[:160]
-      self.close()
-
-  def status(self, now: float) -> dict:
-    return {'objects': len(self.objects.objects(now)), 'lamps': self.objects.lead_lamps(now) is not None,
-            'error': self.error}

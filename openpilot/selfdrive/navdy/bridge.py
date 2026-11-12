@@ -25,7 +25,7 @@ from openpilot.selfdrive.navdy.model_navigation import ModelNavigationTracker, M
 from openpilot.selfdrive.navdy.diagnostics import LinkDiagnostics, public_error
 from openpilot.selfdrive.navdy.feedback import is_no_observation
 from openpilot.selfdrive.navdy.journal import CONNECT_TIMINGS, LocalJournal, sanitize
-from openpilot.selfdrive.navdy.camera_objects import CameraFeed
+from openpilot.selfdrive.navdy.camera_objects import CameraObjects
 from openpilot.selfdrive.navdy.vehicles import VehicleOverlay, annotate_camera
 from openpilot.selfdrive.navdy.policy import read_transport_mode, transport_policy
 from openpilot.selfdrive.navdy.usb_health import RecoveryGuard, UsbHealth, recovery_messages
@@ -281,8 +281,8 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
     model_route_path = feedback.with_name(feedback.stem + '-model-route.json')
     model_route_cache = ModelRouteCache(model_route_path, atomic_json)
     vehicles = VehicleOverlay()
-    camera_feed = CameraFeed()
-    doors = DoorMonitor()
+    camera = CameraObjects()
+    doors = DoorMonitor(camera=camera)
     dark_ambient = DarkAmbient()
     observe_dark = True
     diagnostics = LinkDiagnostics(cloudlog.event, journal=LocalJournal())
@@ -436,10 +436,9 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
           sources = display_sources(sm)
           device = sm['deviceState'] if sources['deviceState']['usable'] else None
           camera_on = doors.gm and device is not None and bool(device.started)
-          camera_feed.poll(camera_on)
           payload = live_payload(sm, sequence, sources=sources, door_open=doors.door_open,
                                  ambient_override=read_override(), vehicles=vehicles, dark_ambient=dark_ambient,
-                                 camera=camera_feed.objects if camera_on else None)
+                                 camera=camera if camera_on else None)
           payload['modelRoute'] = model_navigation.request(time.monotonic())
           car_state = sm['carState']
           diagnostics.sources(sources, payload,
@@ -519,7 +518,9 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
                                'power': payload['displayPower'],
                                'ambient': {'doorOpen': payload['doorOpen'], 'gmDoorMonitor': doors.gm, 'error': doors.error,
                                            'darkOff': dark_ambient.state()},
-                               'camera': camera_feed.status(time.monotonic()),
+                               'camera': {'objects': len(camera.objects(time.monotonic())),
+                                          'lamps': camera.lead_lamps(time.monotonic()) is not None,
+                                          'error': doors.camera_error},
                                'lastDisplayDropout': last_display_dropout,
                                'lastHandover': last_handover, 'wirelessConfigured': peer is not None,
                                'transportPolicy': policy, 'connectionMode': connection_mode,
