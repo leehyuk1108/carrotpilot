@@ -414,6 +414,8 @@ async def create_invite(request: web.Request) -> web.Response:
     return failure("아직 쓰지 않은 등록 코드가 3개 있습니다. 코드를 쓰거나 30분이 지난 뒤 다시 만들어 주세요.", 429)
   if status == 429 and error == "invite_daily_limit":
     return failure("최근 24시간 동안 등록 코드를 10개 만들어 더 만들 수 없습니다. 가장 먼저 만든 코드로부터 24시간이 지나면 다시 만들 수 있습니다.", 429)
+  if status == 429 and error == "invite_retry":
+    return failure("다른 등록과 겹쳤습니다. 바로 다시 만들어 주세요.", 429)
   if status == 401:
     return failure("클라우드가 이 콤마의 키를 받아들이지 않았습니다.", 502)
   if status in (404, 405):
@@ -469,8 +471,11 @@ async def register_locked(body: dict) -> web.Response:
     if token is None:
       token = "wayon_" + secrets.token_urlsafe(48)
       write_private_json(pending_path(), {"endpoint": endpoint, "device_id": device, "token": token})
+    else:
+      # A pending file left by a failed attempt may never have been made durable: confirm it first.
+      fsync_directory(pending_path().parent)
   except OSError:
-    return failure("등록 준비 파일을 쓰지 못했습니다.", 500)
+    return failure("등록 준비 파일 저장을 확인하지 못했습니다. 잠시 뒤 다시 시도해 주세요.", 500)
   try:
     status, reply = await cloud_post(f"{endpoint}/api/devices/register", {"deviceId": device, "key": token, "invite": code})
   except CloudUnavailable:

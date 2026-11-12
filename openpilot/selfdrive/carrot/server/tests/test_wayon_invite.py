@@ -122,6 +122,7 @@ def test_owner_creates_an_invite_that_carries_its_cloud_address_but_never_its_ke
   ((403, {"error": "invite_not_allowed"}), 403, "처음 등록한 콤마"),
   ((429, {"error": "invite_limit"}), 429, "3개"),
   ((429, {"error": "invite_daily_limit"}), 429, "24시간"),
+  ((429, {"error": "invite_retry"}), 429, "다시 만들어"),
   ((401, {"error": "unauthorized"}), 502, "받아들이지"),
   ((404, {}), 502, "지원하지"),
   ((200, {"ok": True, "code": "short", "expiresAt": "x"}), 502, "HTTP 200"),
@@ -507,3 +508,29 @@ def test_an_unconfirmed_config_write_keeps_the_pending_key_until_a_second_press_
   assert first == 500 and kept and path.exists()
   assert second == 200 and reply["device_id"] == DONGLE
   assert not api.pending_path().exists() and len(cloud.calls) == 1
+
+
+def test_a_pending_key_from_a_failed_attempt_is_not_sent_until_it_is_durable(api, monkeypatch, tmp_path):
+  cloud = Cloud()
+  app, path = make_app(api, monkeypatch, tmp_path, cloud)
+  real = api.fsync_directory
+  state = {"broken": True}
+  def maybe(directory):
+    if state["broken"]:
+      raise OSError("EIO")
+    return real(directory)
+  monkeypatch.setattr(api, "fsync_directory", maybe)
+  async def body():
+    async with TestClient(TestServer(app)) as client:
+      headers = same_origin(client, await csrf(client))
+      statuses = []
+      for _ in range(3):  # the directory stays broken: never contact the cloud
+        r = await client.post("/api/wayon_key/register", json={"confirmed": True, "invite": invite_text()}, headers=headers)
+        statuses.append(r.status)
+      calls_while_broken = len(cloud.calls)
+      state["broken"] = False
+      r = await client.post("/api/wayon_key/register", json={"confirmed": True, "invite": invite_text()}, headers=headers)
+      return statuses, calls_while_broken, r.status
+  statuses, calls_while_broken, final = run(body())
+  assert statuses == [500, 500, 500] and calls_while_broken == 0
+  assert final == 200 and len(cloud.calls) == 1 and path.exists()
