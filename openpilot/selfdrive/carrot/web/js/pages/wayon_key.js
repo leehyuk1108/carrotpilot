@@ -278,8 +278,13 @@ async function createWayonInvite() {
   label.hidden = false;
   wayonKeyShownAreas.push(area);
   const until = wayonInviteTime(result.expires_at);
-  const copied = await wayonCopyText(result.invite);
-  if (!wayonKeyStillWanted(generation)) { hideWayonKey(); return; }
+  let copied = false;
+  if (wayonCanUseClipboardApi()) {
+    copied = await wayonClipboardApiCopy(result.invite);
+    // As with the key: a cancelled copy must not start the fallback or keep the code on screen.
+    if (!wayonKeyStillWanted(generation)) { hideWayonKey(); return; }
+  }
+  if (!copied) copied = wayonLegacyCopy(result.invite);
   if (!copied) { area.focus(); area.select(); }
   wayonKeyText("wayonKeyMessage", `${copied ? "등록 코드를 복사했습니다." : "아래 등록 코드를 길게 눌러 복사하세요."}${until ? ` ${until}까지` : " 30분 동안"} 한 번 쓸 수 있습니다.`);
   if (wayonKeyHideTimer) clearTimeout(wayonKeyHideTimer);
@@ -301,8 +306,9 @@ async function registerWayonDevice() {
   const info = wayonInviteInfo(text);
   if (!info) throw new Error("등록 코드 형식이 아닙니다. 이미 등록된 콤마의 당근웹에서 만든 코드를 그대로 붙여 넣으세요.");
   const device = wayonKeyState.local_device_id || "-";
+  const generation = wayonKeyGeneration;
   const confirmed = await appConfirm(`이 콤마(기기 ID ${device})를 ${info.host} 클라우드에 새 기기로 등록합니다. 등록하면 이 콤마가 주행 기록, 위치, 사진을 그 클라우드에 올립니다. 등록할까요?`, { title: "이 콤마 등록", confirmLabel: "등록" });
-  if (!confirmed) return;
+  if (!confirmed || !wayonKeyStillWanted(generation)) return;
   const button = document.getElementById("wayonKeyRegister");
   if (button) button.disabled = true;
   try {

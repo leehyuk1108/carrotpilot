@@ -125,7 +125,7 @@ Make a one-time invite code in an already registered comma's Carrot Web and past
 3. Once registered, the new comma starts connecting with a key it made itself. Copy it with `키 복사` (Copy key) into that car's My Traverse app.
 
 - A code works once, within 30 minutes. Anyone holding it can register one comma, so paste it only into the comma you are registering.
-- A comma can hold at most three unused codes and make at most ten a day. A comma registered with a code cannot make codes for others.
+- A comma can hold at most three unused codes and make at most ten in any 24 hours. A comma registered with a code cannot make codes for others.
 - The cloud stores only a hash of the code, so a code cleared from the screen cannot be shown again. Make a new one if it is lost; unused codes stop working after 30 minutes. If the key of the comma that made a code is revoked, its unused codes stop working too.
 - A code authorizes a registration; it does not prove who owns the comma. Check the cloud address in the confirmation: pasting a code for a wrong address could send this comma's records there.
 - A comma without a comma device ID (DongleId) cannot be registered. If the device ID is already registered with another key, the page says the key must be reissued.

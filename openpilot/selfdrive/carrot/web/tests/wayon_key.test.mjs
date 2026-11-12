@@ -434,3 +434,31 @@ test("a refused registration keeps the pasted code and re-enables the button", a
   assert.equal(element("wayonRegisterInput").value, VALID_INVITE);
   assert.equal(element("wayonKeyRegister").disabled, false);
 });
+
+test("hiding the tab while the invite copy is pending neither starts the fallback copy nor keeps the code", async () => {
+  const clipboard = deferred();
+  const { context, element, legacy, hideTab } = inviteContext({ secure: true, clipboardOk: false, execOk: true, clipboard });
+  await context.refreshWayonKey();
+  context.requestJson = async () => ({ ok: true, invite: VALID_INVITE, expires_at: "2026-11-12T03:30:00.000Z" });
+  const running = context.createWayonInvite();
+  await settle();
+  hideTab();
+  clipboard.resolve();
+  await running;
+  assert.equal(legacy.exec, 0);
+  assert.equal(element("wayonInviteCode").value, "");
+});
+
+test("leaving the page while the register question is open sends nothing", async () => {
+  const { context, element, posted, hideTab } = inviteContext();
+  context.updateWayonKeyPanel({ ok: true, configured: false, reason: "missing", can_register: true, local_device_id: "a1b2c3d4e5f60718", csrf: "tok" });
+  let answer;
+  context.appConfirm = () => new Promise((resolve) => { answer = resolve; });
+  element("wayonRegisterInput").value = VALID_INVITE;
+  const running = context.registerWayonDevice();
+  await settle();
+  hideTab();
+  answer(true);
+  await running;
+  assert.equal(posted.length, 0);
+});

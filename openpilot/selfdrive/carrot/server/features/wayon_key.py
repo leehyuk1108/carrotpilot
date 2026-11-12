@@ -140,7 +140,8 @@ async def get_status(request: web.Request) -> web.Response:
   body = {"ok": True, "configured": config is not None, "reason": reason, "csrf": request.app[STATE_KEY]["csrf"]}
   if config is None:
     local_id = dongle_id()
-    body.update({"local_device_id": local_id, "can_register": reason == "missing" and bool(local_id)})
+    body.update({"local_device_id": local_id,
+                 "can_register": reason == "missing" and not config_slot_taken() and bool(local_id)})
   if config is not None:
     body.update({
       "device_id": config["device_id"],
@@ -278,14 +279,30 @@ def write_private_json(path: Path, data: dict, replace: bool = True) -> None:
     except OSError:
       pass
     raise
+  fsync_directory(path.parent)
+
+
+def fsync_directory(directory: Path) -> None:
+  """Make a rename or link in this directory durable; an error means it may not be."""
+  fd = os.open(directory, os.O_RDONLY)
   try:
-    directory = os.open(path.parent, os.O_RDONLY)
-    try:
-      os.fsync(directory)
-    finally:
-      os.close(directory)
-  except OSError:
-    pass
+    os.fsync(fd)
+  finally:
+    os.close(fd)
+
+
+def config_slot_taken() -> bool:
+  """Anything at the config path, including a dangling symlink that reads as missing."""
+  return CONFIG_PATH.is_symlink() or CONFIG_PATH.exists()
+
+
+def pending_matches(config: dict) -> bool:
+  try:
+    data = json.loads(pending_path().read_text(encoding="utf-8"))
+  except (OSError, ValueError):
+    return False
+  return (isinstance(data, dict) and data.get("token") == config["token"] and data.get("endpoint") == config["endpoint"]
+          and data.get("device_id") == config["device_id"])
 
 
 def pending_path() -> Path:
@@ -342,8 +359,14 @@ async def cloud_post(url: str, payload: dict, token: str | None = None) -> tuple
   try:
     async with ClientSession(timeout=ClientTimeout(total=CLOUD_TIMEOUT_S)) as session:
       async with session.post(url, json=payload, headers=headers, allow_redirects=False) as reply:
-        raw = await reply.content.read(CLOUD_MAX_REPLY + 1)
         status = reply.status
+        raw = bytearray()
+        # One read() may return only the first network piece; collect until EOF or past the cap.
+        while len(raw) <= CLOUD_MAX_REPLY:
+          chunk = await reply.content.read(CLOUD_MAX_REPLY + 1 - len(raw))
+          if not chunk:
+            break
+          raw.extend(chunk)
   except (ClientError, asyncio.TimeoutError, OSError, ValueError):
     raise CloudUnavailable() from None
   try:
@@ -377,7 +400,7 @@ async def create_invite(request: web.Request) -> web.Response:
   if endpoint is None:
     return failure("이 콤마의 클라우드 주소로는 등록 코드를 만들 수 없습니다.", 409)
   try:
-    status, reply = await cloud_post(f"{config['endpoint']}/api/devices/invites", {}, token=config["token"])
+    status, reply = await cloud_post(f"{endpoint}/api/devices/invites", {}, token=config["token"])
   except CloudUnavailable:
     return failure("클라우드에 연결하지 못했습니다. 잠시 뒤 다시 시도해 주세요.", 502)
   code, expires_at = reply.get("code"), reply.get("expiresAt")
@@ -389,6 +412,8 @@ async def create_invite(request: web.Request) -> web.Response:
     return failure("등록 코드로 등록한 콤마는 다른 콤마를 등록할 수 없습니다. 처음 등록한 콤마에서 만들어 주세요.", 403)
   if status == 429 and error == "invite_limit":
     return failure("아직 쓰지 않은 등록 코드가 3개 있습니다. 코드를 쓰거나 30분이 지난 뒤 다시 만들어 주세요.", 429)
+  if status == 429 and error == "invite_daily_limit":
+    return failure("최근 24시간 동안 등록 코드를 10개 만들어 더 만들 수 없습니다. 가장 먼저 만든 코드로부터 24시간이 지나면 다시 만들 수 있습니다.", 429)
   if status == 401:
     return failure("클라우드가 이 콤마의 키를 받아들이지 않았습니다.", 502)
   if status in (404, 405):
@@ -417,9 +442,17 @@ async def register_device(request: web.Request) -> web.Response:
 async def register_locked(body: dict) -> web.Response:
   config, reason = read_config()
   if config is not None:
+    # An earlier attempt published this config but could not confirm it durable: finish it.
+    if pending_matches(config):
+      try:
+        fsync_directory(CONFIG_PATH.parent)
+      except OSError:
+        return failure("키 파일 저장을 아직 확인하지 못했습니다. 잠시 뒤 다시 눌러 주세요.", 500)
+      drop_pending()
+      return response({"ok": True, "device_id": config["device_id"], "endpoint_host": urlsplit(config["endpoint"]).hostname})
     return failure("이 콤마에는 이미 My Traverse 키가 있습니다.", 409)
-  if reason != "missing":
-    return failure("키 파일이 이미 있지만 읽을 수 없어 덮어쓰지 않습니다.", 409)
+  if reason != "missing" or config_slot_taken():
+    return failure("키 파일 자리에 읽을 수 없는 파일이나 링크가 있어 덮어쓰지 않습니다.", 409)
   try:
     endpoint, code = decode_invite(body.get("invite"))
   except ValueError as error:
@@ -451,7 +484,8 @@ async def register_locked(body: dict) -> web.Response:
     except FileExistsError:
       return failure("등록 중에 다른 키 파일이 생겨 덮어쓰지 않았습니다. 화면을 새로 고쳐 확인해 주세요.", 409)
     except OSError:
-      return failure("등록은 됐지만 키 파일을 쓰지 못했습니다. 다시 누르면 같은 키로 마무리합니다.", 500)
+      # The pending key stays; pressing again finishes with the same key (or confirms a published file).
+      return failure("등록은 됐지만 키 파일 저장을 확인하지 못했습니다. 다시 누르면 같은 키로 마무리합니다.", 500)
     drop_pending()
     return response({"ok": True, "device_id": device, "endpoint_host": urlsplit(endpoint).hostname})
   error = reply.get("error")

@@ -39,7 +39,10 @@ class Cloud:
     self.calls.append((url, payload, token))
     if self.gate is not None:
       await self.gate.wait()
-    suffix = "/api/devices/invites" if url.endswith("/api/devices/invites") else "/api/devices/register"
+    path = url.split("://", 1)[1].split("/", 1)[1] if "://" in url else url
+    if "//" in path or not path.startswith("api/devices/"):
+      return 404, {}  # the Worker routes only exact paths
+    suffix = "/" + path
     queued = self.replies.get(suffix)
     if queued:
       reply = queued.pop(0)
@@ -108,7 +111,8 @@ def test_owner_creates_an_invite_that_carries_its_cloud_address_but_never_its_ke
       return reply.status, await reply.json(), reply.headers
   status, body_, headers = run(body())
   assert status == 200 and headers["Cache-Control"] == "no-store"
-  assert cloud.calls == [(ENDPOINT + "//api/devices/invites", {}, OWNER_KEY)]
+  # The trailing slash of the stored endpoint is not doubled into the request path.
+  assert cloud.calls == [(ENDPOINT + "/api/devices/invites", {}, OWNER_KEY)]
   assert api.decode_invite(body_["invite"]) == (ENDPOINT, CODE)
   assert body_["endpoint_host"] == "cloud.example.com" and body_["expires_at"] == "2026-11-12T03:30:00.000Z"
   assert OWNER_KEY not in json.dumps(body_)
@@ -117,6 +121,7 @@ def test_owner_creates_an_invite_that_carries_its_cloud_address_but_never_its_ke
 @pytest.mark.parametrize("reply,status,text", [
   ((403, {"error": "invite_not_allowed"}), 403, "처음 등록한 콤마"),
   ((429, {"error": "invite_limit"}), 429, "3개"),
+  ((429, {"error": "invite_daily_limit"}), 429, "24시간"),
   ((401, {"error": "unauthorized"}), 502, "받아들이지"),
   ((404, {}), 502, "지원하지"),
   ((200, {"ok": True, "code": "short", "expiresAt": "x"}), 502, "HTTP 200"),
@@ -408,9 +413,14 @@ def test_a_dangling_symlink_in_place_of_the_key_file_is_not_followed(api, monkey
   async def body():
     async with TestClient(TestServer(app)) as client:
       r = await client.post("/api/wayon_key/register", json={"confirmed": True, "invite": invite_text()}, headers=same_origin(client, await csrf(client)))
-      return r.status
-  assert run(body()) == 409
+      status = await (await client.get("/api/wayon_key")).json()
+      return r.status, status
+  code, status = run(body())
+  assert code == 409
   assert not target.exists() and path.is_symlink()
+  # Refused before any pending key or cloud call, and the page does not offer registration.
+  assert cloud.calls == [] and not api.pending_path().exists()
+  assert status["can_register"] is False
 
 
 def test_another_process_holding_the_register_lock_turns_requests_away(api, monkeypatch, tmp_path):
@@ -431,3 +441,69 @@ def test_another_process_holding_the_register_lock_turns_requests_away(api, monk
     assert cloud.calls == []
   finally:
     os.close(fd)
+
+
+def test_cloud_post_collects_a_reply_that_arrives_in_pieces_and_caps_large_ones(api):
+  async def body():
+    async def split(request):
+      reply = web.StreamResponse(status=200, headers={"Content-Type": "application/json"})
+      await reply.prepare(request)
+      await reply.write(b'{"ok": true, "code": "')
+      await asyncio.sleep(0.2)
+      await reply.write(CODE.encode() + b'", "expiresAt": "2026-11-12T03:30:00.000Z"}')
+      await reply.write_eof()
+      return reply
+    async def huge(request):
+      return web.Response(body=b'{"ok": true, "pad": "' + b"x" * 10000 + b'"}', content_type="application/json")
+    async def redirect(request):
+      raise web.HTTPFound("/split")
+    app = web.Application()
+    app.router.add_post("/split", split)
+    app.router.add_post("/huge", huge)
+    app.router.add_post("/redirect", redirect)
+    async with TestServer(app) as server:
+      base = str(server.make_url("")).rstrip("/")
+      return (await api.cloud_post(base + "/split", {}), await api.cloud_post(base + "/huge", {}),
+              await api.cloud_post(base + "/redirect", {}))
+  split, huge, redirect = run(body())
+  assert split == (200, {"ok": True, "code": CODE, "expiresAt": "2026-11-12T03:30:00.000Z"})
+  assert huge == (200, {})
+  assert redirect[0] == 302  # never followed
+
+
+def test_an_unconfirmed_pending_write_stops_before_the_cloud(api, monkeypatch, tmp_path):
+  cloud = Cloud()
+  app, path = make_app(api, monkeypatch, tmp_path, cloud)
+  def broken(directory):
+    raise OSError("EIO")
+  monkeypatch.setattr(api, "fsync_directory", broken)
+  async def body():
+    async with TestClient(TestServer(app)) as client:
+      r = await client.post("/api/wayon_key/register", json={"confirmed": True, "invite": invite_text()}, headers=same_origin(client, await csrf(client)))
+      return r.status
+  assert run(body()) == 500
+  assert cloud.calls == [] and not path.exists()
+
+
+def test_an_unconfirmed_config_write_keeps_the_pending_key_until_a_second_press_confirms_it(api, monkeypatch, tmp_path):
+  cloud = Cloud()
+  app, path = make_app(api, monkeypatch, tmp_path, cloud)
+  real = api.fsync_directory
+  calls = {"n": 0}
+  def flaky(directory):
+    calls["n"] += 1
+    if calls["n"] == 2:  # 1st: pending, 2nd: config
+      raise OSError("EIO")
+    return real(directory)
+  monkeypatch.setattr(api, "fsync_directory", flaky)
+  async def body():
+    async with TestClient(TestServer(app)) as client:
+      headers = same_origin(client, await csrf(client))
+      first = await client.post("/api/wayon_key/register", json={"confirmed": True, "invite": invite_text()}, headers=headers)
+      kept = api.pending_path().exists()
+      second = await client.post("/api/wayon_key/register", json={"confirmed": True, "invite": invite_text()}, headers=headers)
+      return first.status, kept, second.status, await second.json()
+  first, kept, second, reply = run(body())
+  assert first == 500 and kept and path.exists()
+  assert second == 200 and reply["device_id"] == DONGLE
+  assert not api.pending_path().exists() and len(cloud.calls) == 1
