@@ -4,7 +4,7 @@ import math
 import pytest
 
 from opendbc.car import Bus, structs
-from opendbc.car.gm.stock_fcw import STOCK_FCW_TIMEOUT_FRAMES, StockFcw, stock_fcw_supported
+from opendbc.car.gm.stock_fcw import STOCK_FCW_MAX_AGE_NS, StockFcw, stock_fcw_supported
 from opendbc.car.gm.values import CAR, DBC, GMSafetyFlags
 from opendbc.car.gm.tests.test_display_speed import runtime, build_cp, controller_state, frames, parser_state  # noqa: F401
 
@@ -21,23 +21,35 @@ def dashboard_alerts(sends):
   return [data[5] & 3 for address, data, bus in sends if address == 0x370 and bus == 0]
 
 
-def test_alert_follows_camera_and_times_out():
+MS = 1_000_000
+
+
+def test_alert_follows_camera_and_expires_by_time():
   fcw = StockFcw()
   assert fcw.alert == 0
-  assert fcw.update([]) == 0
-  assert fcw.update([3.]) == 3
-  for _ in range(STOCK_FCW_TIMEOUT_FRAMES):
-    assert fcw.update([]) == 3
-  assert fcw.update([]) == 0
-  assert fcw.update([2., 0.]) == 2
-  assert fcw.update([0.]) == 0
+  assert fcw.update([], 0, 1000 * MS) == 0
+  assert fcw.update([3.], 1000 * MS, 1000 * MS) == 3
+  assert fcw.update([], 0, 1000 * MS + STOCK_FCW_MAX_AGE_NS) == 3
+  assert fcw.update([], 0, 1000 * MS + STOCK_FCW_MAX_AGE_NS + 1) == 0
+  # A stalled loop resuming much later never replays the old alert.
+  assert fcw.update([2.], 2000 * MS, 2000 * MS) == 2
+  assert fcw.update([], 0, 3000 * MS) == 0
+  # A sample from the future or with no time is treated as stale.
+  assert fcw.update([3.], 4000 * MS, 3990 * MS) == 0
+  assert fcw.update([3.], 0, 5000 * MS) == 0
+
+
+@pytest.mark.parametrize("values,expected", [([3., 0.], 0), ([3., 1.], 1), ([2., 0.], 0), ([0., 3.], 3), ([1., 2., 3.], 3)])
+def test_newest_camera_value_wins(values, expected):
+  fcw = StockFcw()
+  assert fcw.update(values, 1000 * MS, 1000 * MS) == expected
 
 
 @pytest.mark.parametrize("bad", [math.nan, math.inf, -1., 4., 2.5, True, None, "3"])
 def test_malformed_values_are_ignored(bad):
   fcw = StockFcw()
-  assert fcw.update([bad]) == 0
-  assert fcw.update([3., bad]) == 3
+  assert fcw.update([bad], 1000 * MS, 1000 * MS) == 0
+  assert fcw.update([3., bad], 1000 * MS, 1000 * MS) == 3
 
 
 def test_supported_only_on_traverse_sdgm_long(runtime):
@@ -63,11 +75,38 @@ def test_real_parser_reads_camera_fcw_without_new_requirements(runtime):
     assert ret.to_dict() == plain_ret.to_dict()
   for parser, plain_parser in zip(ci.can_parsers.values(), plain.can_parsers.values(), strict=True):
     assert set(parser.message_states) == set(plain_parser.message_states)
-  # No camera frame: the last alert holds briefly, then clears.
-  for tick in range(STOCK_FCW_TIMEOUT_FRAMES + 1):
+  # No camera frame: the last alert holds for at most 250 ms of CAN time, then clears.
+  last_camera = t
+  for _ in range(30):
     t += 10_000_000
     ci.update([(t, pt_frames(packer))])
-    assert ci.CS.cam_fcw_alert == (3 if tick < STOCK_FCW_TIMEOUT_FRAMES else 0)
+    assert ci.CS.cam_fcw_alert == (3 if t - last_camera <= STOCK_FCW_MAX_AGE_NS else 0)
+
+
+@pytest.mark.parametrize("step_ms", [10, 20, 40, 1000])
+def test_slow_or_stalled_updates_expire_on_can_time(runtime, step_ms):
+  ci, packer = parser_state(runtime)
+  t = 1_000_000_000
+  ci.update([(t, pt_frames(packer) + [camera_status(packer, 3)])])
+  last_camera = t
+  assert ci.CS.cam_fcw_alert == 3
+  while t - last_camera <= 1_100_000_000:
+    t += step_ms * MS
+    ci.update([(t, pt_frames(packer))])
+    assert ci.CS.cam_fcw_alert == (3 if t - last_camera <= STOCK_FCW_MAX_AGE_NS else 0)
+
+
+@pytest.mark.parametrize("sequence,expected", [((3, 0), 0), ((3, 1), 1), ((2, 0), 0), ((0, 3), 3)])
+def test_batched_camera_frames_use_the_newest(runtime, sequence, expected):
+  ci, packer = parser_state(runtime)
+  first, second = sequence
+  ci.update([(1_000_000_000, pt_frames(packer) + [camera_status(packer, first)]),
+             (1_040_000_000, pt_frames(packer) + [camera_status(packer, second)])])
+  assert ci.CS.cam_fcw_alert == expected
+  controller = runtime.controller.CarController(DBC[CAR.CHEVROLET_TRAVERSE], build_cp(runtime))
+  controller.fcw_warning_test = None
+  _, sends = controller.update(structs.CarControl().as_reader(), ci.CS, 1_040_000_000)
+  assert dashboard_alerts(sends) == [expected]
 
 
 def test_other_cars_never_track_camera_fcw(runtime):

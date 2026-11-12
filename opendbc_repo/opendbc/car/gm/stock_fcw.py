@@ -13,9 +13,9 @@ from opendbc.car.gm.values import CAR, GMSafetyFlags
 
 NetworkLocation = structs.CarParams.NetworkLocation
 
-# CarState updates at 100 Hz and the camera sends 0x370 at 25 Hz, so 25 updates without
-# a camera frame is about six missed frames. A stale camera never keeps the LED on.
-STOCK_FCW_TIMEOUT_FRAMES = 25
+# The camera sends 0x370 at 25 Hz. Age is measured on the CAN packet clock, so a slow or
+# stalled CarState loop cannot stretch it: a stale camera never keeps the LED on.
+STOCK_FCW_MAX_AGE_NS = 250_000_000
 
 
 def stock_fcw_supported(CP) -> bool:
@@ -33,16 +33,15 @@ def _alert_value(value) -> int | None:
 class StockFcw:
   def __init__(self):
     self.alert = 0
-    self.frames_since_update = STOCK_FCW_TIMEOUT_FRAMES + 1
+    self.sample_ns = 0
 
-  def update(self, values) -> int:
-    """values: every FCWAlert received from the camera 0x370 in this CarState update."""
+  def update(self, values, sample_ns: int, now_ns: int) -> int:
+    """values: FCWAlert of every camera 0x370 parsed in this update, oldest first.
+    sample_ns: CAN time of the newest of those frames. now_ns: CAN time of the newest packet."""
     received = [alert for alert in map(_alert_value, values or ()) if alert is not None]
     if received:
-      self.alert = max(received)
-      self.frames_since_update = 0
-    else:
-      self.frames_since_update = min(self.frames_since_update + 1, STOCK_FCW_TIMEOUT_FRAMES + 1)
-      if self.frames_since_update > STOCK_FCW_TIMEOUT_FRAMES:
-        self.alert = 0
+      self.alert = received[-1]  # the camera's current value, including a clear
+      self.sample_ns = sample_ns
+    if self.alert and not 0 <= now_ns - self.sample_ns <= STOCK_FCW_MAX_AGE_NS:
+      self.alert = 0
     return self.alert

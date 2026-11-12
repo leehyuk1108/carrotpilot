@@ -249,7 +249,10 @@ class CarState(CarStateBase):
       # The camera 0x370 is already registered by the set-speed read above; a plain
       # dict lookup never adds a parser requirement. Only the dashboard FCW uses this.
       camera_status = cam_cp.vl_all.get("ASCMActiveCruiseControlStatus")
-      self.cam_fcw_alert = self.stock_fcw.update(camera_status.get("FCWAlert", ()) if camera_status else ())
+      camera_times = cam_cp.ts_nanos.get("ASCMActiveCruiseControlStatus") or {}
+      # The parser's own packet clock (also used for its timeouts); missing means stale, never on.
+      self.cam_fcw_alert = self.stock_fcw.update(camera_status.get("FCWAlert", ()) if camera_status else (),
+                                                 camera_times.get("FCWAlert", 0), getattr(cam_cp, "_last_update_nanos", 0))
     if self.CP.carFingerprint in CC_ONLY_CAR:
       ret.accFaulted = False
       ret.cruiseState.speed = pt_cp.vl["ECMCruiseControl"]["CruiseSetSpeed"] * CV.KPH_TO_MS
