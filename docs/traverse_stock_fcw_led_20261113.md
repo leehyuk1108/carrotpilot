@@ -20,10 +20,10 @@
 - `carcontroller.py`, `gmcan.py`: 오픈파일럿 `0x370`의 FCWAlert를 "오픈파일럿 자체 FCW면 3, 아니면 카메라 값"으로 채운다. 다른 필드와 다른 메시지, 조향·제동·가속 출력은 그대로다. 다른 차종과 트레일블레이저 경로는 바뀌지 않는다.
 
 - 콤마 경보: 카메라 값이 3이면 `carState.stockFcw`를 켠다(1·2는 충돌 경고인지 확인되지 않아 제외. 10/18에 값 2가 앞차 15.7 m·102 km/h에서 11초 이어진 적이 있어 차간 경고일 가능성이 있다).
-  - `events.py`: 비어 있던 `stockFcw`에 PERMANENT 경보를 넣었다. "BRAKE!" / "Stock FCW: Risk of Collision", critical·full·HIGHEST, 소리 stopStop(오픈파일럿 FCW와 같음), 2초. 시각 HUD 요청은 `none`이라 차로 가는 0x370은 카메라 값만 따른다.
-  - C4 문구(`mici_event_alert_overrides.json`): "전방 추돌 주의" / "순정 카메라 경고: 추돌 위험"(오픈파일럿 FCW와 같은 글자 크기).
-  - `stockFcw`를 읽는 제어 경로는 없다(이벤트 추가와 블랙박스 기록만).
-  - 다른 차종도 자기 `stockFcw`가 켜지면 같은 경보가 뜬다(이 포크는 트래버스 전용으로 쓰는 중).
+  - `openpilot/selfdrive/car/car_specific.py` GM 분기: `stockFcw`면 기존 `fcw` 이벤트를 추가한다. C4에는 오픈파일럿 FCW와 같은 "전방 추돌 주의 / 전방 차량과 추돌 위험이 있습니다" 경보와 stopStop 소리가 뜬다.
+  - 공용 `stockFcw` 이벤트는 그대로(경보 없음) 둔다. 다른 차종의 화면·소리는 바뀌지 않는다. 처음에는 `stockFcw`에 새 경보를 넣었는데, Codex 리뷰에서 다른 7개 브랜드에도 경보가 생기고 같은 우선순위의 자체 FCW LED 요청을 가린다는 지적을 받아 바꿨다.
+  - `fcw` 경보는 HUD에 FCW를 요청하므로 오픈파일럿 0x370 FCWAlert도 3이 된다. 그래서 순정 FCW 때 LED는 경보 최소 표시 시간인 2초 이상 켜진다(카메라만 따르면 약 1.1초).
+  - `fcw` 이벤트를 읽는 제어 경로는 없다. 다른 곳(주행 리포트 등)은 플래너의 `longitudinalPlan.fcw`를 직접 읽으므로 순정 FCW는 거기 집계되지 않는다. 블랙박스 리포트는 원래 `stockFcw`도 FCW로 센다.
 
 ## 검증
 
@@ -35,5 +35,5 @@
   - 85번: 카메라 FCW 28프레임, 재생 출력 FCW 3도 28프레임이다. 시작은 약 11 ms 늦고 길이(1.08초)는 같다.
   - 85번 `stockFcw` 이벤트: 카메라 FCW와 같은 순간부터 1.11초.
   - 84번·86번: 카메라 FCW 0, 재생 출력 FCW 0, 이벤트 없음이다.
-- 경보 표시 테스트(`selfdrived/tests/test_alert_presentation.py`, 맥, capnp 없는 격리 모드): 수정본 16 통과(새 1개), 기준 15 통과. capnp가 필요한 2개는 건너뜀.
+- GM 이벤트 테스트(`openpilot/selfdrive/car/tests/test_gm_stock_fcw_event.py`, 콤마에서 수정한 car_specific.py를 불러와 실행): 수정본 8 통과. 기준은 GM 1개만 실패하고 다른 7개 브랜드는 통과(다른 차종 동작 그대로).
 - 실제 주행 중 LED 점등과 콤마 경보는 아직 못 봤다. 다음 순정 FCW 때 확인해야 한다.

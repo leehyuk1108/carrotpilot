@@ -472,6 +472,7 @@ def car_parser_result(CP: car.CarParams, CS: car.CarState, sm: messaging.SubMast
 EVENTS: dict[int, dict[str, Alert | AlertCallbackType]] = {
   # ********** events with no alerts **********
 
+  EventName.stockFcw: {},
   EventName.actuatorsApiUnavailable: {},
 
   # ********** events only containing alerts displayed in all states **********
@@ -558,16 +559,6 @@ EVENTS: dict[int, dict[str, Alert | AlertCallbackType]] = {
       AlertStatus.critical, AlertSize.full,
       Priority.HIGHEST, VisualAlert.fcw, AudibleAlert.stopStop, 2.),
     ET.NO_ENTRY: NoEntryAlert("Stock AEB: Risk of Collision"),
-  },
-
-  # The car's own FCW (e.g. the Traverse camera's 0x370 FCWAlert). Display and sound only:
-  # no visual HUD request, since the car already drives its own warning lamps.
-  EventName.stockFcw: {
-    ET.PERMANENT: Alert(
-      "BRAKE!",
-      "Stock FCW: Risk of Collision",
-      AlertStatus.critical, AlertSize.full,
-      Priority.HIGHEST, VisualAlert.none, AudibleAlert.stopStop, 2.),
   },
 
   EventName.stockLkas: {

@@ -254,7 +254,7 @@ class CarState(CarStateBase):
       self.cam_fcw_alert = self.stock_fcw.update(camera_status.get("FCWAlert", ()) if camera_status else (),
                                                  camera_times.get("FCWAlert", 0))
       # 3 is the collision alert seen with the seat pulse (11/4); 1 and 2 are not confirmed as one,
-      # so only 3 raises the comma's stock FCW alert. Event only: no control path reads stockFcw.
+      # so only 3 sets stockFcw, which car_specific turns into the existing forward-collision alert.
       ret.stockFcw = self.cam_fcw_alert == 3
     if self.CP.carFingerprint in CC_ONLY_CAR:
       ret.accFaulted = False

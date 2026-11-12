@@ -157,7 +157,7 @@ class TestAlertPresentation(unittest.TestCase):
   def test_traffic_stop_notice_does_not_replace_safety_or_departure_sounds(self):
     m = self.module
     stopping = m.EVENTS[m.EventName.trafficStopping][m.ET.WARNING]
-    for event in (m.EventName.fcw, m.EventName.aeb, m.EventName.stockAeb, m.EventName.stockFcw):
+    for event in (m.EventName.fcw, m.EventName.aeb, m.EventName.stockAeb):
       alert = m.EVENTS[event][m.ET.PERMANENT]
       self.assertGreater(alert.priority, stopping.priority)
       self.assertEqual(alert.audible_alert, m.AudibleAlert.stopStop)
@@ -183,30 +183,10 @@ class TestAlertPresentation(unittest.TestCase):
         self.assertEqual(alert.duration, int(2. / m.DT_CTRL))
         self.assertEqual(alert.creation_delay, 0.)
         self.assertEqual(ev.create_alerts([m.ET.NO_ENTRY, m.ET.SOFT_DISABLE, m.ET.IMMEDIATE_DISABLE], callback_args()), [])
-        for event in (m.EventName.fcw, m.EventName.aeb, m.EventName.stockAeb, m.EventName.stockFcw,
+        for event in (m.EventName.fcw, m.EventName.aeb, m.EventName.stockAeb,
                       m.EventName.driverDistracted1, m.EventName.driverDistracted2, m.EventName.driverDistracted3,
                       m.EventName.driverUnresponsive1, m.EventName.driverUnresponsive2, m.EventName.driverUnresponsive3):
           self.assertLess(alert.priority, m.EVENTS[event][m.ET.PERMANENT].priority)
-
-  def test_stock_fcw_is_a_visible_collision_alert_without_hud_request(self):
-    for device, texts in (("mici", ("전방 추돌 주의", "순정 카메라 경고: 추돌 위험")),
-                          ("tici", ("BRAKE!", "Stock FCW: Risk of Collision"))):
-      with self.subTest(device=device):
-        m = load_events(device)
-        ev = m.Events()
-        ev.add(m.EventName.stockFcw)
-        self.assertEqual(set(m.EVENTS[m.EventName.stockFcw]), {m.ET.PERMANENT})
-        alert, = ev.create_alerts([m.ET.PERMANENT], callback_args())
-        self.assertEqual((alert.alert_text_1, alert.alert_text_2), texts)
-        self.assertEqual(alert.alert_type, "stockFcw/permanent")
-        self.assertEqual(alert.alert_status, m.AlertStatus.critical)
-        self.assertEqual(alert.alert_size, m.AlertSize.full)
-        self.assertEqual(alert.priority, m.Priority.HIGHEST)
-        self.assertEqual(alert.visual_alert, m.VisualAlert.none)
-        self.assertEqual(alert.audible_alert, m.AudibleAlert.stopStop)
-        self.assertEqual(alert.duration, int(2. / m.DT_CTRL))
-        self.assertEqual(ev.create_alerts([m.ET.NO_ENTRY, m.ET.SOFT_DISABLE, m.ET.IMMEDIATE_DISABLE,
-                                           m.ET.USER_DISABLE, m.ET.WARNING], callback_args()), [])
 
   def test_steering_delay_and_critical_bypass_unchanged(self):
     m = self.module
@@ -232,7 +212,7 @@ class TestAlertPresentation(unittest.TestCase):
     self.assertEqual(presentation.get_override("driverDistracted2", "permanent")["titleFontPx"], 60)
 
   def test_asset_counts_and_unsupported_entries_are_not_events(self):
-    self.assertEqual(len(presentation.load_overrides()), 112)
+    self.assertEqual(len(presentation.load_overrides()), 111)
     supported = supported_configs(self.module)
     unsupported = set(presentation.load_overrides()) - set(supported)
     self.assertTrue(all(not key.startswith("STARPILOT_EVENTS.") for key in supported))
