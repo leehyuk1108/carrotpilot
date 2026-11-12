@@ -114,26 +114,24 @@ See [Understanding Settings](settings.md) for ranges, units, and a safe tuning o
 - The page only opens when you reach the comma's own address, from the same Wi-Fi or your own Tailscale at `http://<comma address>:7000`. Requests carrying proxy headers (`Forwarded`, `X-Forwarded-*`, `Via`, `X-Real-IP`) are refused, and other sites cannot show Carrot Web inside their own page.
 - These checks only narrow who can reach the key page; they do not prove you are the owner. Anyone who can open Carrot Web from the same Wi-Fi or Tailscale can also read the same file through its terminal and tools. Do not put the comma on a Wi-Fi you do not trust, or share it with others on Tailscale.
 - Anyone holding the key can reach the cloud as this comma. Do not send it to others or paste it anywhere public.
-- If no key is reported, the comma has no `/data/wayon_cloud/config.json`. That file is not part of the git branch; register a new comma with an invite code as below.
+- If no key is reported, the comma has no `/data/wayon_cloud/config.json`. That file is not part of the git branch; a new comma gets its own key on this page as below.
 
-#### Registering another comma
+#### Getting this comma's own key (another comma)
 
-Make a one-time invite code in an already registered comma's Carrot Web and paste it into the new comma's Carrot Web. The new comma is registered to the same My Traverse cloud as a **separate device**; the two commas' drives, photos and locations stay apart.
+A comma without a key can get **its own key** on this page and register to the My Traverse cloud as a separate device; its drives, photos and locations stay apart from other commas.
 
-1. In the registered comma's Carrot Web, open `Settings → Device → My Traverse key`, press `다른 콤마 등록 코드 만들기` (Make a code for another comma) and confirm. A code starting with `mtinv1.` is copied; if copying is blocked, long-press the field below. The code is cleared from the screen after five minutes.
-2. Open the same page in the new comma's Carrot Web. A comma without a key shows a field for the code. Paste it and press `이 콤마 등록` (Register this comma); the confirmation names the cloud address and this comma's device ID. Press `등록` (Register) if they are right.
-3. Once registered, the new comma starts connecting with a key it made itself. Copy it with `키 복사` (Copy key) into that car's My Traverse app.
+1. Open `Settings → Device → My Traverse key` in the new comma's Carrot Web. Without a key it shows `이 기기 키 발급받기` (Get this device's key).
+2. Press it and confirm with `발급` (Get). The comma makes a key, proves to the cloud that it is this comma by signing with its comma device key, and registers.
+3. Copy the key with `키 복사` (Copy key) into that car's My Traverse app. The comma starts connecting by itself shortly after.
 
-- A code works once, within 30 minutes. Anyone holding it can register one comma, so paste it only into the comma you are registering.
-- A comma can hold at most three unused codes and make at most ten in any 24 hours. A comma registered with a code cannot make codes for others.
-- The cloud stores only a hash of the code, so a code cleared from the screen cannot be shown again. Make a new one if it is lost; unused codes stop working after 30 minutes. If the key of the comma that made a code is revoked, its unused codes stop working too.
-- A code authorizes a registration; it does not prove who owns the comma. Check the cloud address in the confirmation: pasting a code for a wrong address could send this comma's records there.
-- A comma without a comma device ID (DongleId) cannot be registered. If the device ID is already registered with another key, the page says the key must be reissued.
-- If the cloud reply is lost or writing the key file fails, press the button again on the same page; it finishes with the key it made first.
-- If an earlier attempt for another cloud or device ID is left (`/data/wayon_cloud/register.pending.json`), a new registration stops, because that cloud may already have accepted it. Retry with a code from the same cloud, or delete the file only if you are sure that attempt failed.
-- If a key file already exists (even an unreadable one), the field is not shown and the file is never overwritten.
-- Phone-proximity auto lock/unlock, GM remote start and door locks, and Traverse-only vehicle signals (fuel, odometer, door state) do not come with this registration.
-- The new comma's key file holds only its own cloud address, key and device ID, with the original car's external vehicle-status feed switched off. There is no page yet to remove a registered comma from the cloud.
+- Only a comma registered with comma's servers (one with a device ID) can get a key, and only for its own ID.
+- To protect the cloud's usage (the D1 free tier), at most five devices register this way in any 24 hours and five in total; beyond that the page says to contact the administrator.
+- If the device ID is already registered with another key, the page says the key must be reissued.
+- If the reply is lost or writing the key file fails, press again on the same page; it finishes with the key it made first.
+- If an earlier attempt for another cloud or device ID is left (`/data/wayon_cloud/register.pending.json`), getting a key stops. Delete that file only if you are sure that attempt failed.
+- If a key file already exists (even an unreadable file or a link), the button is not shown and the file is never overwritten.
+- The new comma's key file holds only its own cloud address, key and device ID, with the original car's external vehicle-status feed switched off. Phone-proximity auto lock/unlock, GM remote start and door locks, and Traverse-only vehicle signals (fuel, odometer, door state) do not come with it.
+- There is no page yet to remove a registered comma from the cloud.
 
 ## Tools page
 

@@ -4,18 +4,17 @@ request from the comma's own address on the owner's network.
 The key lives in /data/wayon_cloud/config.json (outside git). The comma uses it to upload drives and
 photos to the My Traverse cloud, so it is never sent to the browser unless the user asks to copy it.
 
-Another comma joins the same cloud with a one-time invite: a registered comma asks the cloud for a code
-(valid 30 minutes, usable once) and shows it with its cloud address as one string. Pasted into the new
-comma's Carrot Web, that comma makes its own key, registers its DongleId with the code and only then
-writes its config. The key is kept in a pending file first, so a retry after a lost reply or a failed
-write reuses the same key, which the cloud accepts again for the same device. Keys and codes are never
-logged.
+A comma without a key gets its own: it makes a key, proves to the cloud that it is this comma (a short JWT
+signed with its comma device key, naming the new key's hash, which the cloud checks with comma's device
+API) and registers its DongleId; only then it writes its config. The key is kept in a pending file first,
+made durable before the cloud is contacted, so a retry after a lost reply or a failed write reuses the same
+key, which the cloud accepts again for the same device. Keys and proofs are never logged.
 """
 from __future__ import annotations
 
 import asyncio
-import base64
 import fcntl
+import hashlib
 import hmac
 import ipaddress
 import json
@@ -50,9 +49,8 @@ REVEAL_INTERVAL_S = 2.0
 MAX_BODY = 1024
 STATE_KEY = web.AppKey("wayon_key_state", dict)
 FORBIDDEN_TEXT = "The My Traverse key is only available from the comma's own address on your network."
-INVITE_PREFIX = "mtinv1."
-INVITE_CODE = re.compile(r"[A-Z2-7]{32}")
-INVITE_MAX_TEXT = 600
+REGISTER_PURPOSE = "wayon-key-register-v1"
+PROOF_LIFETIME_H = 4 / 60
 DONGLE_ID = re.compile(r"[0-9a-f]{16}")
 KEY_PATTERN = re.compile(r"wayon_[A-Za-z0-9_-]{40,96}")
 HOST_LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
@@ -226,32 +224,24 @@ def clean_endpoint(value) -> str | None:
   return f"https://{host}{path}"
 
 
-def encode_invite(endpoint: str, code: str, expires_at: str) -> str:
-  data = json.dumps({"v": 1, "e": endpoint, "c": code, "x": expires_at}, separators=(",", ":")).encode()
-  return INVITE_PREFIX + base64.urlsafe_b64encode(data).decode().rstrip("=")
-
-
-def decode_invite(text) -> tuple[str, str]:
-  """(endpoint, code) from a pasted invite; whitespace from copying across lines is ignored."""
-  if not isinstance(text, str) or len(text) > INVITE_MAX_TEXT:
-    raise ValueError("등록 코드 형식이 아닙니다.")
-  compact = "".join(text.split())
-  if not compact.startswith(INVITE_PREFIX):
-    raise ValueError("등록 코드 형식이 아닙니다. 원래 콤마의 당근웹에서 만든 코드를 그대로 붙여 넣으세요.")
-  encoded = compact[len(INVITE_PREFIX):]
+def cloud_endpoint() -> str | None:
+  """The My Traverse cloud every comma of this fork talks to (wayon_identity's default)."""
   try:
-    if not re.fullmatch(r"[A-Za-z0-9_-]+", encoded):
-      raise ValueError("alphabet")
-    data = json.loads(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)))
-  except (ValueError, TypeError):
-    raise ValueError("등록 코드가 잘렸거나 바뀌었습니다. 다시 복사해 붙여 넣으세요.") from None
-  if not isinstance(data, dict) or data.get("v") != 1:
-    raise ValueError("이 당근웹이 모르는 등록 코드입니다.")
-  endpoint = clean_endpoint(data.get("e"))
-  code = data.get("c")
-  if endpoint is None or endpoint != data.get("e") or not isinstance(code, str) or not INVITE_CODE.fullmatch(code):
-    raise ValueError("등록 코드가 잘렸거나 바뀌었습니다. 다시 복사해 붙여 넣으세요.")
-  return endpoint, code
+    from openpilot.system.wayon_identity import DEFAULT_ENDPOINT
+  except Exception:
+    return None
+  return clean_endpoint(DEFAULT_ENDPOINT)
+
+
+def device_proof(device: str, request_id: str, key_hash: str) -> str:
+  """A short-lived JWT signed with this comma's device key (the one comma's servers know), bound to the
+  new key's hash and this request. Raises if the comma has no device key."""
+  from openpilot.common.api import Api
+  api = Api(device)
+  if api.private_key is None:
+    raise OSError("no comma device key")
+  return api.get_token(payload_extra={"wayon": {"purpose": REGISTER_PURPOSE, "requestId": request_id, "newKeyHash": key_hash}},
+                       expiry_hours=PROOF_LIFETIME_H)
 
 
 def write_private_json(path: Path, data: dict, replace: bool = True) -> None:
@@ -388,41 +378,6 @@ def throttled(state: dict, name: str) -> bool:
   return False
 
 
-async def create_invite(request: web.Request) -> web.Response:
-  await confirmed_body(request)
-  state = request.app[STATE_KEY]
-  if throttled(state, "last_invite"):
-    return failure("잠시 뒤 다시 시도해 주세요.", 429)
-  config, _ = read_config()
-  if config is None:
-    return failure("이 콤마에는 My Traverse 키가 없어 등록 코드를 만들 수 없습니다.", 404)
-  endpoint = clean_endpoint(config["endpoint"])
-  if endpoint is None:
-    return failure("이 콤마의 클라우드 주소로는 등록 코드를 만들 수 없습니다.", 409)
-  try:
-    status, reply = await cloud_post(f"{endpoint}/api/devices/invites", {}, token=config["token"])
-  except CloudUnavailable:
-    return failure("클라우드에 연결하지 못했습니다. 잠시 뒤 다시 시도해 주세요.", 502)
-  code, expires_at = reply.get("code"), reply.get("expiresAt")
-  if status == 200 and isinstance(code, str) and INVITE_CODE.fullmatch(code) and isinstance(expires_at, str) and len(expires_at) <= 40:
-    return response({"ok": True, "invite": encode_invite(endpoint, code, expires_at), "expires_at": expires_at,
-                     "endpoint_host": urlsplit(endpoint).hostname})
-  error = reply.get("error")
-  if status == 403 and error == "invite_not_allowed":
-    return failure("등록 코드로 등록한 콤마는 다른 콤마를 등록할 수 없습니다. 처음 등록한 콤마에서 만들어 주세요.", 403)
-  if status == 429 and error == "invite_limit":
-    return failure("아직 쓰지 않은 등록 코드가 3개 있습니다. 코드를 쓰거나 30분이 지난 뒤 다시 만들어 주세요.", 429)
-  if status == 429 and error == "invite_daily_limit":
-    return failure("최근 24시간 동안 등록 코드를 10개 만들어 더 만들 수 없습니다. 가장 먼저 만든 코드로부터 24시간이 지나면 다시 만들 수 있습니다.", 429)
-  if status == 429 and error == "invite_retry":
-    return failure("다른 등록과 겹쳤습니다. 바로 다시 만들어 주세요.", 429)
-  if status == 401:
-    return failure("클라우드가 이 콤마의 키를 받아들이지 않았습니다.", 502)
-  if status in (404, 405):
-    return failure("클라우드가 아직 등록 코드를 지원하지 않습니다.", 502)
-  return failure(f"클라우드가 등록 코드를 만들지 못했습니다(HTTP {status}).", 502)
-
-
 async def register_device(request: web.Request) -> web.Response:
   body = await confirmed_body(request)
   state = request.app[STATE_KEY]
@@ -455,17 +410,16 @@ async def register_locked(body: dict) -> web.Response:
     return failure("이 콤마에는 이미 My Traverse 키가 있습니다.", 409)
   if reason != "missing" or config_slot_taken():
     return failure("키 파일 자리에 읽을 수 없는 파일이나 링크가 있어 덮어쓰지 않습니다.", 409)
-  try:
-    endpoint, code = decode_invite(body.get("invite"))
-  except ValueError as error:
-    return failure(str(error), 400)
+  endpoint = cloud_endpoint()
+  if endpoint is None:
+    return failure("My Traverse 클라우드 주소를 찾지 못했습니다.", 500)
   device = dongle_id()
   if not device:
     return failure("이 콤마의 기기 ID(DongleId)를 읽지 못했습니다. comma 서버에 등록된 콤마만 등록할 수 있습니다.", 409)
   try:
     token = read_pending(endpoint, device)
   except PendingConflict as conflict:
-    return failure(f"이전 등록 시도 기록이 다른 클라우드나 기기용이거나 읽을 수 없습니다({conflict}). 그 클라우드의 코드로 다시 시도하거나, "
+    return failure(f"이전 키 발급 시도 기록이 다른 클라우드나 기기용이거나 읽을 수 없습니다({conflict}). "
                    f"그 시도가 실패한 것이 확실하면 {pending_path()} 파일을 지운 뒤 다시 시도하세요.", 409)
   try:
     if token is None:
@@ -477,9 +431,15 @@ async def register_locked(body: dict) -> web.Response:
   except OSError:
     return failure("등록 준비 파일 저장을 확인하지 못했습니다. 잠시 뒤 다시 시도해 주세요.", 500)
   try:
-    status, reply = await cloud_post(f"{endpoint}/api/devices/register", {"deviceId": device, "key": token, "invite": code})
+    request_id = secrets.token_urlsafe(18)
+    proof = device_proof(device, request_id, hashlib.sha256(token.encode()).hexdigest())
+  except Exception:
+    return failure("이 콤마의 comma 기기 키로 확인 서명을 만들지 못했습니다.", 409)
+  try:
+    status, reply = await cloud_post(f"{endpoint}/api/devices/self-register",
+                                     {"deviceId": device, "key": token, "requestId": request_id, "proof": proof})
   except CloudUnavailable:
-    return failure("클라우드에 연결하지 못했습니다. 잠시 뒤 같은 코드로 다시 눌러 주세요.", 502)
+    return failure("클라우드에 연결하지 못했습니다. 잠시 뒤 다시 눌러 주세요.", 502)
   if status == 200 and reply.get("ok") is True and reply.get("deviceId") == device:
     # Only this comma's own cloud, key and ID. vehicle_status_url is the owner car's external status feed
     # in the uploader's defaults; an empty value keeps a new comma from reading it.
@@ -497,17 +457,20 @@ async def register_locked(body: dict) -> web.Response:
   if status == 409 and error == "device_already_registered":
     drop_pending()
     return failure("이 콤마는 이미 다른 키로 클라우드에 등록돼 있습니다. 키 재발급이 필요합니다.", 409)
-  if status == 403:
-    return failure("코드가 틀렸거나, 30분이 지났거나, 이미 사용됐습니다. 원래 콤마에서 새 코드를 만들어 주세요.", 403)
+  if status == 403 and error == "device_proof_rejected":
+    return failure("comma 서버에서 이 기기를 확인하지 못했습니다. comma 서버에 등록된 콤마여야 하고, 콤마 시계가 맞아야 합니다.", 403)
+  if status == 429 and error == "self_register_limit":
+    return failure("지금은 클라우드가 새 기기를 더 받을 수 없습니다(사용량 보호 한도). 관리자에게 문의해 주세요.", 429)
+  if status == 503 and error == "device_proof_unavailable":
+    return failure("comma 서버 확인이 잠시 안 됩니다. 잠시 뒤 다시 눌러 주세요.", 502)
   if status in (404, 405):
-    return failure("클라우드가 아직 등록 코드를 지원하지 않습니다.", 502)
+    return failure("클라우드가 아직 기기 키 발급을 지원하지 않습니다.", 502)
   return failure(f"클라우드가 등록을 받아들이지 않았습니다(HTTP {status}).", 502)
 
 
 def register(app: web.Application) -> None:
-  app[STATE_KEY] = {"csrf": secrets.token_urlsafe(32), "last_reveal": float("-inf"), "last_invite": float("-inf"),
+  app[STATE_KEY] = {"csrf": secrets.token_urlsafe(32), "last_reveal": float("-inf"),
                     "last_register": float("-inf"), "register_lock": asyncio.Lock()}
   app.router.add_get("/api/wayon_key", get_status)
   app.router.add_post("/api/wayon_key/reveal", reveal)
-  app.router.add_post("/api/wayon_key/invite", create_invite)
   app.router.add_post("/api/wayon_key/register", register_device)
