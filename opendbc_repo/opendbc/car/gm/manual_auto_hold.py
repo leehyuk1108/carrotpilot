@@ -1,4 +1,4 @@
-"""Disengaged Traverse pedal hold, independent of ACC stopping and resume."""
+"""Disengaged GM pedal hold, independent of ACC stopping and resume."""
 import math
 
 from opendbc.car import structs
@@ -10,12 +10,28 @@ HOLD_BRAKE = 400
 HOLD_SPEED = 0.05
 
 
+# Car -> brakes through the SDGM camera-bus harness. The Traverse uses that
+# harness; the 2021-22 Trailblazer and 2024 Trax use the regular camera-long
+# powertrain brake path. Cruise-only variants have no ACC brake path.
+MANUAL_HOLD_CARS = {
+  CAR.CHEVROLET_TRAVERSE: True,
+  CAR.CHEVROLET_TRAILBLAZER: False,
+  CAR.CHEVROLET_TRAX: False,
+}
+
+
 def manual_hold_supported(CP):
-  required = GMSafetyFlags.HW_CAM | GMSafetyFlags.HW_CAM_LONG | GMSafetyFlags.HW_SDGM | GMSafetyFlags.MANUAL_AUTO_HOLD
-  incompatible = (GMSafetyFlags.CC_LONG | GMSafetyFlags.NO_ACC | GMSafetyFlags.PEDAL_LONG |
+  sdgm = MANUAL_HOLD_CARS.get(CP.carFingerprint)
+  if sdgm is None:
+    return False
+  required = GMSafetyFlags.HW_CAM | GMSafetyFlags.HW_CAM_LONG | GMSafetyFlags.MANUAL_AUTO_HOLD
+  incompatible = (GMSafetyFlags.CC_LONG | GMSafetyFlags.NO_ACC | GMSafetyFlags.PEDAL_LONG | GMSafetyFlags.NO_CAMERA |
                   GMSafetyFlags.GAS_INTERCEPTOR | GMSafetyFlags.HW_ASCM_LONG | GMSafetyFlags.EV)
-  return (CP.carFingerprint == CAR.CHEVROLET_TRAVERSE and CP.openpilotLongitudinalControl and
-          not CP.enableGasInterceptorDEPRECATED and bool(CP.safetyConfigs) and
+  if sdgm:
+    required |= GMSafetyFlags.HW_SDGM
+  else:
+    incompatible |= GMSafetyFlags.HW_SDGM
+  return (CP.openpilotLongitudinalControl and not CP.enableGasInterceptorDEPRECATED and bool(CP.safetyConfigs) and
           (CP.safetyConfigs[0].safetyParam & required) == required and
           not CP.safetyConfigs[0].safetyParam & incompatible)
 

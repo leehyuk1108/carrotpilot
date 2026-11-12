@@ -275,8 +275,11 @@ static bool gm_tx_hook(const CANPacket_t *to_send) {
   // GAS/REGEN: safety check
   if (addr == 0x2CB) {
     bool apply = GET_BIT(to_send, 0U);
+    // A driver-armed manual hold is brake-only: no transmit request may turn
+    // it into longitudinal permission, on either harness.
+    const bool hold_pending = gm_manual_hold && (gm_hold.armed || gm_hold.active);
     // SDGM transmit requests must never restore permission after disengagement.
-    if (apply && !controls_allowed && !gm_sdgm) {
+    if (apply && !controls_allowed && !gm_sdgm && !hold_pending) {
       controls_allowed = true;        
     }
     // convert float CAN signal to an int for gas checks: 22534 / 0.125 = 180272
@@ -441,8 +444,11 @@ static safety_config gm_init(uint16_t param) {
 
   const uint16_t GM_PARAM_PEDAL_INTERCEPTOR = 128;
   enable_gas_interceptor = GET_FLAG(param, GM_PARAM_PEDAL_INTERCEPTOR);
-  gm_manual_hold = GET_FLAG(param, GM_PARAM_MANUAL_AUTO_HOLD) && (gm_hw == GM_CAM) && gm_cam_long && gm_sdgm &&
-                   gm_has_acc && !gm_force_ascm && !gm_pedal_long && !enable_gas_interceptor && !GET_FLAG(param, GM_PARAM_EV);
+  // SDGM (Traverse) brakes on the camera bus, regular camera-long cars on the
+  // powertrain bus; the TX allowlist below picks the bus for each harness.
+  gm_manual_hold = GET_FLAG(param, GM_PARAM_MANUAL_AUTO_HOLD) && (gm_hw == GM_CAM) && gm_cam_long &&
+                   gm_has_acc && !gm_force_ascm && !gm_pedal_long && !enable_gas_interceptor && !gm_skip_relay_check &&
+                   !GET_FLAG(param, GM_PARAM_EV);
   gm_hold_reset();
   gm_hold.low_speed = false;
   gm_hold.cruise_active = false;

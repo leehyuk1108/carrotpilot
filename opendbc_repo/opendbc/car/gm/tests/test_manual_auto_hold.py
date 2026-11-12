@@ -1,13 +1,14 @@
 """Manual hold state, real CAN output and compiled Panda hooks; no vehicle I/O."""
 # ruff: noqa: INP001
 import ctypes
+from collections import defaultdict
 import itertools
 from time import monotonic_ns
 
 import pytest
 
 from opendbc.car import Bus, gen_empty_fingerprint, structs
-from opendbc.car.gm.manual_auto_hold import ManualAutoHold, manual_hold_supported
+from opendbc.car.gm.manual_auto_hold import MANUAL_HOLD_CARS, ManualAutoHold, manual_hold_supported
 from opendbc.car.gm.values import CAR, DBC, GMSafetyFlags
 from opendbc.car.gm.tests.test_display_speed import MemoryParams, build_cp, controller_state, runtime as desktop_runtime
 
@@ -98,15 +99,39 @@ def test_engaged_state_cannot_carry_manual_hold():
   assert not hold.armed and not hold.active
 
 
-@pytest.mark.parametrize("candidate,alpha,pedal", [(CAR.CHEVROLET_TRAVERSE, True, False),
-  (CAR.CHEVROLET_TRAVERSE, False, False), (CAR.CHEVROLET_TRAVERSE, True, True),
-  (CAR.CHEVROLET_BOLT_EUV, True, False), (CAR.CHEVROLET_VOLT, True, False)])
-def test_feature_flag_scope(runtime, candidate, alpha, pedal):
+CAM_HOLD_CARS = [CAR.CHEVROLET_TRAILBLAZER, CAR.CHEVROLET_TRAX]
+
+
+def hold_cp(runtime, candidate, alpha=True, pedal=False, camera=True):
+  # Real camera-long cars report the stock camera (0x320) and ECMAcceleratorPos.
   fingerprint = gen_empty_fingerprint()
+  fingerprint[0][0xBE] = 6
+  if camera:
+    fingerprint[2][0x320] = 3
   if pedal:
     fingerprint[0][0x201] = 6
-  cp = runtime.interface.CarInterface.get_params(candidate, fingerprint, [], alpha, True, False)
-  assert manual_hold_supported(cp) == (candidate == CAR.CHEVROLET_TRAVERSE and alpha and not pedal)
+  return runtime.interface.CarInterface.get_params(candidate, fingerprint, [], alpha, True, False)
+
+
+@pytest.mark.parametrize("candidate", [CAR.CHEVROLET_TRAVERSE, *CAM_HOLD_CARS, CAR.CHEVROLET_TRAILBLAZER_CC,
+                                       CAR.CHEVROLET_BOLT_EUV, CAR.CHEVROLET_EQUINOX, CAR.CHEVROLET_VOLT])
+@pytest.mark.parametrize("alpha,pedal", [(True, False), (False, False), (True, True)])
+def test_feature_flag_scope(runtime, candidate, alpha, pedal):
+  cp = hold_cp(runtime, candidate, alpha, pedal)
+  expected = candidate in MANUAL_HOLD_CARS and alpha and not pedal
+  assert manual_hold_supported(cp) == expected
+  assert bool(cp.safetyConfigs[0].safetyParam & GMSafetyFlags.MANUAL_AUTO_HOLD) == expected
+  if expected:
+    sdgm = GMSafetyFlags.HW_SDGM if candidate == CAR.CHEVROLET_TRAVERSE else 0
+    assert cp.safetyConfigs[0].safetyParam == int(GMSafetyFlags.HW_CAM | GMSafetyFlags.HW_CAM_LONG |
+                                                  GMSafetyFlags.MANUAL_AUTO_HOLD | sdgm)
+
+
+@pytest.mark.parametrize("candidate", CAM_HOLD_CARS)
+def test_camera_car_without_camera_cannot_hold(runtime, candidate):
+  cp = hold_cp(runtime, candidate, camera=False)
+  assert cp.safetyConfigs[0].safetyParam & GMSafetyFlags.NO_CAMERA
+  assert not manual_hold_supported(cp)
 
 
 @pytest.mark.parametrize("long_state", ["off", "stopping", "starting"])
@@ -135,6 +160,72 @@ def test_real_controller_brakes_only_no_set_resume(runtime, long_state):
         assert decoder.vl["ASCMGasRegenCmd"]["GasRegenCmd"] == controller.params.INACTIVE_REGEN
 
 
+def camera_controller_state():
+  # Idle stock camera: its 0x2CB counter keeps arriving with authority off.
+  cs = controller_state()
+  cs.cam_ascm_2cb_counter_ts_nanos = 1
+  cs.cam_ascm_2cb_counter_updated = True
+  cs.cam_stock_long_active = False
+  cs.cam_acc_status = defaultdict(int, ACCAlwaysOne=1, ACCAlwaysOne2=1)
+  return cs
+
+
+@pytest.mark.parametrize("candidate", CAM_HOLD_CARS)
+@pytest.mark.parametrize("long_state", ["off", "stopping", "starting"])
+def test_camera_controller_brakes_on_powertrain_no_set_resume(runtime, candidate, long_state):
+  cp = hold_cp(runtime, candidate)
+  controller = runtime.controller.CarController(DBC[candidate], cp)
+  controller.v_cruise_carrot.autoCruiseControl = 2
+  cs = camera_controller_state()
+  cs.out = state(activateCruise=1)
+  cs.manual_auto_hold = armed_hold()
+  cc = structs.CarControl()
+  cc.actuators.longControlState = long_state
+  decoder = runtime.CANParser(DBC[candidate][Bus.pt], [("ASCMGasRegenCmd", 25)], 0)
+  brakes = 0
+  for tick in range(100):
+    now = 1_000_000_000 + tick * 10_000_000
+    cs.cam_ascm_2cb_counter = (tick // 4) % 4
+    out, packets = controller.update(cc.as_reader(), cs, now)
+    assert all(addr != 0x1E1 for addr, _, _ in packets)
+    for addr, data, bus in packets:
+      if addr == 0x315:
+        brakes += 1
+        assert bus == 0 and len(data) == 5 and data[0] >> 4 == 0xA
+        assert (-int.from_bytes(data[:2], "big")) & 0xFFF == 400
+        assert out.brake == 400
+      if addr == 0x2CB:
+        assert bus == 0
+        decoder.update([(now, [(addr, data, bus)])])
+        assert not decoder.vl["ASCMGasRegenCmd"]["GasRegenCmdActive"]
+  assert brakes > 0
+
+
+@pytest.mark.parametrize("candidate", CAM_HOLD_CARS)
+@pytest.mark.parametrize("enabled,long_active", [(False, False), (True, True)])
+@pytest.mark.parametrize("long_state", ["off", "pid", "stopping"])
+def test_camera_no_manual_trigger_leaves_output_unchanged(runtime, candidate, enabled, long_active, long_state):
+  cp = hold_cp(runtime, candidate)
+  before_cp = structs.CarParams(**cp.to_dict())
+  before_cp.safetyConfigs[0].safetyParam &= ~int(GMSafetyFlags.MANUAL_AUTO_HOLD)
+  before = runtime.controller.CarController(DBC[candidate], before_cp)
+  after = runtime.controller.CarController(DBC[candidate], cp)
+  before_cs, after_cs = camera_controller_state(), camera_controller_state()
+  after_cs.manual_auto_hold = ManualAutoHold()
+  for cs in (before_cs, after_cs):
+    cs.cam_stock_long_active = enabled
+  cc = structs.CarControl(enabled=enabled, longActive=long_active)
+  cc.actuators.longControlState = long_state
+  cc.actuators.accel = -1.
+  for tick in range(100):
+    now = 1_000_000_000 + tick * 10_000_000
+    for cs in (before_cs, after_cs):
+      cs.cam_ascm_2cb_counter = (tick // 4) % 4
+    old_out, old_frames = before.update(cc.as_reader(), before_cs, now)
+    new_out, new_frames = after.update(cc.as_reader(), after_cs, now)
+    assert old_out.to_dict() == new_out.to_dict() and old_frames == new_frames
+
+
 @pytest.mark.parametrize("enabled,long_active", [(False, False), (True, False), (True, True)])
 @pytest.mark.parametrize("long_state", ["off", "pid", "stopping", "starting"])
 def test_no_manual_trigger_leaves_output_unchanged(runtime, enabled, long_active, long_state):
@@ -155,12 +246,14 @@ def test_no_manual_trigger_leaves_output_unchanged(runtime, enabled, long_active
     assert old_out.to_dict() == new_out.to_dict() and old_frames == new_frames
 
 
-def test_real_interface_update_apply_and_freshness(runtime, monkeypatch, safety):
+@pytest.mark.parametrize("candidate", [CAR.CHEVROLET_TRAVERSE, *CAM_HOLD_CARS])
+def test_real_interface_update_apply_and_freshness(runtime, monkeypatch, native, candidate):
   monkeypatch.setattr(MemoryParams, "put_int", MemoryParams.put_int_nonblocking, raising=False)
-  cp = build_cp(runtime)
+  cp = build_cp(runtime) if candidate == CAR.CHEVROLET_TRAVERSE else hold_cp(runtime, candidate)
+  safety = hold_safety(native, cp.safetyConfigs[0].safetyParam, 2 if candidate == CAR.CHEVROLET_TRAVERSE else 0)
   ci = runtime.interface.CarInterface(cp)
   ci.CS.update(ci.can_parsers)
-  packer = runtime.CANPacker(DBC[CAR.CHEVROLET_TRAVERSE][Bus.pt])
+  packer = runtime.CANPacker(DBC[candidate][Bus.pt])
   drive = next(k for k, v in ci.CS.shifter_values.items() if v == "D")
   values = {"ECMPRDNL2": {"PRNDL2": drive}, "ECMEngineStatus": {"BrakePressed": 1},
             "ECMAcceleratorPos": {"BrakePedalPos": 80}, "BCMDoorBeltStatus": {"LeftSeatBelt": 1}}
@@ -182,6 +275,8 @@ def test_real_interface_update_apply_and_freshness(runtime, monkeypatch, safety)
       if addr in (0x315, 0x2CB):
         accepted = safety.gm_test_frame(1, addr, bus, data, len(data))
         assert accepted, (tick, addr, can_frames)
+      if addr == 0x315 and tick:
+        assert bus == safety.bus and (-int.from_bytes(data[:2], "big")) & 0xFFF == 400
   assert ci.CS.out.brakeHoldActive and ci.CS.manual_auto_hold.active
   assert ci.CS.modelV2 == "model" and ci.CS.radarState == "radar"
   values["ECMEngineStatus"]["BrakePressed"] = 0
@@ -194,6 +289,56 @@ def test_real_interface_update_apply_and_freshness(runtime, monkeypatch, safety)
   assert not ci.CS.out.brakeHoldActive and not ci.CS.manual_auto_hold.active
 
 
+def test_trailblazer_hold_drops_without_camera_references(runtime, monkeypatch):
+  # The Trailblazer only sends 0x315 on the stock camera's 0x2CB cycle. Without
+  # fresh 0x2CB/0x370 references the hold must clear, not show while no brake is
+  # sent, and must not resume from the old press once the references return.
+  monkeypatch.setattr(MemoryParams, "put_int", MemoryParams.put_int_nonblocking, raising=False)
+  clock = [monotonic_ns()]
+  monkeypatch.setattr(runtime.interface, "monotonic_ns", lambda: clock[0])
+  candidate = CAR.CHEVROLET_TRAILBLAZER
+  ci = runtime.interface.CarInterface(hold_cp(runtime, candidate))
+  ci.CS.update(ci.can_parsers)
+  packer = runtime.CANPacker(DBC[candidate][Bus.pt])
+  drive = next(k for k, v in ci.CS.shifter_values.items() if v == "D")
+  values = {"ECMPRDNL2": {"PRNDL2": drive}, "ECMEngineStatus": {"BrakePressed": 1},
+            "ECMAcceleratorPos": {"BrakePedalPos": 80}, "BCMDoorBeltStatus": {"LeftSeatBelt": 1}}
+  cc = structs.CarControl()
+
+  def tick(refs=True):
+    clock[0] += 10_000_000
+    can_frames = [packer.make_can_msg(msg.name, parser.bus, values.get(msg.name, {}))
+                  for parser in ci.can_parsers.values() for msg in parser.message_states.values()]
+    if not refs:
+      can_frames = [f for f in can_frames if not (f[2] == 2 and f[0] in (0x2CB, 0x370))]
+    ret = ci.update([(clock[0], can_frames)])
+    _, sends = ci.apply(cc.as_reader(), clock[0])
+    brakes = [(-int.from_bytes(data[:2], "big")) & 0xFFF for addr, data, bus in sends if addr == 0x315]
+    assert all(bus == 0 for addr, _, bus in sends if addr == 0x315)
+    return ret, brakes
+
+  for _ in range(10):
+    tick()
+  ret, brakes = tick()
+  assert ret.brakeHoldActive and brakes == [400]
+  values["ECMEngineStatus"]["BrakePressed"] = 0
+  values["ECMAcceleratorPos"]["BrakePedalPos"] = 0
+  for _ in range(5):
+    ret, brakes = tick()
+    assert ret.brakeHoldActive and brakes == [400]
+
+  for i in range(30):
+    ret, brakes = tick(refs=False)
+    assert ret.canValid and brakes == []
+    if i >= 20:  # 200 ms without references
+      assert not ret.brakeHoldActive and not ci.CS.manual_auto_hold.active
+
+  for _ in range(20):
+    ret, brakes = tick()
+    assert not ret.brakeHoldActive and brakes in ([], [0])
+  assert brakes == [0]
+
+
 @pytest.fixture(scope="module")
 def native(runtime, tmp_path_factory):
   from opendbc.safety.tests.test_gm_sdgm import native_safety
@@ -203,13 +348,37 @@ def native(runtime, tmp_path_factory):
 
 
 HOLD_FLAGS = int(GMSafetyFlags.HW_CAM | GMSafetyFlags.HW_CAM_LONG | GMSafetyFlags.HW_SDGM | GMSafetyFlags.MANUAL_AUTO_HOLD)
+CAM_HOLD_FLAGS = int(GMSafetyFlags.HW_CAM | GMSafetyFlags.HW_CAM_LONG | GMSafetyFlags.MANUAL_AUTO_HOLD)
+HOLD_MODES = {"sdgm": (HOLD_FLAGS, 2), "camera": (CAM_HOLD_FLAGS, 0)}  # flags, friction brake bus
+
+
+class HoldSafety:
+  def __init__(self, lib, flags, bus):
+    self.lib, self.flags, self.bus = lib, flags, bus
+
+  def __getattr__(self, name):
+    return getattr(self.lib, name)
+
+
+def hold_safety(native, flags, bus):
+  assert native.set_safety_hooks(structs.CarParams.SafetyModel.gm, flags) == 0
+  native.init_tests()
+  return HoldSafety(native, flags, bus)
+
+
+@pytest.fixture(params=list(HOLD_MODES))
+def safety(native, request):
+  return hold_safety(native, *HOLD_MODES[request.param])
 
 
 @pytest.fixture
-def safety(native):
-  assert native.set_safety_hooks(structs.CarParams.SafetyModel.gm, HOLD_FLAGS) == 0
-  native.init_tests()
-  return native
+def sdgm_safety(native):
+  return hold_safety(native, *HOLD_MODES["sdgm"])
+
+
+@pytest.fixture
+def camera_safety(native):
+  return hold_safety(native, *HOLD_MODES["camera"])
 
 
 def rx(lib, addr, data):
@@ -227,7 +396,8 @@ def inputs(lib, pedal=80, pressed=True, speed=0, gas=0, cruise=0, order=(0, 1, 2
       assert rx(lib, addr, data)
 
 
-def tx_brake(lib, value=400, bus=2, mode=0xA, length=5):
+def tx_brake(lib, value=400, bus=None, mode=0xA, length=5):
+  bus = lib.bus if bus is None else bus
   raw = (-value) & 0xFFF
   data = (bytes([mode << 4 | raw >> 8, raw & 255]) + bytes(6))[:length]
   return bool(lib.gm_test_frame(1, 0x315, bus, data, len(data)))
@@ -246,7 +416,7 @@ def test_native_all_brake_values_buses_modes_lengths(safety):
   inputs(safety)
   for bus in range(4):
     for value in range(4096):
-      assert tx_brake(safety, value, bus) == (bus == 2 and value <= 400)
+      assert tx_brake(safety, value, bus) == (bus == safety.bus and value <= 400)
   for mode in range(16):
     assert tx_brake(safety, mode=mode) == (mode == 0xA)
   for length in range(9):
@@ -325,24 +495,39 @@ def test_native_relay_failure_and_regen_block(safety):
 @pytest.mark.parametrize("flag", [GMSafetyFlags.HW_CAM, GMSafetyFlags.HW_CAM_LONG,
                                  GMSafetyFlags.HW_SDGM, GMSafetyFlags.MANUAL_AUTO_HOLD])
 def test_native_feature_flag_and_mode_reset(safety, flag):
+  # Toggling HW_SDGM moves the brake to the other harness bus, never to both.
   inputs(safety)
   assert tx_brake(safety)
-  assert safety.set_safety_hooks(structs.CarParams.SafetyModel.gm, HOLD_FLAGS & ~int(flag)) == 0
+  assert safety.set_safety_hooks(structs.CarParams.SafetyModel.gm, safety.flags ^ int(flag)) == 0
   inputs(safety)
   assert not tx_brake(safety)
-  assert safety.set_safety_hooks(structs.CarParams.SafetyModel.gm, HOLD_FLAGS) == 0
+  assert safety.set_safety_hooks(structs.CarParams.SafetyModel.gm, safety.flags) == 0
   inputs(safety, pedal=0, pressed=False)
   assert not tx_brake(safety)
 
 
 def test_native_no_acceleration_permission(safety, runtime):
+  # Both harnesses: an armed or held stop never becomes gas/ACC permission, even
+  # from a stale active 0x2CB after the host released the hold with a light tap.
   from opendbc.car.gm import gmcan
   inputs(safety)
   packer = runtime.CANPacker(DBC[CAR.CHEVROLET_TRAVERSE][Bus.pt])
-  for amount, active in [(-500, False), (-500, True), (0, False), (100, True)]:
-    addr, data, bus = gmcan.create_gas_regen_command(packer, 0, amount, 0, active, False)
-    assert bool(safety.gm_test_frame(1, addr, bus, data, len(data))) == (amount == -500 and not active)
-    assert not safety.get_controls_allowed()
+  for release in (False, True):
+    if release:
+      inputs(safety, pedal=0, pressed=False)
+      inputs(safety, pedal=20)
+      inputs(safety, pedal=0, pressed=False)
+    for amount, active in [(-500, False), (-500, True), (0, False), (100, True)]:
+      addr, data, bus = gmcan.create_gas_regen_command(packer, 0, amount, 0, active, False)
+      assert bool(safety.gm_test_frame(1, addr, bus, data, len(data))) == (amount == -500 and not active)
+      assert not safety.get_controls_allowed()
+    # Requests rejected for bus or length leave no permission behind either.
+    addr, data, _ = gmcan.create_gas_regen_command(packer, 0, 100, 0, True, False)
+    for bus, payload in [(1, data), (2, data), (0, data[:7])]:
+      assert not safety.gm_test_frame(1, addr, bus, payload, len(payload))
+      assert not safety.get_controls_allowed()
+    assert not tx_brake(safety, mode=0xD)
+    assert tx_brake(safety)
 
 
 @pytest.mark.parametrize("address,length", [(0x34A, 4), (0xC9, 7), (0x1C4, 7), (0xBE, 5)])
@@ -354,17 +539,21 @@ def test_native_malformed_input_drops_permission(safety, address, length):
 
 
 @pytest.mark.parametrize("extra", [GMSafetyFlags.CC_LONG, GMSafetyFlags.NO_ACC, GMSafetyFlags.PEDAL_LONG,
-                                  GMSafetyFlags.GAS_INTERCEPTOR, GMSafetyFlags.HW_ASCM_LONG, GMSafetyFlags.EV])
+                                  GMSafetyFlags.GAS_INTERCEPTOR, GMSafetyFlags.HW_ASCM_LONG, GMSafetyFlags.EV,
+                                  GMSafetyFlags.NO_CAMERA])
 def test_native_incompatible_mode_cannot_enable_hold(safety, extra):
-  assert safety.set_safety_hooks(structs.CarParams.SafetyModel.gm, HOLD_FLAGS | int(extra)) == 0
+  assert safety.set_safety_hooks(structs.CarParams.SafetyModel.gm, safety.flags | int(extra)) == 0
   inputs(safety)
   assert not tx_brake(safety)
 
 
-def test_host_release_produces_zero_brake_accepted_by_panda(runtime, safety):
-  cp = build_cp(runtime)
-  controller = runtime.controller.CarController(DBC[CAR.CHEVROLET_TRAVERSE], cp)
-  cs = controller_state()
+@pytest.mark.parametrize("candidate", [CAR.CHEVROLET_TRAVERSE, *CAM_HOLD_CARS])
+def test_host_release_produces_zero_brake_accepted_by_panda(runtime, native, candidate):
+  traverse = candidate == CAR.CHEVROLET_TRAVERSE
+  cp = build_cp(runtime) if traverse else hold_cp(runtime, candidate)
+  safety = hold_safety(native, *HOLD_MODES["sdgm" if traverse else "camera"])
+  controller = runtime.controller.CarController(DBC[candidate], cp)
+  cs = controller_state() if traverse else camera_controller_state()
   cs.out = state()
   cs.manual_auto_hold = armed_hold()
   inputs(safety)
@@ -374,10 +563,12 @@ def test_host_release_produces_zero_brake_accepted_by_panda(runtime, safety):
     cs.manual_auto_hold.update(cs.out, pedal, False)
     inputs(safety, pedal=pedal, pressed=pressed)
     controller.frame = tick * 4
+    cs.cam_ascm_2cb_counter = tick % 4
     _, frames = controller.update(cc, cs, 1_000_000_000 + tick * 40_000_000)
     brakes = [msg for msg in frames if msg[0] == 0x315]
     assert len(brakes) == 1
     addr, data, bus = brakes[0]
+    assert bus == safety.bus
     assert (-int.from_bytes(data[:2], "big")) & 0xFFF == (0 if tick == 3 else 400)
     assert safety.gm_test_frame(1, addr, bus, data, len(data))
     assert not safety.get_controls_allowed()

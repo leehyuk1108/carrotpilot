@@ -10,6 +10,8 @@ from opendbc.car.common.basedir import BASEDIR
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.gm.carcontroller import CarController
 from opendbc.car.gm.carstate import CarState
+from opendbc.car.gm.gmcan import is_trailblazer_camera_longitudinal
+from opendbc.car.gm.manual_auto_hold import MANUAL_HOLD_CARS
 from opendbc.car.gm.radar_interface import RadarInterface, RADAR_HEADER_MSG, LAST_RADAR_MSG
 from opendbc.car.gm.values import CAR, CarControllerParams, EV_CAR, CAMERA_ACC_CAR, CanBus, GMFlags, CC_ONLY_CAR, SDGM_CAR, CruiseButtons, GMSafetyFlags, ALT_ACCS
 from opendbc.car.interfaces import CarInterfaceBase, TorqueFromLateralAccelCallbackType, FRICTION_THRESHOLD, LatControlInputs, NanoFFModel
@@ -50,9 +52,16 @@ class CarInterface(CarInterfaceBase):
                  ("AcceleratorPedal2", "AcceleratorPedal2"), ("EBCMWheelSpdFront", "FLWheelSpd"),
                  ("EBCMWheelSpdRear", "RLWheelSpd"), ("ECMPRDNL2", "PRNDL2"),
                  ("BCMGeneralPlatformStatus", "ParkBrakeSwActive"))
-      timestamps = self.can_parsers[Bus.pt].ts_nanos
-      fresh = all(0 < timestamps.get(msg, {}).get(signal, 0) <= now_nanos and
-                  now_nanos - timestamps[msg][signal] <= 500_000_000 for msg, signal in signals)
+      checks = [(Bus.pt, msg, signal, 500_000_000) for msg, signal in signals]
+      if is_trailblazer_camera_longitudinal(self.CS.CP):
+        # Its brake frames follow the stock camera's 0x2CB counter and 0x370
+        # template; without fresh references none is sent, so drop the hold.
+        checks += [(Bus.cam, "ASCMGasRegenCmd", "RollingCounter", 200_000_000),
+                   (Bus.cam, "ASCMActiveCruiseControlStatus", "ACCCmdActive", 200_000_000)]
+      fresh = True
+      for bus, msg, signal, max_age in checks:
+        ts = self.can_parsers[bus].ts_nanos.get(msg, {}).get(signal, 0)
+        fresh = fresh and 0 < ts <= now_nanos and now_nanos - ts <= max_age
       if fresh:
         hold.update(self.CS.out, self.CS.brake_pedal_position, self.CS.manual_hold_controls_active)
       else:
@@ -179,8 +188,8 @@ class CarInterface(CarInterfaceBase):
         ret.safetyConfigs[0].safetyParam |= GMSafetyFlags.HW_CAM_LONG.value
         if candidate == CAR.CHEVROLET_TRAVERSE:
           ret.safetyConfigs[0].safetyParam |= GMSafetyFlags.HW_SDGM.value
-          if not ret.enableGasInterceptorDEPRECATED:
-            ret.safetyConfigs[0].safetyParam |= GMSafetyFlags.MANUAL_AUTO_HOLD.value
+        if candidate in MANUAL_HOLD_CARS and not ret.enableGasInterceptorDEPRECATED:
+          ret.safetyConfigs[0].safetyParam |= GMSafetyFlags.MANUAL_AUTO_HOLD.value
 
       if candidate in ALT_ACCS:
         ret.alphaLongitudinalAvailable = False
