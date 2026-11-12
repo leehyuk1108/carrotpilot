@@ -88,7 +88,7 @@ def test_startup_failure_still_stops_journal_and_resources(monkeypatch, tmp_path
   from openpilot import cereal
   closed = []
   monkeypatch.setattr(cereal, 'messaging', NS(SubMaster=lambda _: None), raising=False)
-  monkeypatch.setattr(bridge, 'DoorMonitor', lambda: NS(start=broken, close=lambda: closed.append('door')))
+  monkeypatch.setattr(bridge, 'DoorMonitor', lambda camera=None: NS(camera_error='', start=broken, close=lambda: closed.append('door')))
   monkeypatch.setattr(bridge, 'UsbProbe', lambda _: NS(close=lambda: closed.append('probe')))
   monkeypatch.setattr(bridge, 'LocalJournal', lambda: NS(submit=lambda _: None, close=lambda: closed.append('journal')))
   with pytest.raises(OSError):

@@ -226,6 +226,7 @@ def annotate_camera(payload, model, objects, lamps):
       if dd < CAMERA_GATE_DISTANCE and dl < CAMERA_GATE_LATERAL:
         pairs.append((dd / CAMERA_GATE_DISTANCE + dl / CAMERA_GATE_LATERAL, v_index, o_index))
   matched_vehicles, matched_objects, track1 = set(), set(), None
+  track1_id = next((obj['id'] for obj in objects if obj.get('track1')), None)
   for _, v_index, o_index in sorted(pairs):
     if v_index in matched_vehicles or o_index in matched_objects:
       continue
@@ -244,7 +245,7 @@ def annotate_camera(payload, model, objects, lamps):
         extra.append(vehicle)
         if obj.get('track1'):
           track1 = vehicle
-  if lamps is not None and track1 is not None:
+  if lamps is not None and track1 is not None and lamps.get('id') == track1_id:
     track1['brakeLight'] = bool(lamps['brake'])
     track1['turnSignal'] = lamps['turn']
   extra.sort(key=lambda vehicle: vehicle['distanceM'])

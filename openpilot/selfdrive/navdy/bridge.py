@@ -220,7 +220,8 @@ def live_payload(sm, sequence, *, sources=None, door_open=False, ambient_overrid
                     timestamp=sm.logMonoTime['liveTracks'] / 1e9, now=time.monotonic())
   if camera is not None:
     now = time.monotonic()
-    annotate_camera(payload, recent('modelV2'), camera.objects(now), camera.lead_lamps(now))
+    objects, lamps = camera.snapshot(now)  # one consistent observation: lamps carry the id they belong to
+    annotate_camera(payload, recent('modelV2'), objects, lamps)
   # Offroad has no card/selfdrived messages. Ambient/power state instead comes
   # from fresh device/panda state; never grant active telemetry from this path.
   payload['displayPower'] = 'unknown' if known_road is None else 'onroad' if known_road else 'offroad'

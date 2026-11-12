@@ -430,7 +430,7 @@ def test_wired_and_relay_normal_clear_responses_are_unchanged(monkeypatch, tmp_p
   monkeypatch.setattr(bridge.time, 'sleep', lambda delay: setattr(clock, 'now', round(clock.now + delay, 9)))
   monkeypatch.setattr(bridge, 'LocalJournal', lambda: None)
   monkeypatch.setattr(bridge, 'read_override', lambda: None)
-  monkeypatch.setattr(bridge, 'DoorMonitor', lambda: NS(start=lambda: None, close=lambda: None, door_open=False, gm=True, error=''))
+  monkeypatch.setattr(bridge, 'DoorMonitor', lambda camera=None: NS(camera_error='', start=lambda: None, close=lambda: None, door_open=False, gm=True, error=''))
   monkeypatch.setattr(bridge, 'UsbProbe', lambda _: NS(poll=lambda _now: None, close=lambda: None))
   monkeypatch.setattr(cereal, 'messaging', NS(SubMaster=lambda _: sm), raising=False)
   monkeypatch.setattr(bridge, 'configured_connection', lambda _: (None, False))

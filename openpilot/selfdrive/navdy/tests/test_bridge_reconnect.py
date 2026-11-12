@@ -61,7 +61,7 @@ def run_wireless_bridge(monkeypatch, tmp_path, exchange, *, connect=None, durati
   monkeypatch.setattr(bridge.time, 'monotonic_ns', lambda: round(state.now * 1e9))
   monkeypatch.setattr(bridge.time, 'sleep', lambda seconds: setattr(state, 'now', round(state.now + seconds, 9)))
   monkeypatch.setattr(bridge, 'read_override', lambda: None)
-  monkeypatch.setattr(bridge, 'DoorMonitor', lambda: NS(start=lambda: None, close=lambda: None,
+  monkeypatch.setattr(bridge, 'DoorMonitor', lambda camera=None: NS(camera_error='', start=lambda: None, close=lambda: None,
                                                      door_open=False, gm=True, error=''))
   monkeypatch.setattr(bridge, 'configured_connection', lambda _: ('54:ED:A3:00:48:23', bluetooth_only))
   monkeypatch.setattr(bridge, 'jetson_candidates', list)

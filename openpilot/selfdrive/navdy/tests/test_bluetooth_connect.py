@@ -327,7 +327,7 @@ def test_bridge_persists_address_free_failure_phase_and_deadline_status(radio, m
 
   monkeypatch.setattr(cereal, 'messaging', NS(SubMaster=lambda _: sm), raising=False)
   monkeypatch.setattr(bridge.time, 'sleep', lambda seconds: setattr(radio, 'now', round(radio.now + seconds, 9)))
-  monkeypatch.setattr(bridge, 'DoorMonitor', lambda: NS(start=lambda: None, close=lambda: None,
+  monkeypatch.setattr(bridge, 'DoorMonitor', lambda camera=None: NS(camera_error='', start=lambda: None, close=lambda: None,
                                                      door_open=False, gm=True, error=''))
   monkeypatch.setattr(bridge, 'read_override', lambda: None)
   monkeypatch.setattr(bridge, 'configured_connection', lambda _: (PEER, bluetooth_only))

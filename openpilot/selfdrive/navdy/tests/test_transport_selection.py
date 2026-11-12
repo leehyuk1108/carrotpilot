@@ -20,7 +20,7 @@ def run_selection(monkeypatch, tmp_path, *, modes, cable=True, peer=True, jetson
   monkeypatch.setattr(bridge.time, 'sleep', lambda seconds: setattr(state, 'now', round(state.now + seconds, 9)))
   monkeypatch.setattr(bridge, 'read_transport_mode', lambda: modes(state.now))
   monkeypatch.setattr(bridge, 'read_override', lambda: None)
-  monkeypatch.setattr(bridge, 'DoorMonitor', lambda: NS(start=lambda: None, close=lambda: None,
+  monkeypatch.setattr(bridge, 'DoorMonitor', lambda camera=None: NS(camera_error='', start=lambda: None, close=lambda: None,
                                                       door_open=False, gm=True, error=''))
   monkeypatch.setattr(bridge, 'jetson_candidates', lambda: ['192.0.2.1'] if jetson else [])
 

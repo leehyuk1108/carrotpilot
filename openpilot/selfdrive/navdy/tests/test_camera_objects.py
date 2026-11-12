@@ -37,6 +37,10 @@ def observe(cam, t, ident=7, brake=False, turn=0, burst=None):
   cam.feed([(0x427, lamp_frame(brake=brake, turn=turn, burst=burst), 1)], t + 0.005)
 
 
+def strip(lamps):
+  return None if lamps is None else {k: v for k, v in lamps.items() if k != 'id'}
+
+
 def test_track_decoding_matches_the_dbc_layout_and_left_positive_azimuth():
   left = co.decode_track(track_frame(ident=7, kind=2, azimuth_deg=6.0, range_m=31.6, width_m=2.5))
   assert left['id'] == 7 and left['kind'] == 'truck' and left['width'] == 2.5
@@ -75,24 +79,24 @@ def test_turn_side_is_held_between_flashes_and_hazard_is_ignored():
   cam = co.CameraObjects()
   observe(cam, 10.0, turn=2)
   observe(cam, 10.2)
-  assert cam.lead_lamps(10.21) == {'brake': False, 'turn': 'left'}
+  assert strip(cam.lead_lamps(10.21)) == {'brake': False, 'turn': 'left'}
   observe(cam, 11.12)
-  assert cam.lead_lamps(11.15) == {'brake': False, 'turn': 'left'}
+  assert strip(cam.lead_lamps(11.15)) == {'brake': False, 'turn': 'left'}
   observe(cam, 11.24)
   assert cam.lead_lamps(11.25)['turn'] == ''
   observe(cam, 12.0, brake=True, turn=4)
-  assert cam.lead_lamps(12.01) == {'brake': True, 'turn': ''}
+  assert strip(cam.lead_lamps(12.01)) == {'brake': True, 'turn': ''}
   assert cam.lead_lamps(12.01 + co.OBJECT_MAX_AGE + 0.01) is None
 
 
 def test_a_new_lead_inherits_neither_turn_nor_brake():
   cam = co.CameraObjects()
   observe(cam, 10.0, ident=7, brake=True, turn=2)
-  assert cam.lead_lamps(10.01) == {'brake': True, 'turn': 'left'}
+  assert strip(cam.lead_lamps(10.01)) == {'brake': True, 'turn': 'left'}
   cam.feed([(0x421, track_frame(ident=8, burst=1), 1)], 10.04)   # new object, its B not here yet
   assert cam.lead_lamps(10.05) is None
   cam.feed([(0x427, lamp_frame(turn=0, burst=1), 1)], 10.045)
-  assert cam.lead_lamps(10.05) == {'brake': False, 'turn': ''}
+  assert strip(cam.lead_lamps(10.05)) == {'brake': False, 'turn': ''}
   observe(cam, 10.4, ident=8, turn=3)
   assert cam.lead_lamps(10.41)['turn'] == 'right'
   # Track 1 going stale also ends everything it showed.
@@ -105,7 +109,7 @@ def test_lamp_frames_from_another_burst_or_too_late_are_never_attached():
   cam.feed([(0x421, track_frame(ident=8, burst=2), 1)], 10.2)
   cam.feed([(0x427, lamp_frame(turn=2, brake=True, burst=1), 1)], 10.21)   # the old object's late B
   cam.feed([(0x427, lamp_frame(burst=2), 1)], 10.215)                       # this burst's B
-  assert cam.lead_lamps(10.22) == {'brake': False, 'turn': ''}
+  assert strip(cam.lead_lamps(10.22)) == {'brake': False, 'turn': ''}
   cam.feed([(0x421, track_frame(ident=8, burst=3), 1)], 10.24)
   cam.feed([(0x427, lamp_frame(turn=3, burst=3), 1)], 10.24 + co.LAMP_PAIR_WINDOW + 0.01)
   assert cam.lead_lamps(10.29)['turn'] == ''
@@ -185,12 +189,28 @@ def obj(ident, kind, distance, lateral, track1=False):
 def test_kinds_and_track_one_lamps_attach_to_the_matching_vehicles():
   result = car_payload()
   annotate_camera(result, model(), [obj(1, 'car', 31.0, 0.3, track1=True), obj(2, 'truck', 22.0, -3.2)],
-                  {'brake': True, 'turn': 'right'})
+                  {'brake': True, 'turn': 'right', 'id': 1})
   by_id = {v['trackId']: v for v in result['navVehicles']}
   assert by_id[1]['kind'] == 'car' and by_id[1]['brakeLight'] is True and by_id[1]['turnSignal'] == 'right'
   assert by_id[2]['kind'] == 'truck' and 'brakeLight' not in by_id[2]
   assert 'yawDeg' in by_id[1] and by_id[2]['yawDeg'] == -3.0  # lead gains a yaw; overlay yaw kept
   assert len(result['navVehicles']) == 2
+
+
+def test_lamps_of_another_object_are_never_attached():
+  result = car_payload()
+  annotate_camera(result, model(), [obj(1, 'car', 31.0, 0.3, track1=True)], {'brake': True, 'turn': 'left', 'id': 2})
+  assert all('brakeLight' not in v and 'turnSignal' not in v for v in result['navVehicles'])
+
+
+def test_snapshot_returns_objects_and_lamps_of_one_observation():
+  cam = co.CameraObjects()
+  observe(cam, 10.0, ident=7, brake=True, turn=3)
+  objects, lamps = cam.snapshot(10.01)
+  assert [o['id'] for o in objects if o['track1']] == [7] and lamps == {'brake': True, 'turn': 'right', 'id': 7}
+  cam.feed([(0x421, track_frame(ident=8, burst=1), 1)], 10.04)
+  objects, lamps = cam.snapshot(10.05)
+  assert [o['id'] for o in objects if o['track1']] == [8] and lamps is None
 
 
 def test_far_objects_do_not_lend_their_kind_and_become_their_own_entries():

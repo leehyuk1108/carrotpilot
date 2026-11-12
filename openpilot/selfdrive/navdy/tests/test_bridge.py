@@ -36,7 +36,7 @@ def sm(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def no_hardware_door_thread(monkeypatch):
-  monkeypatch.setattr(bridge, 'DoorMonitor', lambda: NS(start=lambda: None, close=lambda: None,
+  monkeypatch.setattr(bridge, 'DoorMonitor', lambda camera=None: NS(camera_error='', start=lambda: None, close=lambda: None,
                                                      door_open=False, gm=True, error=''))
 
 

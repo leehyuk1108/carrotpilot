@@ -103,29 +103,40 @@ class CameraObjects:
     entry = self.frames.get(address)
     return entry[1] if entry is not None and 0 <= now - entry[0] <= OBJECT_MAX_AGE else None
 
+  def _objects(self, now: float) -> list[dict]:
+    out = []
+    for address in TRACK_ADDRESSES:
+      data = self._fresh(address, now)
+      track = decode_track(data) if data is not None else None
+      if track is not None:
+        track['track1'] = address == TRACK_ADDRESSES[0]
+        out.append(track)
+    return out
+
+  def snapshot(self, now: float) -> tuple[list[dict], dict | None]:
+    """Objects and track-1 lamps from one consistent state (one lock), lamps tagged with their object id."""
+    with self.lock:
+      return self._objects(now), self._lead_lamps(now)
+
   def objects(self, now: float) -> list[dict]:
     with self.lock:
-      out = []
-      for address in TRACK_ADDRESSES:
-        data = self._fresh(address, now)
-        track = decode_track(data) if data is not None else None
-        if track is not None:
-          track['track1'] = address == TRACK_ADDRESSES[0]
-          out.append(track)
-      return out
+      return self._objects(now)
 
   def lead_lamps(self, now: float) -> dict | None:
-    """Lamps of the object now in camera track 1, or None when there is no fresh paired lamp frame."""
     with self.lock:
-      track1 = self._fresh(TRACK_ADDRESSES[0], now)
-      if track1 is None or self.lamps is None:
-        return None
-      seen, brake, _, ident = self.lamps
-      if ident != (track1[0] >> 2) or not 0 <= now - seen <= OBJECT_MAX_AGE:
-        return None
-      code, turn_at, turn_ident = self.turn_seen
-      turn = {2: 'left', 3: 'right'}.get(code, '') if turn_ident == ident and 0 <= now - turn_at < TURN_HOLD else ''
-      return {'brake': brake, 'turn': turn}
+      return self._lead_lamps(now)
+
+  def _lead_lamps(self, now: float) -> dict | None:
+    """Lamps of the object now in camera track 1, or None when there is no fresh paired lamp frame."""
+    track1 = self._fresh(TRACK_ADDRESSES[0], now)
+    if track1 is None or self.lamps is None:
+      return None
+    seen, brake, _, ident = self.lamps
+    if ident != (track1[0] >> 2) or not 0 <= now - seen <= OBJECT_MAX_AGE:
+      return None
+    code, turn_at, turn_ident = self.turn_seen
+    turn = {2: 'left', 3: 'right'}.get(code, '') if turn_ident == ident and 0 <= now - turn_at < TURN_HOLD else ''
+    return {'brake': brake, 'turn': turn, 'id': ident}
 
 
 def frames_from_events(events):
