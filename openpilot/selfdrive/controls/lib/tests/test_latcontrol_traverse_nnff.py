@@ -41,12 +41,13 @@ def model(lat_accel, jerk):
   return md
 
 
-def step(controller, CP, rate, plan_jerk, lat_accel=2.0, v=20.0, frames=1):
+def step(controller, CP, rate, plan_jerk, lat_accel=2.0, v=20.0, frames=1, actual_lat_accel=None):
   VM = VehicleModel(CP)
   VM.update_params(1.0, 18.7)
   desired_curvature = lat_accel / v ** 2
+  actual_curvature = desired_curvature if actual_lat_accel is None else actual_lat_accel / v ** 2
   CS = car.CarState.new_message(vEgo=v, aEgo=0.0, steeringPressed=False, steeringRateDeg=rate,
-                                steeringAngleDeg=math.degrees(VM.get_steer_from_curvature(-desired_curvature, v, 0.0)))
+                                steeringAngleDeg=math.degrees(VM.get_steer_from_curvature(-actual_curvature, v, 0.0)))
   params = log.LiveParametersData.new_message()
   cc = NS(angularVelocity=[], orientationNED=[])
   md = model(lat_accel, plan_jerk)
@@ -68,7 +69,7 @@ def test_parity_not_for_other_cars(make_controller):
 
 def test_parity_takes_desired_jerk_over_lateral_delay(make_controller):
   controller, CP = make_controller()
-  assert controller.desired_lat_jerk_time == pytest.approx(CP.steerActuatorDelay + 0.2)
+  assert controller.desired_lat_jerk_time == pytest.approx(CP.steerActuatorDelay + 0.1)
   other, _ = make_controller(fingerprint=CAR.CHEVROLET_EQUINOX)
   assert other.desired_lat_jerk_time == pytest.approx(0.3)  # SteerActuatorDelay Param 0 + 0.3 s
 
@@ -107,3 +108,75 @@ def test_non_finite_steering_rate_keeps_controller_finite(make_controller):
   assert math.isfinite(torque) and math.isfinite(pid_log.i)
   torque, pid_log = step(controller, CP, 0.0, plan_jerk=0.5, frames=5)
   assert math.isfinite(torque) and math.isfinite(pid_log.i)
+
+
+@pytest.mark.parametrize("fingerprint", [CAR.CHEVROLET_TRAVERSE, CAR.CHEVROLET_TRAILBLAZER, CAR.CHEVROLET_TRAX])
+def test_jerk_gate_does_not_change_later_curve_feedforward(make_controller, fingerprint):
+  after_gate, CP = make_controller(fingerprint=fingerprint)
+  fresh, _ = make_controller(fingerprint=fingerprint)
+  step(after_gate, CP, 0.0, 0.0, lat_accel=0.5, actual_lat_accel=0.25)
+  _, actual = step(after_gate, CP, 0.0, 0.5, lat_accel=0.5, actual_lat_accel=0.25, frames=40)
+  _, expected = step(fresh, CP, 0.0, 0.5, lat_accel=0.5, actual_lat_accel=0.25, frames=40)
+  assert actual.f == pytest.approx(expected.f, abs=1e-8)
+  assert actual.p == pytest.approx(expected.p, abs=1e-8)
+
+
+@pytest.mark.parametrize("invalid", [None, float("nan"), float("inf"), -0.2, 0.0, 1.1, True])
+def test_bad_live_delay_preserves_last_valid_timing(make_controller, invalid):
+  controller, _ = make_controller()
+  controller.update_live_delay(0.32, 0.1)
+  before = list(controller.nn_future_times)
+  controller.update_live_delay(invalid)
+  assert controller.nn_future_times == before
+  assert controller.desired_lat_jerk_time == pytest.approx(0.42)
+
+
+def test_live_delay_updates_future_and_jerk_horizons_separately(make_controller):
+  controller, _ = make_controller()
+  controller.update_live_delay(0.32, 0.15)
+  assert controller.nn_future_times == pytest.approx([0.62, 0.92, 1.32, 1.82])
+  assert controller.desired_lat_jerk_time == pytest.approx(0.47)
+
+
+def test_non_parity_timing_and_pid_remain_unchanged(make_controller):
+  from openpilot.common.pid import PIDController
+  controller, _ = make_controller(fingerprint=CAR.CHEVROLET_EQUINOX)
+  before = list(controller.nn_future_times)
+  controller.update_live_delay(0.32)
+  assert controller.nn_future_times == before
+  assert type(controller.pid) is PIDController
+
+
+def test_non_parity_keeps_existing_friction_gate(make_controller):
+  controller, CP = make_controller(fingerprint=CAR.CHEVROLET_EQUINOX)
+  step(controller, CP, 0.0, 0.0)
+  assert controller.lat_accel_friction_factor == 1.0
+
+
+def test_missing_model_does_not_add_friction_to_full_nnff_fallback(make_controller):
+  controller, CP = make_controller()
+  friction_calls = []
+  original = controller.torque_from_lateral_accel
+
+  def record(*args, **kwargs):
+    friction_calls.append(kwargs["friction_compensation"])
+    return original(*args, **kwargs)
+
+  controller.torque_from_lateral_accel = record
+  CS = car.CarState.new_message(vEgo=15.0, aEgo=0.0, steeringPressed=False,
+                                steeringRateDeg=0.0, steeringAngleDeg=0.0)
+  torque, _, pid_log = controller.update(True, CS, VehicleModel(CP), log.LiveParametersData.new_message(),
+                                        False, 0.001, NS(orientationNED=[], angularVelocity=[]), False, model_data=None)
+  assert math.isfinite(torque) and pid_log.active
+  assert friction_calls == [False, False, False]
+
+
+def test_reset_clears_nn_history_but_keeps_integral(make_controller):
+  controller, CP = make_controller()
+  step(controller, CP, 0.0, 0.5, frames=40)
+  assert controller.lateral_accel_desired_deque
+  controller.pid.i = 0.12
+  controller.reset()
+  assert not controller.lateral_accel_desired_deque
+  assert not controller.roll_deque
+  assert controller.pid.i == 0.12

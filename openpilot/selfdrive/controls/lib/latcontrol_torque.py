@@ -12,6 +12,7 @@ from opendbc.car.interfaces import LatControlInputs
 from opendbc.car.vehicle_model import ACCELERATION_DUE_TO_GRAVITY
 from openpilot.selfdrive.controls.lib.latcontrol import LatControl
 from openpilot.common.pid import PIDController
+from openpilot.selfdrive.controls.lib.nnff_pid import NNFFPIDController
 
 from openpilot.common.params import Params
 
@@ -75,8 +76,12 @@ class LatControlTorque(LatControl):
   def __init__(self, CP, CI):
     super().__init__(CP, CI)
     self.torque_params = CP.lateralTuning.torque.as_builder()
-    self.pid = PIDController(self.torque_params.kp, self.torque_params.ki,
-                             k_f=self.torque_params.kf, pos_limit=self.steer_max, neg_limit=-self.steer_max)
+    self.use_nnff = CI.use_nnff
+    self.use_nnff_lite = CI.use_nnff_lite
+    self.nnff_frogpilot_parity = self.use_nnff and CP.carFingerprint in NNFF_FROGPILOT_PARITY_CARS
+    pid_type = NNFFPIDController if self.nnff_frogpilot_parity else PIDController
+    self.pid = pid_type(self.torque_params.kp, self.torque_params.ki,
+                        k_f=self.torque_params.kf, pos_limit=self.steer_max, neg_limit=-self.steer_max)
     self.torque_from_lateral_accel = CI.torque_from_lateral_accel()
     self.use_steering_angle = self.torque_params.useSteeringAngle
     self.steering_angle_deadzone_deg = self.torque_params.steeringAngleDeadzoneDeg
@@ -90,8 +95,6 @@ class LatControlTorque(LatControl):
     self.friction_default = self.torque_params.friction
 
     # Twilsonco's Lateral Neural Network Feedforward
-    self.use_nnff = CI.use_nnff
-    self.use_nnff_lite = CI.use_nnff_lite
 
     if self.use_nnff or self.use_nnff_lite:
       # Instantaneous lateral jerk changes very rapidly, making it not useful on its own,
@@ -122,7 +125,9 @@ class LatControlTorque(LatControl):
       self.nn_friction_override = CI.lat_torque_nn_model.friction_override
 
       # setup future time offsets
-      self.nn_time_offset = CP.steerActuatorDelay + 0.2
+      # The GM parity path uses the measured delay directly, as FrogPilot does.
+      # Preserve other cars' existing timing until they have dedicated validation.
+      self.nn_time_offset = CP.steerActuatorDelay + (0.0 if self.nnff_frogpilot_parity else 0.2)
       future_times = [0.3, 0.6, 1.0, 1.5] # seconds in the future
       self.nn_future_times = [i + self.nn_time_offset for i in future_times]
       self.nn_future_times_np = np.array(self.nn_future_times)
@@ -139,9 +144,31 @@ class LatControlTorque(LatControl):
     # The Traverse runs FrogPilot's donor NNFF model (Trailblazer). On the Traverse, Trailblazer and Trax,
     # match FrogPilot's NNFF where it differs: NN low-speed factor, steering-rate/planned jerk kept on a
     # steering-angle car, and desired jerk taken over the lateral delay instead of SteerActuatorDelay + 0.3 s.
-    self.nnff_frogpilot_parity = self.use_nnff and CP.carFingerprint in NNFF_FROGPILOT_PARITY_CARS
     if self.nnff_frogpilot_parity:
-      self.desired_lat_jerk_time = self.nn_time_offset
+      self.desired_lat_jerk_time = self.nn_time_offset + 0.1
+
+  def update_live_delay(self, lateral_delay, lat_smooth_seconds=0.1):
+    """Update only the full-NNFF GM parity path; retain timing on bad samples."""
+    if not self.nnff_frogpilot_parity:
+      return
+    try:
+      delay, smoothing = float(lateral_delay), float(lat_smooth_seconds)
+    except (TypeError, ValueError):
+      return
+    if (isinstance(lateral_delay, bool) or not math.isfinite(delay) or not 0.01 <= delay <= 1.0
+        or not math.isfinite(smoothing) or not 0.0 <= smoothing <= 1.0):
+      return
+    self.nn_time_offset = delay
+    self.nn_future_times = [t + delay for t in (0.3, 0.6, 1.0, 1.5)]
+    self.nn_future_times_np = np.array(self.nn_future_times)
+    self.desired_lat_jerk_time = delay + smoothing
+
+  def reset(self):
+    super().reset()
+    if self.nnff_frogpilot_parity:
+      # Clear the NN's history without silently resetting the PID integral.
+      self.lateral_accel_desired_deque.clear()
+      self.roll_deque.clear()
 
 
   def update_live_torque_params(self, latAccelFactor, latAccelOffset, friction):
@@ -187,7 +214,7 @@ class LatControlTorque(LatControl):
       actual_curvature_vm = -VM.calc_curvature(math.radians(CS.steeringAngleDeg - params.angleOffsetDeg), CS.vEgo, params.roll)
       roll_compensation = params.roll * ACCELERATION_DUE_TO_GRAVITY
       actual_lateral_jerk = 0.0
-      if self.use_steering_angle:
+      if self.use_steering_angle or self.nnff_frogpilot_parity:
         actual_curvature = actual_curvature_vm
         curvature_deadzone = abs(VM.calc_curvature(math.radians(self.steering_angle_deadzone_deg), CS.vEgo, 0.0))
         if self.use_nnff or self.use_nnff_lite:
@@ -216,6 +243,7 @@ class LatControlTorque(LatControl):
       lateral_jerk_setpoint = 0
       lateral_jerk_measurement = 0
       lookahead_lateral_jerk = 0
+      lat_accel_friction_factor = self.lat_accel_friction_factor if self.use_nnff or self.use_nnff_lite else 1.0
 
       model_good = model_data is not None and len(model_data.orientation.x) >= CONTROL_N
       if model_good and (self.use_nnff or self.use_nnff_lite):
@@ -231,7 +259,9 @@ class LatControlTorque(LatControl):
         if (self.use_steering_angle and not self.nnff_frogpilot_parity) or lookahead_lateral_jerk == 0.0:
           lookahead_lateral_jerk = 0.0
           actual_lateral_jerk = 0.0
-          self.lat_accel_friction_factor = 1.0
+          lat_accel_friction_factor = 1.0
+          if not self.nnff_frogpilot_parity:
+            self.lat_accel_friction_factor = lat_accel_friction_factor
         lateral_jerk_setpoint = self.lat_jerk_friction_factor * lookahead_lateral_jerk
         lateral_jerk_measurement = self.lat_jerk_friction_factor * actual_lateral_jerk
 
@@ -274,7 +304,7 @@ class LatControlTorque(LatControl):
 
         # compute feedforward (same as nn setpoint output)
         error = setpoint - measurement
-        friction_input = self.lat_accel_friction_factor * error + self.lat_jerk_friction_factor * lookahead_lateral_jerk
+        friction_input = lat_accel_friction_factor * error + self.lat_jerk_friction_factor * lookahead_lateral_jerk
         nn_input = [CS.vEgo, desired_lateral_accel, friction_input, roll] \
                    + past_lateral_accels_desired + future_planned_lateral_accels \
                    + past_rolls + future_rolls
@@ -295,11 +325,11 @@ class LatControlTorque(LatControl):
         pid_log.error = float(torque_from_setpoint - torque_from_measurement)
         error = desired_lateral_accel - actual_lateral_accel
         if self.use_nnff_lite:
-          friction_input = self.lat_accel_friction_factor * error + self.lat_jerk_friction_factor * lookahead_lateral_jerk
+          friction_input = lat_accel_friction_factor * error + self.lat_jerk_friction_factor * lookahead_lateral_jerk
         else:
           friction_input = error
         ff = self.torque_from_lateral_accel(LatControlInputs(gravity_adjusted_lateral_accel, roll_compensation, CS.vEgo, CS.aEgo), self.torque_params,
-                                            friction_input, lateral_accel_deadzone, friction_compensation=True,
+                                            friction_input, lateral_accel_deadzone, friction_compensation=not self.nnff_frogpilot_parity,
                                             gravity_adjusted=True)
 
       freeze_integrator = steer_limited_by_controls or CS.steeringPressed or CS.vEgo < 5

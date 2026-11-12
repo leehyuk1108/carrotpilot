@@ -145,6 +145,13 @@ class Controls:
 
     CC = car.CarControl.new_message()
     CC.enabled = self.sm['selfdriveState'].enabled
+    if getattr(self.LaC, "nnff_frogpilot_parity", False):
+      # NNFF consumes pose during state_control, before publish populates CC.
+      if self.calibrated_pose is not None:
+        CC.orientationNED = self.calibrated_pose.orientation.xyz.tolist()
+        CC.angularVelocity = self.calibrated_pose.angular_velocity.xyz.tolist()
+      if self.sm.all_checks(['liveDelay']):
+        self.LaC.update_live_delay(self.sm['liveDelay'].lateralDelay)
 
     # carrot
     gear = car.CarState.GearShifter
@@ -414,7 +421,9 @@ class Controls:
       hudControl.leftLaneDepart = self.sm['driverAssistance'].leftLaneDeparture
       hudControl.rightLaneDepart = self.sm['driverAssistance'].rightLaneDeparture
 
-    if self.sm['selfdriveState'].active:
+    # AlwaysLateral can run NNFF while selfdriveState is disabled. Its limiter
+    # feedback must still follow the applied torque, including while disengaged.
+    if self.sm['selfdriveState'].active or getattr(self.LaC, "nnff_frogpilot_parity", False):
       CO = self.sm['carOutput']
       if self.is_vw_meb:
         # VW MEB: 곡률로 액추에이션하므로 곡률 기반으로 steer_limited 계산 (infiniteCable2 curvatureDEPRECATED 분기와 동일).
