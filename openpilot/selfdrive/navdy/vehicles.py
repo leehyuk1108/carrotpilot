@@ -64,19 +64,17 @@ def lane_heading(model, lane, distance):
   return math.atan2(y1 - y0, far - near)
 
 
-def projection_scale(distance):
-  """Screen units per lateral metre that navdy_project_point uses at this distance."""
-  warped = (max(0.0, min(MAX_DISTANCE, distance)) / MAX_DISTANCE) ** 0.65
-  return 44.0 * (1.0 - warped) + 8.0 * warped
+SPRITE_PITCH_DEG = 2.5  # pitch the Navdy v180 vehicle sprites were rendered at
 
 
 def vehicle_yaw(model, lane, distance, lateral):
-  """Sprite yaw that makes a vehicle drive along its lane in the Navdy road drawing.
+  """Sprite yaw that makes a vehicle's body follow its lane in the Navdy road drawing.
 
-  The HUD road is navdy_project_point, which squeezes distance far more than width, so the right
-  answer is small (adjacent lanes ~3-5 degrees). Derive it from that projection: step one metre
-  along the lane and see how far the vehicle moves sideways on screen, relative to its width scale.
-  Payload sign is unchanged: negative when the vehicle's front leans left on screen (right lane).
+  The HUD road is navdy_project_point, which squeezes distance far more than width. Step one metre
+  along the lane and read the screen motion (dx sideways, dy up). A sprite rendered at a fixed pitch p
+  with yaw y has its long axis at tan(tilt) = tan(y) / sin(p) on screen, so matching the lane's tilt
+  dx/dy gives y = atan(sin(p) * dx / dy): adjacent lanes come out ~3-4 degrees at every distance.
+  Payload sign is unchanged: negative for a left-lane vehicle, whose front leans right on screen.
   """
   heading = lane_heading(model, lane, distance)
   step = 1.0 if distance + 1.0 <= MAX_DISTANCE else -1.0
@@ -85,8 +83,10 @@ def vehicle_yaw(model, lane, distance, lateral):
   end = navdy_project_point(distance + step, lateral + math.tan(heading) * step, model_line_y_at(position, distance + step))
   if not start or not end:
     return 0.0
-  ratio = (end[0] - start[0]) / step / projection_scale(distance)
-  yaw = math.degrees(math.asin(max(-1.0, min(1.0, ratio))))
+  dx, dy = (end[0] - start[0]) / step, (start[1] - end[1]) / step
+  if dy <= 0.0:
+    return 0.0
+  yaw = math.degrees(math.atan(math.sin(math.radians(SPRITE_PITCH_DEG)) * dx / dy))
   return rounded(max(-24.0, min(24.0, -yaw)))
 
 

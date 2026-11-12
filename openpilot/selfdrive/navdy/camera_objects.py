@@ -19,6 +19,7 @@ OBJECT_MAX_AGE = 0.25  # tracks arrive at 25 Hz
 TURN_HOLD = 1.2  # the code drops between flashes; keep the side while it keeps coming back
 CAMERA_AHEAD_OF_RADAR = -1.6  # camera ranges are ~1.6 m longer than front-radar dRel
 PARSE_EVENTS = 8  # newest 'can' events (10 ms each) parsed per display tick
+STALE_POLL = 1.0  # seconds without a poll (link down, reconnect): resubscribe instead of draining the backlog
 
 
 def _signed(value: int, bits: int) -> int:
@@ -51,11 +52,13 @@ def decode_lamps(data: bytes) -> tuple[bool, int] | None:
 class CameraObjects:
   def __init__(self):
     self.frames: dict[int, tuple[float, bytes]] = {}
-    self.turn_seen = (0, -math.inf)
+    self.track1_id = 0
+    self.turn_seen = (0, -math.inf, 0)  # (code, time, track-1 object id it belongs to)
 
   def clear(self):
     self.frames.clear()
-    self.turn_seen = (0, -math.inf)
+    self.track1_id = 0
+    self.turn_seen = (0, -math.inf, 0)
 
   def feed(self, frames, now: float) -> None:
     """frames: iterable of (address, data, src) as in can_capnp_to_list."""
@@ -64,10 +67,16 @@ class CameraObjects:
         continue
       data = bytes(data)
       self.frames[address] = (now, data)
-      if address == LAMP_ADDRESS:
+      if address == TRACK_ADDRESSES[0]:
+        ident = data[0] >> 2
+        if ident != self.track1_id:
+          # Track 1 now carries another object (or none): its predecessor's turn side must not carry over.
+          self.track1_id = ident
+          self.turn_seen = (0, -math.inf, 0)
+      elif address == LAMP_ADDRESS:
         lamps = decode_lamps(data)
-        if lamps is not None and lamps[1] in (2, 3):
-          self.turn_seen = (lamps[1], now)
+        if lamps is not None and lamps[1] in (2, 3) and self.track1_id:
+          self.turn_seen = (lamps[1], now, self.track1_id)
 
   def _fresh(self, address: int, now: float) -> bytes | None:
     entry = self.frames.get(address)
@@ -89,8 +98,10 @@ class CameraObjects:
     lamps = decode_lamps(data) if data is not None else None
     if lamps is None:
       return None
-    code, seen = self.turn_seen
-    turn = {2: 'left', 3: 'right'}.get(code, '') if 0 <= now - seen < TURN_HOLD else ''
+    code, seen, ident = self.turn_seen
+    track1 = self._fresh(TRACK_ADDRESSES[0], now)
+    same_object = track1 is not None and ident != 0 and (track1[0] >> 2) == ident
+    turn = {2: 'left', 3: 'right'}.get(code, '') if same_object and 0 <= now - seen < TURN_HOLD else ''
     return {'brake': lamps[0], 'turn': turn}
 
 
@@ -103,6 +114,8 @@ def camera_frames(raw_events, log_module):
   out = []
   for raw in raw_events:
     with log_module.Event.from_bytes(raw) as event:
+      if not event.valid:
+        continue
       frames = [(frame.address, frame.dat, frame.src) for frame in event.can if frame.address in WANTED]
       out.append((event.logMonoTime / 1e9, frames))
   return out
@@ -110,10 +123,12 @@ def camera_frames(raw_events, log_module):
 
 class CameraFeed:
   """Drains raw 'can' once per display tick (GM, onroad) and keeps the latest camera frames."""
-  def __init__(self, messaging=None, parse=None):
+  def __init__(self, messaging=None, parse=None, clock=None):
     self.messaging = messaging
     self.parse = parse
+    self.clock = clock
     self.sock = None
+    self.polled_at = -math.inf
     self.objects = CameraObjects()
     self.error = ''
 
@@ -133,6 +148,15 @@ class CameraFeed:
       if self.parse is None:
         from openpilot.cereal import log
         self.parse = lambda raw: camera_frames(raw, log)
+      if self.clock is None:
+        import time
+        self.clock = time.monotonic
+      now = self.clock()
+      if self.sock is not None and now - self.polled_at > STALE_POLL:
+        # The bridge skipped polls (Navdy link down or slow connect): a fresh subscription starts at the
+        # newest message, so the queued seconds of CAN are never copied or parsed.
+        self.close()
+      self.polled_at = now
       if self.sock is None:
         self.sock = self.messaging.sub_sock('can', conflate=False)
       raw = self.messaging.drain_sock_raw(self.sock)

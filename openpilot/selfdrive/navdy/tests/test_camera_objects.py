@@ -7,7 +7,7 @@ import pytest
 from openpilot.selfdrive.navdy import camera_objects as co
 from openpilot.selfdrive.navdy.display import navdy_project_point
 from openpilot.selfdrive.navdy.tests.test_display import model, payload
-from openpilot.selfdrive.navdy.vehicles import MAX_VEHICLES, annotate_camera, projection_scale, vehicle_yaw
+from openpilot.selfdrive.navdy.vehicles import MAX_VEHICLES, SPRITE_PITCH_DEG, annotate_camera, vehicle_yaw
 
 
 def track_frame(ident=5, kind=1, azimuth_deg=0.0, range_m=30.0, width_m=1.75):
@@ -65,21 +65,36 @@ def test_objects_keep_only_fresh_object_bus_frames_and_mark_track_one():
 
 def test_turn_side_is_held_between_flashes_and_hazard_is_ignored():
   cam = co.CameraObjects()
+  cam.feed([(0x421, track_frame(ident=7), 1)], 9.99)
   cam.feed([(0x427, lamp_frame(turn=2), 1)], 10.0)
-  cam.feed([(0x427, lamp_frame(turn=0), 1)], 10.2)
+  cam.feed([(0x421, track_frame(ident=7), 1), (0x427, lamp_frame(turn=0), 1)], 10.2)
   assert cam.lead_lamps(10.2) == {'brake': False, 'turn': 'left'}
-  cam.feed([(0x427, lamp_frame(turn=0), 1)], 11.15)
+  cam.feed([(0x421, track_frame(ident=7), 1), (0x427, lamp_frame(turn=0), 1)], 11.15)
   assert cam.lead_lamps(11.15) == {'brake': False, 'turn': 'left'}
-  cam.feed([(0x427, lamp_frame(turn=0), 1)], 11.25)
+  cam.feed([(0x421, track_frame(ident=7), 1), (0x427, lamp_frame(turn=0), 1)], 11.25)
   assert cam.lead_lamps(11.25)['turn'] == ''
-  cam.feed([(0x427, lamp_frame(brake=True, turn=4), 1)], 12.0)
+  cam.feed([(0x421, track_frame(ident=7), 1), (0x427, lamp_frame(brake=True, turn=4), 1)], 12.0)
   assert cam.lead_lamps(12.0) == {'brake': True, 'turn': ''}
+
+
+def test_a_new_lead_does_not_inherit_the_previous_lead_turn_signal():
+  cam = co.CameraObjects()
+  cam.feed([(0x421, track_frame(ident=7), 1), (0x427, lamp_frame(turn=2), 1)], 10.0)
+  assert cam.lead_lamps(10.0)['turn'] == 'left'
+  cam.feed([(0x421, track_frame(ident=8), 1), (0x427, lamp_frame(turn=0), 1)], 10.2)
+  assert cam.lead_lamps(10.2)['turn'] == ''
+  cam.feed([(0x421, track_frame(ident=8), 1), (0x427, lamp_frame(turn=3), 1)], 10.4)
+  assert cam.lead_lamps(10.4)['turn'] == 'right'
+  # Track 1 going stale also ends the held side.
+  cam.feed([(0x427, lamp_frame(turn=0), 1)], 10.4 + co.OBJECT_MAX_AGE + 0.05)
+  assert cam.lead_lamps(10.4 + co.OBJECT_MAX_AGE + 0.05)['turn'] == ''
   assert cam.lead_lamps(12.0 + co.OBJECT_MAX_AGE + 0.01) is None
 
 
 class FakeEvent:
-  def __init__(self, t, frames):
+  def __init__(self, t, frames, valid=True):
     self.logMonoTime = int(t * 1e9)
+    self.valid = valid
     self.can = [NS(address=a, dat=d, src=s) for a, d, s in frames]
 
 
@@ -92,7 +107,8 @@ class FakeLog:
 
 
 def test_camera_frames_reads_only_wanted_addresses():
-  events = [FakeEvent(1.0, [(0x421, b'a' * 8, 1), (0x1E9, b'b' * 8, 0)]), FakeEvent(1.01, [(0x427, b'c' * 8, 1)])]
+  events = [FakeEvent(1.0, [(0x421, b'a' * 8, 1), (0x1E9, b'b' * 8, 0)]), FakeEvent(1.01, [(0x427, b'c' * 8, 1)]),
+            FakeEvent(1.02, [(0x421, b'd' * 8, 1)], valid=False)]
   assert co.camera_frames(events, FakeLog) == [(1.0, [(0x421, b'a' * 8, 1)]), (1.01, [(0x427, b'c' * 8, 1)])]
 
 
@@ -113,7 +129,8 @@ class FakeMessaging:
 def test_feed_parses_only_the_newest_events_and_closes_when_disabled():
   seen = []
   raw = [FakeEvent(10.0 + i * 0.01, [(0x421, track_frame(ident=1 + i % 3), 1)]) for i in range(20)]
-  feed = co.CameraFeed(FakeMessaging([raw]), parse=lambda r: seen.append(len(r)) or co.camera_frames(r, FakeLog))
+  feed = co.CameraFeed(FakeMessaging([raw]), parse=lambda r: seen.append(len(r)) or co.camera_frames(r, FakeLog),
+                       clock=lambda: 50.0)
   feed.poll(True)
   assert seen == [co.PARSE_EVENTS]
   assert [o['id'] for o in feed.objects.objects(10.2)] == [1 + 19 % 3]
@@ -121,30 +138,48 @@ def test_feed_parses_only_the_newest_events_and_closes_when_disabled():
   assert feed.sock is None and feed.objects.objects(10.2) == []
 
 
+def test_feed_resubscribes_after_missed_polls_instead_of_draining_the_backlog():
+  clock = [100.0]
+  messaging = FakeMessaging([[], [], []])
+  feed = co.CameraFeed(messaging, parse=lambda r: [], clock=lambda: clock[0])
+  feed.poll(True)
+  clock[0] += 0.2
+  feed.poll(True)
+  assert messaging.subscribed == 1
+  clock[0] += co.STALE_POLL + 0.5
+  feed.poll(True)
+  assert messaging.subscribed == 2
+
+
 def test_feed_errors_never_escape():
-  feed = co.CameraFeed(FakeMessaging([[object()]]), parse=lambda r: 1 / 0)
+  feed = co.CameraFeed(FakeMessaging([[object()]]), parse=lambda r: 1 / 0, clock=lambda: 0.0)
   feed.poll(True)
   assert feed.error.startswith('ZeroDivisionError') and feed.sock is None
   assert feed.status(0.0) == {'objects': 0, 'lamps': False, 'error': feed.error}
 
 
-def independent_yaw(distance, lateral):
-  """Straight road: screen sideways motion per metre forward over the width scale (as in the mockup)."""
+def road_motion(distance, lateral):
+  """Straight road: screen motion (dx right, dy up) per metre forward, from the projection itself."""
+  step = 1.0 if distance + 1.0 <= 80.0 else -1.0
   a = navdy_project_point(distance, lateral, 0.0)
-  b = navdy_project_point(distance + 1.0, lateral, 0.0)
-  return -math.degrees(math.asin((b[0] - a[0]) / projection_scale(distance)))
+  b = navdy_project_point(distance + step, lateral, 0.0)
+  return (b[0] - a[0]) / step, (a[1] - b[1]) / step
 
 
-@pytest.mark.parametrize('distance', [8.0, 20.0, 45.0, 70.0])
-def test_yaw_follows_the_navdy_projection(distance):
+@pytest.mark.parametrize('distance', [8.0, 20.0, 45.0, 70.0, 79.5])
+def test_sprite_axis_follows_the_lane_lines(distance):
   straight = model()
   left = vehicle_yaw(straight, 'left', distance, -3.6)
   right = vehicle_yaw(straight, 'right', distance, 3.6)
-  assert left == pytest.approx(independent_yaw(distance, -3.6), abs=0.15)
+  dx, dy = road_motion(distance, -3.6)
+  # A sprite at pitch p and yaw y draws its long axis at tan(tilt) = tan(y) / sin(p); it must match dx/dy.
+  sprite_tilt = math.tan(math.radians(-left)) / math.sin(math.radians(SPRITE_PITCH_DEG))
+  assert sprite_tilt == pytest.approx(dx / dy, rel=0.05)
   assert right == pytest.approx(-left, abs=0.15)
-  # The squeezed road makes adjacent-lane vehicles turn only a few degrees, never the old 8-24.
-  assert -7.0 < left < 0 < right < 7.0
+  # The squeezed road gives adjacent lanes ~3.7 degrees at every distance, never the old 8-24.
+  assert -4.5 < left < -3.0
   assert vehicle_yaw(straight, 'center', distance, 0.0) == pytest.approx(0.0, abs=0.15)
+  assert abs(vehicle_yaw(straight, 'left', distance, -7.2)) > abs(left)
 
 
 def car_payload(**kwargs):
