@@ -104,33 +104,102 @@ def model_line_y_at(line: Any, distance_m: float) -> float | None:
   return model_line_y_at_values(getattr(line, "x", None), getattr(line, "y", None), distance_m)
 
 
-def navdy_project_point(x_value: Any, y_value: Any, path_y_value: Any = None) -> list[float]:
+# Navdy road view (HUD v183+): a virtual pinhole camera at the comma camera, looking straight along the car
+# (calibrated frame: x forward, y right, z down), drawn 1:1 into the HUD's 320x100 path view, so lanes and vehicles
+# sit where the road camera sees them (user request 2026-11-13: "match the real road"). u = 160 + F y / x,
+# v = HORIZON + F z / x. Road points have z = the road's depth below the camera (model lane z, about the camera's
+# 1.36 m height). Everything nearer than the bottom row is clipped (lines) or held at it (vehicles). F and HORIZON
+# were fitted by overlaying the drawing on 2026-11-13 road video: the horizon sits near the top and the bottom row
+# is about 7 m ahead, as under the hood line of the camera.
+VIEW_F = 473.0
+VIEW_CENTER_X = 160.0
+VIEW_HORIZON_Y = 8.0
+VIEW_BOTTOM_Y = 100.0
+VIEW_MIN_X_M = 0.5
+VIEW_BAND_X = (-160.0, 480.0)     # the HUD band around the 320 px view is 640 px wide
+DEFAULT_ROAD_DEPTH_M = 1.36       # road below the camera when the model gives no lane height
+RADAR_TO_CAMERA_M = 1.52          # radarState/liveTracks dRel is from the radar; the view's origin is the camera
+
+
+def _view_uv(x: float, y: float, z: float) -> tuple[float, float] | None:
+  if not (math.isfinite(x) and math.isfinite(y) and math.isfinite(z)) or not VIEW_MIN_X_M <= x <= MAX_DISTANCE_M + 20.0:
+    return None
+  return VIEW_CENTER_X + VIEW_F * y / x, VIEW_HORIZON_Y + VIEW_F * z / x
+
+
+def road_depth_at(model: Any, x: float) -> float:
+  """Depth of the road below the camera at x: the model's own-lane line height, else the plan's plus the camera height."""
+  lanes = _items(getattr(model, "laneLines", None), 3)
+  depths = []
+  for line in lanes[1:3]:
+    z = model_line_y_at_values(getattr(line, "x", None), getattr(line, "z", None), x)
+    if z is not None and 0.2 <= z <= 4.0:
+      depths.append(z)
+  if depths:
+    return sum(depths) / len(depths)
+  position = getattr(model, "position", None)
+  z = model_line_y_at_values(getattr(position, "x", None), getattr(position, "z", None), x)
+  return DEFAULT_ROAD_DEPTH_M + (z if z is not None and abs(z) <= 3.0 else 0.0)
+
+
+def navdy_project_point(x_value: Any, y_value: Any, z_value: Any = DEFAULT_ROAD_DEPTH_M) -> list[float]:
+  """One road point in view px, or [] when invalid or behind the camera (no bottom clipping here)."""
   x, y = finite_float(x_value, math.nan), finite_float(y_value, math.nan)
+  z = finite_float(z_value, math.nan)
   if not 0.0 <= x <= MAX_DISTANCE_M or not math.isfinite(y) or abs(y) > 100.0:
     return []
-  distance = (x / MAX_DISTANCE_M) ** 0.65
-  lateral_scale = 44.0 * (1.0 - distance) + 8.0 * distance
-  if path_y_value is None:
-    screen_x = 160.0 + y * lateral_scale
-  else:
-    path_y = finite_float(path_y_value, math.nan)
-    if not math.isfinite(path_y) or abs(path_y) > 100.0:
-      return []
-    screen_x = 160.0 + path_y * max(lateral_scale, 17.0) + (y - path_y) * lateral_scale
-  return [rounded(screen_x), rounded(96.0 - 88.0 * distance)]
+  uv = _view_uv(max(x, VIEW_MIN_X_M), y, z)
+  return [rounded(uv[0]), rounded(uv[1])] if uv is not None else []
 
 
-def navdy_model_line(x_values: Any, y_values: Any, lateral_offset: float = 0.0,
-                     path_x_values: Any = None, path_y_values: Any = None) -> list[float]:
+def navdy_vehicle_view(model: Any, distance: float, lateral: float) -> dict[str, float] | None:
+  """Ground point (screenX/Y) and HUD sprite scale (pxPerM) of a radar-referenced vehicle at distance/lateral.
+
+  Nearer than the bottom row it is held at the bottom row, at that row's scale (it would be under the hood line).
+  None when invalid or outside the HUD band."""
+  if not math.isfinite(distance) or not math.isfinite(lateral):
+    return None
+  x = distance + RADAR_TO_CAMERA_M
+  z = road_depth_at(model, x)
+  bottom_x = VIEW_F * z / (VIEW_BOTTOM_Y - VIEW_HORIZON_Y)
+  x = max(x, bottom_x)
+  uv = _view_uv(x, lateral, z)
+  if uv is None or not VIEW_BAND_X[0] <= uv[0] <= VIEW_BAND_X[1]:
+    return None
+  return {"screenX": rounded(uv[0]), "screenY": rounded(min(uv[1], VIEW_BOTTOM_Y)), "pxPerM": rounded(VIEW_F / x, 2)}
+
+
+def navdy_model_line(x_values: Any, y_values: Any, z_values: Any = None, lateral_offset: float = 0.0) -> list[float]:
+  """A model line in view px from the bottom row on, at most MAX_PROJECTED_POINTS points.
+
+  z_values: the line's own depth below the camera per sample (laneLines z); None uses DEFAULT_ROAD_DEPTH_M.
+  The bottom-row point is found on the 3D line (x = k z with k = F / (bottom - horizon)), so a line that starts at
+  the camera keeps its near end exactly where it enters the view."""
   points = [(x, y) for x, y in _model_points(x_values, y_values) if x <= MAX_DISTANCE_M]
-  if len(points) > MAX_PROJECTED_POINTS:
-    last = len(points) - 1
-    points = [points[round(i * last / (MAX_PROJECTED_POINTS - 1))] for i in range(MAX_PROJECTED_POINTS)]
-  projected = []
-  for x, y in points:
-    path_y = model_line_y_at_values(path_x_values, path_y_values, x)
-    projected.extend(navdy_project_point(x, y + lateral_offset, path_y))
-  return projected
+  zs = None if z_values is None else _items(z_values, MAX_MODEL_SAMPLES)
+  road = []
+  for index, (x, y) in enumerate(points):
+    z = finite_float(zs[index], math.nan) if zs is not None and index < len(zs) else DEFAULT_ROAD_DEPTH_M
+    if not 0.2 <= z <= 10.0:
+      z = DEFAULT_ROAD_DEPTH_M  # missing or implausible height (e.g. an unset z): the flat road under the camera
+    road.append((x, y + lateral_offset, z))
+  k = VIEW_F / (VIEW_BOTTOM_Y - VIEW_HORIZON_Y)
+  first = next((i for i, (x, _, z) in enumerate(road) if x >= k * z), None)
+  if first is None:
+    return []
+  if first > 0:
+    (x0, y0, z0), (x1, y1, z1) = road[first - 1], road[first]
+    denominator = (x1 - x0) - k * (z1 - z0)
+    t = (k * z0 - x0) / denominator if denominator > 0 else 1.0
+    t = max(0.0, min(1.0, t))
+    road = [(x0 + t * (x1 - x0), y0 + t * (y1 - y0), z0 + t * (z1 - z0))] + road[first:]
+  projected = [uv for uv in (_view_uv(x, y, z) for x, y, z in road) if uv is not None]
+  if len(projected) < 2:
+    return []
+  if len(projected) > MAX_PROJECTED_POINTS:
+    last = len(projected) - 1
+    projected = [projected[round(i * last / (MAX_PROJECTED_POINTS - 1))] for i in range(MAX_PROJECTED_POINTS)]
+  return [value for u, v in projected for value in (rounded(u), rounded(min(v, VIEW_BOTTOM_Y)))]
 
 
 def _probability(values: list, index: int) -> float:
@@ -155,13 +224,24 @@ def navdy_model_geometry(model: Any) -> dict[str, Any]:
   if position is None or len(lanes) < 3:
     return {}
   path_x, path_y = getattr(position, "x", None), getattr(position, "y", None)
+  path_z = [road_depth_at(model, x) for x, _ in _model_points(path_x, path_y)]  # the path band lies on the road
 
   def line_points(line: Any) -> list[float]:
-    return navdy_model_line(getattr(line, "x", None), getattr(line, "y", None), 0.0, path_x, path_y)
+    return navdy_model_line(getattr(line, "x", None), getattr(line, "y", None), getattr(line, "z", None))
 
+  path_left, path_right = navdy_model_line(path_x, path_y, path_z, -1.0), navdy_model_line(path_x, path_y, path_z, 1.0)
+  path_points = _model_points(path_x, path_y)
+  if path_points and not (path_left and path_right):
+    # A short plan (stopped, creeping) ends under the hood line: nothing of the band is visible. Keep lanes and
+    # vehicles drawn with a zero-height band on the bottom row where it would enter the view.
+    depth = road_depth_at(model, path_points[-1][0])
+    bottom_scale = VIEW_F / (VIEW_F * depth / (VIEW_BOTTOM_Y - VIEW_HORIZON_Y))
+    end_y = path_points[-1][1]
+    path_left, path_right = ([rounded(VIEW_CENTER_X + bottom_scale * (end_y + side)), VIEW_BOTTOM_Y] * 2
+                             for side in (-1.0, 1.0))
   geometry = {
-    "navPathLeft": navdy_model_line(path_x, path_y, -1.0, path_x, path_y),
-    "navPathRight": navdy_model_line(path_x, path_y, 1.0, path_x, path_y),
+    "navPathLeft": path_left,
+    "navPathRight": path_right,
     "navLaneLeft": line_points(lanes[1]),
     "navLaneRight": line_points(lanes[2]),
   }
@@ -220,22 +300,20 @@ def navdy_lead_geometry(model: Any, radar_state: Any, longitudinal_plan: Any = N
       continue
     if radar_alignment is not None and bool(getattr(lead, "radar", False)):
       lateral = radar_alignment.right(distance, lateral)
-    path_y = model_line_y_at(getattr(model, "position", None), distance)
     lane = _lead_lane(model, distance, lateral)
     if not lane:
       continue
-    # Lanes can extend beyond the time-based stopping trajectory. Match their
-    # existing projection there, using the measured lateral coordinate directly.
-    screen = navdy_project_point(distance, lateral, path_y)
-    if not screen:
+    view = navdy_vehicle_view(model, distance, lateral)
+    if view is None:
       continue
     track_id = int(finite_float(getattr(lead, "radarTrackId", -1), -1))
     if track_id >= 0 and any(vehicle["trackId"] == track_id for vehicle in vehicles):
       continue
     vehicle = {
       "trackId": track_id,
-      "screenX": rounded(max(4.0, min(316.0, screen[0]))),
-      "screenY": screen[1],
+      "screenX": view["screenX"],
+      "screenY": view["screenY"],
+      "pxPerM": view["pxPerM"],
       "distanceM": rounded(distance),
       "relativeSpeedMps": rounded(relative_speed),
       "lateralM": rounded(lateral, 2),

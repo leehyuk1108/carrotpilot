@@ -163,20 +163,28 @@ class TestDisplay:
     assert payload(car_control=NS(longActive=False),
                    car_output=NS(actuatorsOutput=NS(accel=1)))["longitudinalActuator"] == "none"
 
-  def test_projection_golden_wayon(self):
-    assert navdy_project_point(0, -1) == [116.0, 96.0]
-    assert navdy_project_point(80, 1) == [168.0, 8.0]
-    assert navdy_project_point(80, 3, 2) == [202.0, 8.0]
-    assert navdy_project_point(40, 0) == [160.0, 39.9]
-    assert navdy_model_line([0, 80], [0, 0], -1) == [116.0, 96.0, 152.0, 8.0]
+  def test_projection_is_a_camera_view(self):
+    # Pinhole at the camera: u = 160 + F y / x, v = 8 + F z / x (F 473, road 1.36 m below the camera).
+    F, H, Z = 473.0, 8.0, 1.36
+    assert navdy_project_point(40, 0) == [160.0, round(H + F * Z / 40, 1)]
+    assert navdy_project_point(40, 2) == pytest.approx([160 + F * 2 / 40, H + F * Z / 40], abs=0.051)
+    assert navdy_project_point(20, -1, 1.5) == pytest.approx([160 - F / 20, H + F * 1.5 / 20], abs=0.051)
+    # A straight line from the camera enters the view on the bottom row, about 7 m ahead.
+    bottom_x = F * Z / (100 - H)
+    assert navdy_model_line([0, 80], [0, 0], None, -1) == pytest.approx(
+      [160 - F / bottom_x, 100.0, 160 - F / 80, H + F * Z / 80], abs=0.051)
+    # Its own height per sample: a rising road draws higher.
+    flat, rising = navdy_model_line([0, 80], [0, 0]), navdy_model_line([0, 80], [0, 0], [1.36, 0.36])
+    assert rising[-1] < flat[-1]
     assert model_line_y_at_values([0, 40, 80], [0, 2, 4], 20) == 1.0
     assert model_line_y_at_values([0, 40], [0, 2], 80) is None
     assert model_line_y_at_values([0, 60, 90], [0, 0, 3], 75) == 1.5
 
   def test_geometry_probabilities_edges_and_bounds(self):
     geometry = navdy_model_geometry(model())
-    assert geometry["navPathLeft"][:2] == [116.0, 96.0]
-    assert geometry["navLaneLeft"][-2:] == [145.6, 8.0]
+    bottom_x = 473.0 * 1.36 / 92.0
+    assert geometry["navPathLeft"][:2] == pytest.approx([160 - 473.0 / bottom_x, 100.0], abs=0.051)
+    assert geometry["navLaneLeft"][-2:] == pytest.approx([160 - 473.0 * 1.8 / 80, 8 + 473.0 * 1.36 / 80], abs=0.051)
     assert geometry["navLaneRightProb"] == 0.95
     assert geometry["navRoadEdgeLeftProb"] == 0.9
     assert "navRoadEdgeRight" not in geometry
@@ -245,9 +253,11 @@ class TestDisplay:
       lane_line.y = [y + 1. for y in lane_line.y]
     cars = payload(model=m, radar_state=NS(leadOne=lead(dRel=distance, yRel=-1.)))['navVehicles']
     assert len(cars) == 1 and cars[0]['lane'] == 'center'
-    assert [cars[0]['screenX'], cars[0]['screenY']] == navdy_project_point(distance, 1.)
-    assert cars[0]['screenX'] == navdy_model_line([0., distance], [1., 1.],
-                                               path_x_values=m.position.x, path_y_values=m.position.y)[-2]
+    x = distance + 1.52  # radar dRel -> camera
+    assert [cars[0]['screenX'], cars[0]['screenY']] == [round(160 + 473.0 / x, 1), round(8 + 473.0 * 1.36 / x, 1)]
+    assert cars[0]['pxPerM'] == round(473.0 / x, 2)
+    # On the projected straight lane line y = 1 m: (u - 160) * z == v - 8.
+    assert (cars[0]['screenX'] - 160) * 1.36 == pytest.approx(cars[0]['screenY'] - 8, abs=0.15)
     m.laneLineProbs = [0.] * 4
     assert not payload(model=m, radar_state=NS(leadOne=lead(dRel=distance)))['navVehicles']
 
@@ -264,11 +274,15 @@ class TestDisplay:
                leadsLeft=[lead()] * 100, leadCutInRisk=lead())
     result = payload(model=model(), radar_state=radar,
                      longitudinal_plan=NS(longitudinalPlanSource="lead0", fcw=True, trafficState=2))
+    def view(distance, lateral):
+      x = distance + 1.52
+      return {"screenX": round(160 + 473.0 * lateral / x, 1), "screenY": round(8 + 473.0 * 1.36 / x, 1),
+              "pxPerM": round(473.0 / x, 2)}
     assert result["navVehicles"] == [
-      {"trackId": 42, "screenX": 160.0, "screenY": 39.9, "distanceM": 40.0,
+      {"trackId": 42, **view(40.0, 0.0), "distanceM": 40.0,
        "relativeSpeedMps": -2.0, "lateralM": 0.0, "lane": "center", "source": "radar",
        "longitudinalLead": True, "confidence": 0.9},
-      {"trackId": 43, "screenX": 54.2, "screenY": 60.3, "distanceM": 20.0,
+      {"trackId": 43, **view(20.0, -3.6), "distanceM": 20.0,
        "relativeSpeedMps": -2.0, "lateralM": -3.6, "lane": "left", "source": "radar",
        "longitudinalLead": False, "confidence": 0.9},
     ]

@@ -5,13 +5,16 @@ from itertools import islice
 import math
 
 from openpilot.selfdrive.navdy.display import (
-  _lead_lane, finite_float, model_line_y_at, navdy_project_point, rounded,
+  RADAR_TO_CAMERA_M, _lead_lane, _view_uv, finite_float, model_line_y_at, navdy_vehicle_view, road_depth_at, rounded,
 )
 
 MAX_TRACKS = 64
 MAX_VEHICLES = 8
 TRACK_MAX_AGE = 0.35
 MAX_DISTANCE = 80.0
+CLUSTER_GAP_M = 4.0     # radar points closer than a car length in one lane are one vehicle (a truck's side)
+CLUSTER_LATERAL_M = 1.5
+CLUSTER_TRUCK_M = 4.5   # points spread over this length: a long vehicle
 
 
 def vehicle_lane(model, distance, lateral):
@@ -68,19 +71,18 @@ SPRITE_PITCH_DEG = 2.5  # pitch the Navdy v180 vehicle sprites were rendered at
 
 
 def vehicle_yaw(model, lane, distance, lateral):
-  """Sprite yaw that makes a vehicle's body follow its lane in the Navdy road drawing.
+  """Sprite yaw that makes a vehicle's body follow its lane in the Navdy road view.
 
-  The HUD road is navdy_project_point, which squeezes distance far more than width. Step one metre
-  along the lane and read the screen motion (dx sideways, dy up). A sprite rendered at a fixed pitch p
-  with yaw y has its long axis at tan(tilt) = tan(y) / sin(p) on screen, so matching the lane's tilt
-  dx/dy gives y = atan(sin(p) * dx / dy): adjacent lanes come out ~3-4 degrees at every distance.
-  Payload sign is unchanged: negative for a left-lane vehicle, whose front leans right on screen.
+  Step one metre along the lane and read the screen motion (dx sideways, dy up) in the view's perspective
+  (display.navdy_vehicle_view). A sprite rendered at a fixed pitch p with yaw y has its long axis at
+  tan(tilt) = tan(y) / sin(p) on screen, so matching the lane's tilt dx/dy gives y = atan(sin(p) * dx / dy).
+  Payload sign: negative for a left-lane vehicle, whose front leans right on screen.
   """
   heading = lane_heading(model, lane, distance)
   step = 1.0 if distance + 1.0 <= MAX_DISTANCE else -1.0
-  position = getattr(model, 'position', None)
-  start = navdy_project_point(distance, lateral, model_line_y_at(position, distance))
-  end = navdy_project_point(distance + step, lateral + math.tan(heading) * step, model_line_y_at(position, distance + step))
+  x0 = distance + RADAR_TO_CAMERA_M
+  start = _view_uv(x0, lateral, road_depth_at(model, x0))
+  end = _view_uv(x0 + step, lateral + math.tan(heading) * step, road_depth_at(model, x0 + step))
   if not start or not end:
     return 0.0
   dx, dy = (end[0] - start[0]) / step, (start[1] - end[1]) / step
@@ -88,6 +90,33 @@ def vehicle_yaw(model, lane, distance, lateral):
     return 0.0
   yaw = math.degrees(math.atan(math.sin(math.radians(SPRITE_PITCH_DEG)) * dx / dy))
   return rounded(max(-24.0, min(24.0, -yaw)))
+
+
+def merge_long_vehicles(entries):
+  """A truck or bus returns several radar points along its side; draw it once, at its rearmost point.
+
+  Same lane, each point within CLUSTER_GAP_M behind the previous one and CLUSTER_LATERAL_M sideways: one vehicle
+  (two separate cars cannot be closer than a car length). Spread over CLUSTER_TRUCK_M or more it is drawn as a
+  truck unless the camera names it later."""
+  merged, used = [], set()
+  ordered = sorted(entries, key=lambda vehicle: vehicle['distanceM'])
+  for i, vehicle in enumerate(ordered):
+    if i in used:
+      continue
+    last = vehicle
+    for j in range(i + 1, len(ordered)):
+      other = ordered[j]
+      if j in used or other['lane'] != vehicle['lane']:
+        continue
+      if other['distanceM'] - last['distanceM'] >= CLUSTER_GAP_M:
+        break
+      if abs(other['lateralM'] - last['lateralM']) < CLUSTER_LATERAL_M:
+        used.add(j)
+        last = other
+    if last['distanceM'] - vehicle['distanceM'] >= CLUSTER_TRUCK_M and 'kind' not in vehicle:
+      vehicle = dict(vehicle, kind='truck')
+    merged.append(vehicle)
+  return merged
 
 
 class VehicleOverlay:
@@ -166,7 +195,6 @@ class VehicleOverlay:
         continue
       distance, lateral = track['dRel'], track['yRel']
       lane = vehicle_lane(model, distance, lateral)
-      path_y = model_line_y_at(getattr(model, 'position', None), distance)
       if not lane:
         continue
       # Preserve actual lead positions/highlights; raw points only fill in
@@ -178,15 +206,16 @@ class VehicleOverlay:
               and abs(lead['lateralM'] - lateral) <= (1.0 if display_data else 1.5)
               and abs(lead['relativeSpeedMps'] - track['vRel']) <= (3.0 if display_data else 5.0)) for lead in leads):
         continue
-      screen = navdy_project_point(distance, lateral, path_y)
-      if not screen:
+      view = navdy_vehicle_view(model, distance, lateral)
+      if view is None:
         continue
       surrounding.append({
-        'trackId': ident, 'screenX': rounded(max(4.0, min(316.0, screen[0]))), 'screenY': screen[1],
+        'trackId': ident, 'screenX': view['screenX'], 'screenY': view['screenY'], 'pxPerM': view['pxPerM'],
         'yawDeg': vehicle_yaw(model, lane, distance, lateral), 'distanceM': rounded(distance),
         'relativeSpeedMps': rounded(track['vRel']), 'lateralM': rounded(lateral, 2),
         'lane': lane, 'source': 'radar', 'longitudinalLead': False, 'confidence': 0.65,
       })
+    surrounding = merge_long_vehicles(surrounding)
     surrounding.sort(key=lambda vehicle: vehicle['distanceM'])
     selected = leads + surrounding[:max(0, MAX_VEHICLES - len(leads))]
     payload['navVehicles'] = sorted(selected, key=lambda vehicle: vehicle['distanceM'], reverse=True)
@@ -204,12 +233,12 @@ def _camera_vehicle(model, obj):
   lane = vehicle_lane(model, distance, lateral)
   if not lane:
     return None
-  screen = navdy_project_point(distance, lateral, model_line_y_at(getattr(model, 'position', None), distance))
-  if not screen:
+  view = navdy_vehicle_view(model, distance, lateral)
+  if view is None:
     return None
   return {
-    'trackId': CAMERA_TRACK_ID_BASE + int(obj['id']), 'screenX': rounded(max(4.0, min(316.0, screen[0]))),
-    'screenY': screen[1], 'yawDeg': vehicle_yaw(model, lane, distance, lateral), 'distanceM': rounded(distance),
+    'trackId': CAMERA_TRACK_ID_BASE + int(obj['id']), 'screenX': view['screenX'], 'screenY': view['screenY'],
+    'pxPerM': view['pxPerM'], 'yawDeg': vehicle_yaw(model, lane, distance, lateral), 'distanceM': rounded(distance),
     'relativeSpeedMps': 0.0, 'lateralM': rounded(lateral, 2), 'lane': lane, 'source': 'vision',
     'longitudinalLead': False, 'confidence': 0.6, 'kind': obj['kind'],
   }

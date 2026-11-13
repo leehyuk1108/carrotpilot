@@ -4,7 +4,7 @@ from types import SimpleNamespace as NS
 import pytest
 
 from openpilot.selfdrive.navdy import camera_objects as co
-from openpilot.selfdrive.navdy.display import navdy_project_point
+from openpilot.selfdrive.navdy.display import _view_uv
 from openpilot.selfdrive.navdy.tests.test_display import model, payload
 from openpilot.selfdrive.navdy.vehicles import MAX_VEHICLES, SPRITE_PITCH_DEG, annotate_camera, vehicle_yaw
 
@@ -150,8 +150,8 @@ def test_door_monitor_feeds_the_camera_only_onroad_on_gm_and_never_raises():
 def road_motion(distance, lateral):
   """Straight road: screen motion (dx right, dy up) per metre forward, from the projection itself."""
   step = 1.0 if distance + 1.0 <= 80.0 else -1.0
-  a = navdy_project_point(distance, lateral, 0.0)
-  b = navdy_project_point(distance + step, lateral, 0.0)
+  x = distance + 1.52  # radar dRel -> camera
+  a, b = _view_uv(x, lateral, 1.36), _view_uv(x + step, lateral, 1.36)
   return (b[0] - a[0]) / step, (a[1] - b[1]) / step
 
 
@@ -165,8 +165,8 @@ def test_sprite_axis_follows_the_lane_lines(distance):
   sprite_tilt = math.tan(math.radians(-left)) / math.sin(math.radians(SPRITE_PITCH_DEG))
   assert sprite_tilt == pytest.approx(dx / dy, rel=0.05)
   assert right == pytest.approx(-left, abs=0.15)
-  # The squeezed road gives adjacent lanes ~3.7 degrees at every distance, never the old 8-24.
-  assert -4.5 < left < -3.0
+  # In the camera view a straight lane 3.6 m over tilts by 3.6 / 1.36 at every distance: about 6.6 degrees.
+  assert left == pytest.approx(-math.degrees(math.atan(math.sin(math.radians(SPRITE_PITCH_DEG)) * 3.6 / 1.36)), abs=0.15)
   assert vehicle_yaw(straight, 'center', distance, 0.0) == pytest.approx(0.0, abs=0.15)
   assert abs(vehicle_yaw(straight, 'left', distance, -7.2)) > abs(left)
 

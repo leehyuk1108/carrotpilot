@@ -174,9 +174,9 @@ def test_short_path_vehicles_match_lane_projection(distance, offset, lane):
   result = confirmed(radar=radar, m=m)
   assert len(result['navVehicles']) == 1
   actual = result['navVehicles'][0]
-  expected = navdy_model_line([0., distance], [offset, lateral],
-                              path_x_values=m.position.x, path_y_values=m.position.y)[-2:]
-  assert [actual['screenX'], actual['screenY']] == [max(4., min(316., expected[0])), expected[1]]
+  x = distance + 1.52  # radar dRel -> camera; drawn where the camera view puts that road point
+  assert [actual['screenX'], actual['screenY']] == [round(160 + 473.0 * lateral / x, 1), round(8 + 473.0 * 1.36 / x, 1)]
+  assert actual['pxPerM'] == round(473.0 / x, 2)
   assert actual['lane'] == lane
   assert actual['lateralM'] == round(lateral, 2)
   assert actual['distanceM'] == distance
