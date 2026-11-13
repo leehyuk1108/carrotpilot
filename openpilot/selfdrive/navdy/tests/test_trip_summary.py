@@ -231,3 +231,13 @@ def test_long_gap_excludes_fuel_too():
   trip.observe(now=now + 0.2, onroad=False)
   assert trip.fuel_counts == 2000 + 800 and trip.duration_s == pytest.approx(140.0)
   assert trip.payload(now + 0.2)["distanceKm"] == 2.8
+
+
+def test_first_valid_odometer_after_a_delay_keeps_the_gap_distance():
+  clock = Clock(); trip = TripSummary(clock)
+  now = drive(trip, clock, seconds=40, speed=20.0)  # odometer not valid yet
+  # the loop is held 15 s, then the odometer (1 Hz, 1/64 km) is valid from here on
+  odometer = lambda t: math.floor((5000.0 + 20.0 * math.floor(t) / 1000.0) * 64) / 64
+  now = drive(trip, clock, seconds=45, start_now=now + 15.0, speed=20.0, odometer=odometer)
+  trip.observe(now=now + 0.2, onroad=False)
+  assert trip.distance_km == pytest.approx(2.0, abs=1 / 64 + 0.001)

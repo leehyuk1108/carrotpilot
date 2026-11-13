@@ -144,7 +144,11 @@ class TripSummary:
       odometer = odometer if odometer is not None and odometer > 0 else None
     if odometer is not None:
       if self.odometer_ref is None:
-        self.odometer_ref, self.odometer_ref_now = odometer, now  # a new valid stretch starts here
+        # A new valid stretch starts here; the step that led up to it is still covered by the speed.
+        if speed is not None:
+          previous = self.last_speed if self.last_speed is not None else speed
+          self.distance_km += (speed + previous) / 2.0 * dt / 1000.0
+        self.odometer_ref, self.odometer_ref_now = odometer, now
       elif odometer != self.odometer_ref:
         delta = odometer - self.odometer_ref
         elapsed = max(now - self.odometer_ref_now, 1.0)  # the odometer itself updates once a second
