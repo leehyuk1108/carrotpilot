@@ -74,7 +74,7 @@ def test_different_radar_ids_are_not_merged_just_because_they_are_close():
 
 def test_eight_vehicle_limit_preserves_leads_and_sorts_far_to_near():
   radar = data([point(i, 10. + i * 2., (i % 3 - 1) * 3.6) for i in range(20)])
-  leads = NS(leadOne=lead(dRel=79.), leadTwo=lead(dRel=78., radarTrackId=43))
+  leads = NS(leadOne=lead(dRel=78.), leadTwo=lead(dRel=77., radarTrackId=43))  # camera x within the test lanes (80 m)
   result = confirmed(radar=radar, leads=leads)
   cars = result['navVehicles']
   assert len(cars) == MAX_VEHICLES
@@ -161,7 +161,7 @@ def test_path_fallback_and_known_outer_boundary():
   assert confirmed(m=m)['navVehicles'] == []
 
 
-@pytest.mark.parametrize('distance', [10., 30., 51., 52., 70., 80.])
+@pytest.mark.parametrize('distance', [10., 30., 51., 52., 70., 78.])  # camera x = dRel + 1.52 <= the 80 m test lanes
 @pytest.mark.parametrize('offset,lane', [(-3.6, 'left'), (0., 'center'), (3.6, 'right')])
 def test_short_path_vehicles_match_lane_projection(distance, offset, lane):
   m = model()

@@ -245,7 +245,7 @@ class TestDisplay:
     assert model_line_y_at_values(xs, ys, 12.) is None
     assert model_line_y_at_values([0., 5., math.nan, 15.], [0.] * 4, 12.) is None
 
-  @pytest.mark.parametrize("distance", [10., 30., 51., 52., 70., 80.])
+  @pytest.mark.parametrize("distance", [10., 30., 51., 52., 70., 78.])  # camera x <= the 80 m test lanes
   def test_lead_beyond_stopping_path_uses_same_projection_as_current_lanes(self, distance):
     m = model()
     m.position = NS(x=[0., 2., 5.], y=[0., 0., .1])

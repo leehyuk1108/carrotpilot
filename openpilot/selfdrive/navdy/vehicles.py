@@ -5,23 +5,26 @@ from itertools import islice
 import math
 
 from openpilot.selfdrive.navdy.display import (
-  RADAR_TO_CAMERA_M, _lead_lane, _view_uv, finite_float, model_line_y_at, navdy_vehicle_view, road_depth_at, rounded,
+  _lead_lane, _view_uv, camera_x, finite_float, model_line_y_at, navdy_vehicle_view, road_depth_at, rounded,
 )
 
 MAX_TRACKS = 64
 MAX_VEHICLES = 8
 TRACK_MAX_AGE = 0.35
 MAX_DISTANCE = 80.0
-CLUSTER_GAP_M = 4.0     # radar points closer than a car length in one lane are one vehicle (a truck's side)
-CLUSTER_LATERAL_M = 1.5
-CLUSTER_TRUCK_M = 4.5   # points spread over this length: a long vehicle
+CLUSTER_GAP_M = 3.5     # radar points closer than a car length in one lane may be one vehicle (a truck's side)
+CLUSTER_LATERAL_M = 1.2  # within a truck's width
+CLUSTER_SPEED_MPS = 1.5  # moving together
+CLUSTER_MAX_M = 18.0     # no single vehicle is longer
+CLUSTER_TRUCK_M = 4.5    # points spread over this length: a long vehicle
 
 
 def vehicle_lane(model, distance, lateral):
   lane = _lead_lane(model, distance, lateral)
   if lane:
     return lane
-  # Wayon's display fallback uses the path and measured/default lane width.
+  # Wayon's display fallback uses the path and measured/default lane width (at the camera distance, like the view).
+  distance = camera_x(distance)
   path_y = model_line_y_at(getattr(model, 'position', None), distance)
   if path_y is None:
     return ''
@@ -49,7 +52,8 @@ def vehicle_lane(model, distance, lateral):
 
 
 def lane_heading(model, lane, distance):
-  """Direction of the vehicle's lane (radians, right-positive) around distance, 0 when unknown."""
+  """Direction of the vehicle's lane (radians, right-positive) around a radar distance, 0 when unknown."""
+  distance = camera_x(distance)
   near, far = max(0.0, distance - 4.0), min(MAX_DISTANCE, distance + 4.0)
   lanes = list(islice(getattr(model, 'laneLines', ()), 4))
   indices = {'left': (0, 1), 'right': (2, 3)}.get(lane)
@@ -80,7 +84,7 @@ def vehicle_yaw(model, lane, distance, lateral):
   """
   heading = lane_heading(model, lane, distance)
   step = 1.0 if distance + 1.0 <= MAX_DISTANCE else -1.0
-  x0 = distance + RADAR_TO_CAMERA_M
+  x0 = camera_x(distance)
   start = _view_uv(x0, lateral, road_depth_at(model, x0))
   end = _view_uv(x0 + step, lateral + math.tan(heading) * step, road_depth_at(model, x0 + step))
   if not start or not end:
@@ -95,9 +99,10 @@ def vehicle_yaw(model, lane, distance, lateral):
 def merge_long_vehicles(entries):
   """A truck or bus returns several radar points along its side; draw it once, at its rearmost point.
 
-  Same lane, each point within CLUSTER_GAP_M behind the previous one and CLUSTER_LATERAL_M sideways: one vehicle
-  (two separate cars cannot be closer than a car length). Spread over CLUSTER_TRUCK_M or more it is drawn as a
-  truck unless the camera names it later."""
+  Same lane, each point within CLUSTER_GAP_M behind the previous one, CLUSTER_LATERAL_M sideways and
+  CLUSTER_SPEED_MPS in relative speed, the whole run within CLUSTER_MAX_M: one vehicle (two separate cars cannot be
+  closer than a car length while moving together). Anything else stays separate. Spread over CLUSTER_TRUCK_M or
+  more it is drawn as a truck unless the camera names it later."""
   merged, used = [], set()
   ordered = sorted(entries, key=lambda vehicle: vehicle['distanceM'])
   for i, vehicle in enumerate(ordered):
@@ -108,9 +113,10 @@ def merge_long_vehicles(entries):
       other = ordered[j]
       if j in used or other['lane'] != vehicle['lane']:
         continue
-      if other['distanceM'] - last['distanceM'] >= CLUSTER_GAP_M:
+      if other['distanceM'] - last['distanceM'] >= CLUSTER_GAP_M or other['distanceM'] - vehicle['distanceM'] > CLUSTER_MAX_M:
         break
-      if abs(other['lateralM'] - last['lateralM']) < CLUSTER_LATERAL_M:
+      if (abs(other['lateralM'] - last['lateralM']) < CLUSTER_LATERAL_M
+          and abs(other['relativeSpeedMps'] - last['relativeSpeedMps']) < CLUSTER_SPEED_MPS):
         used.add(j)
         last = other
     if last['distanceM'] - vehicle['distanceM'] >= CLUSTER_TRUCK_M and 'kind' not in vehicle:
