@@ -147,47 +147,6 @@ def _depth(value: Any) -> float | None:
   return z if math.isfinite(z) and abs(z) <= MAX_DEPTH_M else None
 
 
-CROSSING_RESIDUAL_M = 1e-6  # |x - K depth| at a solved crossing: far below 0.1 px
-
-
-def _surface_crossing(g: Any, a: float, b: float, tol: float, steps: int = 2) -> float:
-  """First parameter in [a, b] where the continuous g (metres) leaves the sign it has at a, solved on g itself.
-
-  g >= 0 is the visible side. A short sub-scan finds the first change when the surface bends inside [a, b]; the
-  bracket is then closed by regula falsi with the Illinois step (a few evaluations), down to a residual of
-  CROSSING_RESIDUAL_M or a bracket of tol, whose visible end is returned."""
-  g_lo = g(a)
-  inside = g_lo >= 0.0
-  lo = a
-  for step in range(1, steps + 1):
-    hi = a + (b - a) * step / steps
-    g_hi = g(hi)
-    if (g_hi >= 0.0) != inside:
-      break
-    lo, g_lo = hi, g_hi
-  else:
-    return b
-  kept = 0
-  for _ in range(60):
-    if hi - lo <= tol:
-      break
-    mid = lo + (hi - lo) * g_lo / (g_lo - g_hi) if g_lo != g_hi else (lo + hi) / 2.0
-    if not lo < mid < hi:
-      mid = (lo + hi) / 2.0
-    g_mid = g(mid)
-    if abs(g_mid) <= CROSSING_RESIDUAL_M:
-      return mid
-    if (g_mid >= 0.0) == inside:
-      lo, g_lo = mid, g_mid
-      g_hi = g_hi / 2.0 if kept == 1 else g_hi   # Illinois: the far end stayed twice, so pull the next point to it
-      kept = 1
-    else:
-      hi, g_hi = mid, g_mid
-      g_lo = g_lo / 2.0 if kept == -1 else g_lo
-      kept = -1
-  return lo if inside else hi
-
-
 class _RoadProfile:
   """The road surface of one model message, parsed once (lookups run many times per payload).
 
@@ -209,6 +168,19 @@ class _RoadProfile:
         grid.update(x for x in line[0] if VIEW_MIN_X_M < x < MAX_DISTANCE_M)
     self.grid = sorted(grid)
     self.entries: dict = {}
+    self.lookups: dict = {}
+    self.columns = [self._column_bounds(x) for x in self.grid]   # (min, max) depth candidates at each column
+    pieces = len(self.grid) - 1
+    self.hidden_until = self.grid[0]   # the road is hidden on every piece before this column
+    for i in range(pieces):
+      if not self._settled(i, self.grid[i], self.grid[i + 1], False):
+        break
+      self.hidden_until = self.grid[i + 1]
+    self.shown_from = self.grid[-1]    # and in view on every piece from this column on
+    for i in reversed(range(pieces)):
+      if not self._settled(i, self.grid[i], self.grid[i + 1], True):
+        break
+      self.shown_from = self.grid[i]
 
   @staticmethod
   def _line(line: Any, with_y: bool = True):
@@ -232,47 +204,148 @@ class _RoadProfile:
     x0, x1, v0, v1 = xs[i - 1], xs[i], values[i - 1], values[i]
     return v0 + (v1 - v0) * (x - x0) / (x1 - x0) if x1 > x0 else v1
 
+  def _lookup(self, x: float) -> tuple:
+    """((y, z) of the left line, of the right line, plan z) at x, each None where absent; memoised per message
+    (lane lines share sample columns, and the solver revisits points)."""
+    hit = self.lookups.get(x)
+    if hit is None:
+      sides = []
+      for line in (self.left, self.right):
+        z = self._at(line[0], line[2], x) if line is not None else None
+        sides.append(None if z is None else (self._at(line[0], line[1], x), z))
+      plan = self._at(self.plan[0], self.plan[2], x) if self.plan is not None else None
+      hit = self.lookups[x] = (sides[0], sides[1], plan)
+    return hit
+
   def depth(self, x: float, y: float | None = None) -> float:
-    sides = []
-    for line in (self.left, self.right):
-      if line is not None:
-        z = self._at(line[0], line[2], x)
-        if z is not None:
-          sides.append((self._at(line[0], line[1], x), z))
-    if len(sides) == 2:
-      (y_left, z_left), (y_right, z_right) = sides
+    left, right, plan = self._lookup(x)
+    if left is not None and right is not None:
+      (y_left, z_left), (y_right, z_right) = left, right
       if y is not None and y_right - y_left > 0.5:
         t = max(-2.0, min(3.0, (y - y_left) / (y_right - y_left)))   # beside the lane: the same tilt, bounded
         return z_left + t * (z_right - z_left)
       return (z_left + z_right) / 2.0
-    if sides:
-      return sides[0][1]
-    if self.plan is not None:
-      z = self._at(self.plan[0], self.plan[2], x)
-      if z is not None:
-        return DEFAULT_ROAD_DEPTH_M + z
+    if left is not None or right is not None:
+      return (left or right)[1]
+    if plan is not None:
+      return DEFAULT_ROAD_DEPTH_M + plan
     return DEFAULT_ROAD_DEPTH_M
 
+  def _sides(self, x: float):
+    """(y_left, z_left, y_right, z_right) where both own-lane lines have a height at x, else None (as depth())."""
+    left, right, _ = self._lookup(x)
+    return None if left is None or right is None else (left[0], left[1], right[0], right[1])
+
+  def _column_bounds(self, x: float) -> tuple[float, float]:
+    """Every depth formula's value at column x: each line, both clamps of the lateral mix, the plan, the default.
+    Within a sample piece each formula is linear in x (the unclamped mix lies between the clamps), so the two
+    columns of a piece bound depth anywhere on it."""
+    left, right, plan = self._lookup(x)
+    values = [DEFAULT_ROAD_DEPTH_M] + [side[1] for side in (left, right) if side is not None]
+    if left is not None and right is not None:
+      values += [left[1] - 2.0 * (right[1] - left[1]), left[1] + 3.0 * (right[1] - left[1])]
+    if plan is not None:
+      values.append(DEFAULT_ROAD_DEPTH_M + plan)
+    return min(values), max(values)
+
+  def _settled(self, i: int, a: float, b: float, visible: bool) -> bool:
+    """True when the road keeps `visible` on all of [a, b] inside sample piece i, by that piece's bounds."""
+    (low0, high0), (low1, high1) = self.columns[i], self.columns[i + 1]
+    if visible:
+      return a - VIEW_K * max(high0, high1) >= 0.0   # x - K depth >= 0 throughout
+    return b - VIEW_K * min(low0, low1) < 0.0        # x - K depth < 0 throughout
+
+  def _weight(self, x: float, y: float) -> float:
+    """Positive factor that makes weight * (x - K depth) a polynomial in x on one piece: the lane width while the
+    lateral mix applies (depth is a ratio there), else 1 (depth is linear)."""
+    sides = self._sides(x)
+    if sides is None:
+      return 1.0
+    width = sides[2] - sides[0]
+    return width if width > 0.5 and -2.0 < (y - sides[0]) / width < 3.0 else 1.0
+
+  def _regimes(self, a: float, b: float, y_at: Any) -> list:
+    """Split a sample piece where the depth formula changes: lane width 0.5 m, lateral mix clamps at -2 and 3."""
+    cuts = [a, b]
+    m1, m2 = a + (b - a) / 3.0, a + 2.0 * (b - a) / 3.0
+    s1, s2 = self._sides(m1), self._sides(m2)
+    if s1 is not None and s2 is not None:
+      w1, w2 = s1[2] - s1[0], s2[2] - s2[0]
+      u1, u2 = y_at(m1) - s1[0], y_at(m2) - s2[0]
+      for g1, g2 in ((w1 - 0.5, w2 - 0.5), (u1 + 2.0 * w1, u2 + 2.0 * w2), (u1 - 3.0 * w1, u2 - 3.0 * w2)):
+        if g1 != g2:   # each is linear in x on the piece
+          x = m1 + (m2 - m1) * g1 / (g1 - g2)
+          if a < x < b:
+            cuts.append(x)
+    cuts.sort()
+    return list(zip(cuts, cuts[1:]))
+
+  def _change(self, p: float, q: float, y_at: Any, visible: bool) -> float | None:
+    """First x in [p, q] where the road leaves `visible`, on a piece with one depth formula. There
+    weight * (x - K depth) is a polynomial of degree <= 2 in x, fitted exactly from three inner points (so a
+    jump at either end is seen as a change at that end), and its roots are solved in closed form."""
+    h = (q - p) / 4.0
+    if not h > 0.0:
+      return None
+
+    def value(x: float) -> float:
+      y = y_at(x)
+      return self._weight(x, y) * (x - VIEW_K * self.depth(x, y))
+    v1, v2, v3 = value(p + h), value(p + 2.0 * h), value(p + 3.0 * h)
+    slope, curve = (v3 - v1) / (2.0 * h), (v1 - 2.0 * v2 + v3) / (2.0 * h * h)   # around the middle, tau in [-2h, 2h]
+    start = v2 - 2.0 * h * slope + 4.0 * h * h * curve
+    if (start >= 0.0) if not visible else (start < -1e-6):   # a search may start on its own entry root
+      return p
+    scale = abs(v1) + abs(v2) + abs(v3) + 1e-12
+    if abs(curve) * 4.0 * h * h <= 1e-12 * scale:
+      roots = [-v2 / slope] if slope != 0.0 else []
+    else:
+      disc = slope * slope - 4.0 * curve * v2
+      if disc < 0.0:
+        return None
+      k = -0.5 * (slope + math.copysign(math.sqrt(disc), slope))
+      roots = [k / curve] + ([v2 / k] if k != 0.0 else [])
+    eps = 1e-9 * h
+    for tau in sorted(min(2.0 * h, max(-2.0 * h, r)) for r in roots if -2.0 * h - eps <= r <= 2.0 * h + eps):
+      rising = slope + 2.0 * curve * tau   # a touching double root is not a change
+      if (rising > 0.0) if not visible else (rising < 0.0):
+        return p + 2.0 * h + tau
+    return None
+
+  def crossing(self, x0: float, y0: float, x1: float, y1: float, visible: bool) -> float | None:
+    """First x in [x0, x1] on the straight run (x0, y0)-(x1, y1) where the road leaves `visible` (in view means
+    x >= K depth(x, y)), or None. Exact and complete: split at every sample column and formula change, so a short
+    stretch inside a long line segment, or between two hidden ends, is found too."""
+    if not x1 > x0:
+      return None
+    slope = (y1 - y0) / (x1 - x0)
+    if visible and x0 >= self.shown_from:
+      return None
+    if not visible and x0 < self.hidden_until:
+      if x1 <= self.hidden_until:
+        return None
+      x0, y0 = self.hidden_until, y0 + slope * (self.hidden_until - x0)   # same straight run, later start
+
+    def y_at(x: float, x0: float = x0, y0: float = y0) -> float:
+      return y0 + slope * (x - x0)
+    first, last = bisect.bisect_right(self.grid, x0), bisect.bisect_left(self.grid, x1)
+    cuts = [x0] + self.grid[first:last] + [x1]
+    for k, (a, b) in enumerate(zip(cuts, cuts[1:], strict=False)):
+      if self._settled(min(len(self.grid) - 2, max(0, first - 1 + k)), a, b, visible):
+        continue
+      for p, q in self._regimes(a, b, y_at):
+        x = self._change(p, q, y_at, visible)
+        if x is not None:
+          return x
+    return None
+
   def entry(self, y: float = 0.0) -> float:
-    """First distance where the road at lateral y enters the bottom row (x = K depth), solved per sample segment."""
-    key = round(y, 1)
+    """First distance where the road at lateral y enters the bottom row (x = K depth)."""
+    key = round(y, 4)
     if key not in self.entries:
-      self.entries[key] = self._entry(key)
+      x = self.crossing(self.grid[0], key, self.grid[-1], key, visible=False)
+      self.entries[key] = VIEW_K * DEFAULT_ROAD_DEPTH_M if x is None else x
     return self.entries[key]
-
-  def _entry(self, y: float) -> float:
-    def below(x: float) -> float:   # >= 0 where the road at (x, y) is in view
-      return x - VIEW_K * self.depth(x, y)
-
-    prev_x = self.grid[0]
-    if below(prev_x) >= 0.0:
-      return prev_x
-    for x in self.grid[1:]:
-      if below(x) >= 0.0:
-        # depth(x, y) mixes the lane heights across, so it bends inside a sample segment: solve on it, not a chord
-        return _surface_crossing(below, prev_x, x, tol=1e-5)  # 0.01 mm: well under 0.1 px
-      prev_x = x
-    return VIEW_K * DEFAULT_ROAD_DEPTH_M
 
 
 _PROFILE_CACHE: list = [None, None]  # (key, profile): the one model message currently being drawn
@@ -339,35 +412,42 @@ def navdy_vehicle_view(model: Any, distance: float, lateral: float) -> dict[str,
   return {"screenX": rounded(uv[0]), "screenY": rounded(min(uv[1], VIEW_BOTTOM_Y)), "pxPerM": rounded(VIEW_F / x, 2)}
 
 
-def navdy_model_line(x_values: Any, y_values: Any, z_values: Any = None, lateral_offset: float = 0.0,
-                     depth: Any = None) -> list[float]:
-  """The first visible stretch of a model line in view px, at most MAX_PROJECTED_POINTS points.
+def _surface_stretch(points: list, surface: Any) -> list:
+  stretch, started = [], False
+  for (xa, ya), (xb, yb) in zip(points, points[1:], strict=False):
+    if xb <= VIEW_MIN_X_M:
+      continue
+    if xa < VIEW_MIN_X_M:
+      ya, xa = ya + (yb - ya) * (VIEW_MIN_X_M - xa) / (xb - xa), VIEW_MIN_X_M
 
-  depth(x, y): the road surface (road_depth_at); every sample uses it, so lines, path and vehicles share one road.
-  Without it, z_values (a valid per-sample depth) or the flat default. The stretch starts where the 3D line enters the
-  bottom row (x = K z) and, if it later drops out again (a crest), ends where it leaves: on the road surface when
-  depth is given (solved on it, as vehicles are), else on the 3D chord between samples."""
-  points = [(x, y) for x, y in _model_points(x_values, y_values) if x <= MAX_DISTANCE_M]
-  zs = _line_depths(z_values, from_line=False)
+    def at(x: float, xa=xa, ya=ya, xb=xb, yb=yb) -> tuple:
+      y = ya + (yb - ya) * (x - xa) / (xb - xa)
+      return x, y, surface.depth(x, y)
+    if not started:
+      x = surface.crossing(xa, ya, xb, yb, visible=False)
+      if x is None:
+        continue
+      started = True
+      stretch.append(at(x))
+      if not xb > x:
+        continue
+      xa, ya = x, stretch[-1][1]
+    x = surface.crossing(xa, ya, xb, yb, visible=True)
+    if x is not None:
+      stretch.append(at(x))
+      break
+    stretch.append((xb, yb, surface.depth(xb, yb)))
+  return stretch
+
+
+def _chord_stretch(points: list, zs: list | None) -> list:
   road = []
   for index, (x, y) in enumerate(points):
-    y = y + lateral_offset
-    if depth is not None:
-      z = depth(x, y)
-    else:
-      z = _depth(zs[index]) if zs is not None and index < len(zs) else None
-      z = DEFAULT_ROAD_DEPTH_M if z is None else z
-    road.append((x, y, z))
+    z = _depth(zs[index]) if zs is not None and index < len(zs) else None
+    road.append((x, y, DEFAULT_ROAD_DEPTH_M if z is None else z))
 
   def crossing(a, b):
     (x0, y0, z0), (x1, y1, z1) = a, b
-    if depth is not None:   # on the road surface itself, where a vehicle at the same lateral meets the bottom row too
-      def visible_by(t):
-        x = x0 + t * (x1 - x0)
-        return min(x - VIEW_K * depth(x, y0 + t * (y1 - y0)), x - VIEW_MIN_X_M)
-      t = _surface_crossing(visible_by, 0.0, 1.0, tol=1e-6)
-      x, y = x0 + t * (x1 - x0), y0 + t * (y1 - y0)
-      return x, y, depth(x, y)
     denominator = (x1 - x0) - VIEW_K * (z1 - z0)
     t = (VIEW_K * z0 - x0) / denominator if denominator != 0.0 else 1.0
     t = max(0.0, min(1.0, t))
@@ -383,6 +463,22 @@ def navdy_model_line(x_values: Any, y_values: Any, z_values: Any = None, lateral
       stretch.append(crossing(road[i - 1], road[i]))
       break
     stretch.append(road[i])
+  return stretch
+
+
+def navdy_model_line(x_values: Any, y_values: Any, z_values: Any = None, lateral_offset: float = 0.0,
+                     surface: Any = None) -> list[float]:
+  """The first visible stretch of a model line in view px, at most MAX_PROJECTED_POINTS points.
+
+  surface: the road (_RoadProfile); every point uses its depth, so lines, path and vehicles share one road, and the
+  stretch starts where the line first enters the bottom row (x = K z) and, if it later drops out again (a crest),
+  ends where it leaves: both solved on that road like a vehicle's crossing, anywhere along a line segment.
+  Without it, z_values (a valid per-sample depth) or the flat default, with crossings on the chord between samples."""
+  points = [(x, y + lateral_offset) for x, y in _model_points(x_values, y_values) if x <= MAX_DISTANCE_M]
+  if surface is not None:
+    stretch = _surface_stretch(points, surface)
+  else:
+    stretch = _chord_stretch(points, _line_depths(z_values, from_line=False))
   projected = [uv for uv in (_view_uv(x, y, z) for x, y, z in stretch) if uv is not None]
   if len(projected) < 2:
     return []
@@ -414,14 +510,13 @@ def navdy_model_geometry(model: Any) -> dict[str, Any]:
   if position is None or len(lanes) < 3:
     return {}
   path_x, path_y = getattr(position, "x", None), getattr(position, "y", None)
-  profile = _profile(model)
-  road = profile.depth  # one height policy for every line
+  profile = _profile(model)  # one road surface for every line
 
   def line_points(line: Any) -> list[float]:
-    return navdy_model_line(getattr(line, "x", None), getattr(line, "y", None), getattr(line, "z", None), depth=road)
+    return navdy_model_line(getattr(line, "x", None), getattr(line, "y", None), getattr(line, "z", None), surface=profile)
 
-  path_left = navdy_model_line(path_x, path_y, None, -1.0, depth=road)
-  path_right = navdy_model_line(path_x, path_y, None, 1.0, depth=road)
+  path_left = navdy_model_line(path_x, path_y, None, -1.0, surface=profile)
+  path_right = navdy_model_line(path_x, path_y, None, 1.0, surface=profile)
   if _model_points(path_x, path_y) and not (path_left and path_right):
     # A short plan (stopped, creeping) ends under the hood line: nothing of the band is visible. Keep lanes and
     # vehicles drawn (the HUD draws the road only with a path) with a zero-area band off the view.
