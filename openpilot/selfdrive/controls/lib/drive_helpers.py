@@ -82,7 +82,7 @@ def smooth_value(val, prev_val, tau, dt=DT_MDL):
   alpha = 1 - np.exp(-dt/tau) if tau > 0 else 1
   return alpha * val + (1 - alpha) * prev_val
 
-def clip_curvature(v_ego, prev_curvature, new_curvature, roll):
+def clip_curvature(v_ego, prev_curvature, new_curvature, roll, low_speed_allowance=True):
   # This function respects ISO lateral jerk and acceleration limits + a max curvature
   v_ego = max(v_ego, MIN_SPEED)
   max_curvature_rate = MAX_LATERAL_JERK / (v_ego ** 2)  # inexact calculation, check https://github.com/commaai/openpilot/pull/24755
@@ -93,11 +93,12 @@ def clip_curvature(v_ego, prev_curvature, new_curvature, roll):
   roll_compensation = roll * ACCELERATION_DUE_TO_GRAVITY
   # Avoid an abrupt authority drop at 100 km/h. Gradually transition from
   # the low-speed allowance to the high-speed EU-guideline limit.
+  # low_speed_allowance=False keeps the stock/FrogPilot limit at every speed (FrogPilot-parity cars).
   max_lateral_accel_no_roll = float(np.interp(
     v_ego,
     [80 / 3.6, 120 / 3.6],
     [MAX_LATERAL_ACCEL_NO_ROLL_LOW_SPEED, MAX_LATERAL_ACCEL_NO_ROLL],
-  ))
+  )) if low_speed_allowance else MAX_LATERAL_ACCEL_NO_ROLL
   max_lat_accel = max_lateral_accel_no_roll + roll_compensation
   min_lat_accel = -max_lateral_accel_no_roll + roll_compensation
   new_curvature, limited_accel = clamp(new_curvature, min_lat_accel / v_ego ** 2, max_lat_accel / v_ego ** 2)

@@ -71,12 +71,39 @@ def get_lookahead_value(future_vals, current_val):
 def roll_pitch_adjust(roll, pitch):
   return roll * math.cos(pitch)
 
+class FrogPilotWindupPID(PIDController):
+  """FrogPilot's (stock openpilot's) integrator handling for the FrogPilot-parity cars: while the output is
+  clipping the integrator is kept from growing, but it is never cut back to the room the other terms leave.
+  carrot's PIDController trims it to that room on every update, so a short P/FF spike at the torque limit
+  dumps the integrator and the torque drops when the spike passes. k_f stays (the LateralTorqueKf setting)."""
+  def update(self, error, error_rate=0.0, speed=0.0, override=False, feedforward=0., freeze_integrator=False):
+    self.speed = speed
+    self.p = float(error) * self.k_p
+    self.f = feedforward * self.k_f
+    self.d = error_rate * self.k_d
+
+    if not freeze_integrator:
+      i = self.i + error * self.k_i * self.i_rate
+      # Don't allow windup if already clipping
+      test_control = self.p + i + self.d + self.f
+      i_upperbound = self.i if test_control > self.pos_limit else self.pos_limit
+      i_lowerbound = self.i if test_control < self.neg_limit else self.neg_limit
+      self.i = float(np.clip(i, i_lowerbound, i_upperbound))
+
+    control = self.p + self.i + self.d + self.f
+    self.control = float(np.clip(control, self.neg_limit, self.pos_limit))
+    return self.control
+
+
 class LatControlTorque(LatControl):
   def __init__(self, CP, CI):
     super().__init__(CP, CI)
     self.torque_params = CP.lateralTuning.torque.as_builder()
-    self.pid = PIDController(self.torque_params.kp, self.torque_params.ki,
-                             k_f=self.torque_params.kf, pos_limit=self.steer_max, neg_limit=-self.steer_max)
+    # FrogPilot parity (2026-11-11/14): same NNFF path, integrator handling, delay inputs and pitch as FrogPilot
+    self.nnff_frogpilot_parity = CI.use_nnff and CP.carFingerprint in NNFF_FROGPILOT_PARITY_CARS
+    pid_class = FrogPilotWindupPID if self.nnff_frogpilot_parity else PIDController
+    self.pid = pid_class(self.torque_params.kp, self.torque_params.ki,
+                         k_f=self.torque_params.kf, pos_limit=self.steer_max, neg_limit=-self.steer_max)
     self.torque_from_lateral_accel = CI.torque_from_lateral_accel()
     self.use_steering_angle = self.torque_params.useSteeringAngle
     self.steering_angle_deadzone_deg = self.torque_params.steeringAngleDeadzoneDeg
@@ -122,8 +149,10 @@ class LatControlTorque(LatControl):
       self.nn_friction_override = CI.lat_torque_nn_model.friction_override
 
       # setup future time offsets
-      self.nn_time_offset = CP.steerActuatorDelay + 0.2
+      # FrogPilot adds the lateral delay alone (learned, see update_live_delay); carrot's own path adds 0.2 s
+      self.nn_time_offset = CP.steerActuatorDelay + (0.0 if self.nnff_frogpilot_parity else 0.2)
       future_times = [0.3, 0.6, 1.0, 1.5] # seconds in the future
+      self.future_times = future_times
       self.nn_future_times = [i + self.nn_time_offset for i in future_times]
       self.nn_future_times_np = np.array(self.nn_future_times)
 
@@ -139,9 +168,18 @@ class LatControlTorque(LatControl):
     # The Traverse runs FrogPilot's donor NNFF model (Trailblazer). On the Traverse, Trailblazer and Trax,
     # match FrogPilot's NNFF where it differs: NN low-speed factor, steering-rate/planned jerk kept on a
     # steering-angle car, and desired jerk taken over the lateral delay instead of SteerActuatorDelay + 0.3 s.
-    self.nnff_frogpilot_parity = self.use_nnff and CP.carFingerprint in NNFF_FROGPILOT_PARITY_CARS
     if self.nnff_frogpilot_parity:
       self.desired_lat_jerk_time = self.nn_time_offset
+
+  def update_live_delay(self, lat_delay):
+    """FrogPilot: the NN's future inputs and the desired lateral jerk follow the learned lateral delay
+    (liveDelay.lateralDelay; FrogPilot's LAT_SMOOTH_SECONDS is 0). Only for the FrogPilot-parity cars."""
+    if not self.nnff_frogpilot_parity or not math.isfinite(lat_delay) or lat_delay <= 0.0:
+      return
+    self.nn_time_offset = lat_delay
+    self.nn_future_times = [t + lat_delay for t in self.future_times]
+    self.nn_future_times_np = np.array(self.nn_future_times)
+    self.desired_lat_jerk_time = lat_delay
 
 
   def update_live_torque_params(self, latAccelFactor, latAccelOffset, friction):
@@ -280,8 +318,9 @@ class LatControlTorque(LatControl):
                    + past_rolls + future_rolls
         ff = self.torque_from_nn(nn_input)
 
-        # apply friction override for cars with low NN friction response
-        if self.nn_friction_override:
+        # apply friction override for cars with low NN friction response. FrogPilot adds the linear torque of
+        # zero lateral acceleration here, which is 0 (no friction term), so the parity cars add nothing.
+        if self.nn_friction_override and not self.nnff_frogpilot_parity:
           pid_log.error += self.torque_from_lateral_accel(LatControlInputs(0.0, 0.0, CS.vEgo, CS.aEgo), self.torque_params,
                                                           friction_input, lateral_accel_deadzone, friction_compensation=True, gravity_adjusted=False)
         nn_log = nn_input + nnff_setpoint_input + nnff_measurement_input

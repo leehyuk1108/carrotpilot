@@ -103,6 +103,8 @@ class Controls:
       self.LaC = LatControlPID(self.CP, self.CI)
     elif self.CP.lateralTuning.which() == 'torque':
       self.LaC = LatControlTorque(self.CP, self.CI)
+    # FrogPilot-parity cars (Traverse/Trailblazer/Trax with NNFF): FrogPilot's curvature limit, lateral delay and pitch
+    self.lat_frog_parity = bool(getattr(self.LaC, 'nnff_frogpilot_parity', False))
     self.carrot_controls = CarrotControls(self.CP)
 
   def update(self):
@@ -112,6 +114,8 @@ class Controls:
     if self.sm.updated["livePose"]:
       device_pose = Pose.from_live_pose(self.sm['livePose'])
       self.calibrated_pose = self.pose_calibrator.build_calibrated_pose(device_pose)
+    if self.lat_frog_parity and self.sm.updated['liveDelay']:
+      self.LaC.update_live_delay(self.sm['liveDelay'].lateralDelay)   # as FrogPilot's controlsd
 
   def state_control(self):
     CS = self.sm['carState']
@@ -224,10 +228,15 @@ class Controls:
       else:
         curvature = get_lag_adjusted_curvature(self.CP, CS.vEgo, lat_plan.psis, lat_plan.curvatures, steer_actuator_delay + lat_smooth_seconds, lat_plan.distances)
         new_desired_curvature = smooth_value(curvature, self.desired_curvature, lat_smooth_seconds)
-    else:      
+    else:
+      # FrogPilot uses the model's curvature unsmoothed, but carrot's model output reaches here in 20 Hz steps (its
+      # own action head / modeld timing): replaying 11/13 drives without this filter gave 2-5x the request jumps, so
+      # the parity cars keep it (2026-11-14).
       new_desired_curvature = smooth_value(model_v2.action.desiredCurvature, self.desired_curvature, 0.1)
 
-    self.desired_curvature, curvature_limited = clip_curvature(CS.vEgo, self.desired_curvature, new_desired_curvature, lp.roll)
+    # FrogPilot keeps the 3.0 m/s^2 lateral acceleration limit at every speed
+    self.desired_curvature, curvature_limited = clip_curvature(CS.vEgo, self.desired_curvature, new_desired_curvature, lp.roll,
+                                                               low_speed_allowance=not self.lat_frog_parity)
 
     actuators.curvature = float(self.desired_curvature)
 
@@ -262,6 +271,10 @@ class Controls:
 
     # 주의: MEB는 위 곡률 PID가 실제 조향을 만들고, 아래 LaC(LatControlAngle)와 lac_log는
     # 파이프라인 형식 유지를 위한 더미임 (로그의 angleState는 실제 제어 상태가 아님).
+    if self.lat_frog_parity and self.calibrated_pose is not None:
+      # FrogPilot feeds the calibrated pitch to the NN; carrot filled CC.orientationNED only after this call (pitch 0)
+      CC.orientationNED = self.calibrated_pose.orientation.xyz.tolist()
+      CC.angularVelocity = self.calibrated_pose.angular_velocity.xyz.tolist()
     steer, steeringAngleDeg, lac_log = self.LaC.update(CC.latActive, CS, self.VM, lp,
                                                        self.steer_limited_by_safety, self.desired_curvature,
                                                        CC, curvature_limited,
