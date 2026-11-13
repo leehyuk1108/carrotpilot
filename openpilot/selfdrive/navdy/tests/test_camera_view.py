@@ -5,8 +5,8 @@ from types import SimpleNamespace as NS
 import pytest
 
 from openpilot.selfdrive.navdy.display import (
-  HIDDEN_BAND, VIEW_BOTTOM_Y, VIEW_F, VIEW_K, _off_line, _profile, bottom_distance, navdy_model_geometry,
-  navdy_model_line, navdy_vehicle_view, road_depth_at,
+  HIDDEN_BAND, VIEW_BOTTOM_Y, VIEW_F, VIEW_K, _off_line, _profile, _surface_stretch, bottom_distance,
+  model_line_y_at_values, navdy_model_geometry, navdy_model_line, navdy_vehicle_view, road_depth_at,
 )
 from openpilot.selfdrive.navdy.tests.test_display import model
 from openpilot.selfdrive.navdy.vehicles import vehicle_lane
@@ -233,6 +233,43 @@ ROAD_SHAPES = {   # Codex review r7: the road between a line's samples bends, ch
 }
 
 
+ROAD_SHAPES.update({   # Codex review r8: an extremum past an end while the midpoint sits on the segment
+  'r8_case_69': (surface_model([0.0, 48.400291272188355, 73.98549266308706, 80.0], [-1.0477994924239398, -2.038960469306837, -0.10043282374107676, 0.7004070328822198], [2.676844764156997, 0.09930345778581229, 4.241581755090213, 1.3288047666440992],
+                                    [1.9674374834419572, 2.9846783257446723, 1.8444109029300455, 1.2363730183482118], [1.7923834030029366, 2.5135908468753416, 1.262700793848884, 0.8586910840486528]), 0.0),
+  'r8_case_102': (surface_model([0.0, 80.0], [-3.5333803148771485, -1.8380093855618287], [-0.09033473092434119, -1.2252619741083506],
+                                    [2.6134177663947824, 1.5008650120485205], [2.307010719211765, 2.1245828367873196]), 0.0),
+  'r8_case_204': (surface_model([0.0, 80.0], [0.5866840172244081, -1.3794371686834879], [4.929158313868406, -0.4723352687452086],
+                                    [1.8419033435096033, 1.4145580847527301], [2.2821478643185955, 2.1254045503374637]), 0.0),
+  'r8_case_222': (surface_model([0.0, 24.490629564729282, 32.55194926821426, 80.0], [0.03659791518092392, 1.581113717379184, -3.9901766482526133, -1.7834373930319458], [3.6967756089630828, 2.7490691216629397, 0.36727414121377144, -1.1818707854934116],
+                                    [3.114078300682196, 1.8835595704452142, 1.1203622643438331, 1.1941009844251997], [2.409289584173943, 1.4045934581649075, 1.632705726450708, 1.5123658897811252]), 0.0),
+  'r8_case_341': (surface_model([0.0, 52.20529586703938, 80.0], [-2.548782409564966, -0.031043990665361232, 0.6698742741445098], [-1.2720213047270201, 3.4566823750750273, 1.3559954714998543],
+                                    [3.0008055120739394, 2.3998755003735783, 2.3831105179934955], [2.2915621217006974, 2.150528106906625, 1.8826746307175704]), 0.0),
+})
+
+WIDTH_JUMPS = {   # entered or left exactly at a lane-width 0.5 m jump (random wild surfaces)
+  'width_jump_43': (surface_model([0.0, 33.756, 52.754, 80.0], [-2.7945572640787995, -0.018649740024803574, 0.5347794996852193, -1.3436798925267048], [-2.4180619010382722, 3.501333263903004, 4.204103612576489, 1.6631285927744814],
+                                [1.3549740148014247, 1.3934282917521996, 2.843366007625064, 1.4722434284866048], [0.7227305460284498, 0.6065560885890957, 0.5443176530062238, 1.8600482850049618]), -1.0821830355580913),
+  'width_jump_302': (surface_model([0.0, 24.698, 28.599, 55.528, 56.955, 80.0], [0.0424590551157098, -0.7078876687258271, 0.26172824790238014, 0.9425885355618364, -1.4856160258360895, 0.9460964460792716], [0.3842968130632325, 3.2767487047913195, 0.6868210722618381, 3.5327280475982095, 0.44513829484192535, 4.479547110058155],
+                                [1.150592861654336, 0.862226812357187, 2.4170011032488694, 1.785892073174946, 2.3402442184485643, 1.6211973998930391], [0.39880892833928255, 2.3822124212961513, 0.8889041951350831, 1.5739207662578676, 0.3014840332937358, 0.9992625176068357]), 1.3249885254079032),
+}
+
+R8_PATH = dict(lane_x=[0.0, 8.0, 80.0], left_y=[-4.8, -4.8, 1.2], right_y=[-1.2, -1.2, 4.8], left_z=[0.4893587033121918, 0.4893587033121918, 1.5898833294182126], right_z=[1.2893587033121918, 1.2893587033121918, 0.7898833294182127], position_x=[0.0, 6.0, 8.0, 80.0], position_y=[0.0, -1.0, -1.0, -1.0])
+
+
+def worst_miss(surface, xs, ys, drawn):
+  """Largest view distance from a visible road point on the line to the drawn polyline (5,000 steps)."""
+  stretch = _surface_stretch(list(zip(xs, ys)), surface)
+  near, far = stretch[0][0], stretch[-1][0]
+  worst = 0.0
+  for i in range(5001):
+    x = near + (far - near) * i / 5000
+    y = model_line_y_at_values(xs, ys, x)
+    u, v = 160 + VIEW_F * y / x, 8 + VIEW_F * surface.depth(x, y) / x
+    if v <= VIEW_BOTTOM_Y + 1e-9:
+      worst = max(worst, min(_off_line((u, v), a, b) for a, b in zip(drawn, drawn[1:])))
+  return worst
+
+
 @pytest.mark.parametrize('case', sorted(ROAD_SHAPES))
 def test_a_line_follows_the_road_between_its_samples(case):
   m, lateral = ROAD_SHAPES[case]
@@ -241,17 +278,36 @@ def test_a_line_follows_the_road_between_its_samples(case):
   line = navdy_model_line(xs, [lateral] * len(xs), surface=surface)
   drawn = list(zip(line[::2], line[1::2]))
   assert 2 <= len(drawn) <= 10
-  near, far = (VIEW_F * lateral / (drawn[i][0] - 160) for i in (0, -1))
-  far = min(far, xs[-1])   # the 0.1 px rounding of the last point must not reach past the line's samples
-  def off(point):
-    return min(_off_line(point, a, b) for a, b in zip(drawn, drawn[1:]))
+  assert worst_miss(surface, xs, [lateral] * len(xs), drawn) <= 0.5   # 0.1 px rounding included
+
+
+@pytest.mark.parametrize('case', sorted(WIDTH_JUMPS))
+def test_a_stretch_at_a_jump_starts_on_the_side_in_view(case):
+  m, lateral = WIDTH_JUMPS[case]
+  surface = _profile(m)
+  xs = m.laneLines[2].x
+  stretch = _surface_stretch(list(zip(xs, [lateral] * len(xs))), surface)
+  assert all(x - VIEW_K * z >= -1e-6 for x, _, z in stretch)   # every point, ends included, is road in view
+  views = [(160 + VIEW_F * y / x, 8 + VIEW_F * z / x) for x, y, z in stretch]
+  near, far = stretch[0][0], stretch[-1][0]
   worst = 0.0
-  for i in range(2001):
-    x = near + (far - near) * i / 2000
+  for i in range(3001):
+    x = min(far, near + (far - near) * i / 3000)
     u, v = 160 + VIEW_F * lateral / x, 8 + VIEW_F * surface.depth(x, lateral) / x
-    if v <= VIEW_BOTTOM_Y:
-      worst = max(worst, off((u, v)))
-  assert worst <= 0.5   # every visible road point within half a pixel of the drawing (0.1 px rounding included)
+    if v <= VIEW_BOTTOM_Y + 1e-9:
+      worst = max(worst, min(_off_line((u, v), a, b) for a, b in zip(views, views[1:])))
+  assert worst <= 0.5   # before the 10-point budget, which such a wild surface exceeds
+
+
+def test_a_path_keeps_a_crest_past_the_segment_end():
+  c = R8_PATH
+  left = NS(x=c['lane_x'], y=c['left_y'], z=c['left_z'])
+  right = NS(x=c['lane_x'], y=c['right_y'], z=c['right_z'])
+  m = NS(position=NS(x=c['position_x'], y=c['position_y']), laneLines=[left, left, right, right], laneLineProbs=[0.9] * 4)
+  right_path = navdy_model_geometry(m)['navPathRight']
+  drawn = list(zip(right_path[::2], right_path[1::2]))
+  ys = [y + 1.0 for y in c['position_y']]
+  assert worst_miss(_profile(m), c['position_x'], ys, drawn) <= 0.5   # was 1.24 px: the 60 m crest was dropped
 
 
 def test_a_slanted_segment_starting_on_hidden_road_keeps_its_line():

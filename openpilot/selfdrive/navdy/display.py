@@ -312,6 +312,47 @@ class _RoadProfile:
     cuts.sort()
     return list(zip(cuts, cuts[1:]))
 
+  def extrema(self, xa: float, xb: float, y0: float, slope: float, a: float, b: float) -> list:
+    """x strictly inside (xa, xb), one piece of one grid interval, where a*u + b*v of the road point on the line
+    y = y0 + slope*x has a local extremum in view.
+
+    a*u + b*v = const + F*h(x)/x with h = a*y + b*depth. Where depth is linear along the line (one lane line,
+    clamped or averaged mix, plan, default) h/x is monotonic: none. Under the lateral mix depth = zL + P/W with
+    P = (y - yL)*(zR - zL) quadratic and W the lane width, linear; (h'x - h)*W^2 = 0 then reduces to a
+    quadratic, solved in closed form."""
+    middle = (xa + xb) / 2.0
+    i = min(len(self.grid) - 2, max(0, bisect.bisect_right(self.grid, middle) - 1))
+    c0, c1 = self.side_columns[i], self.side_columns[i + 1]
+    if c0 is None or c1 is None:
+      return []
+    x0, x1 = self.grid[i], self.grid[i + 1]
+
+    def linear(v0: float, v1: float) -> tuple:   # (constant, slope) of a value linear on the interval
+      k = (v1 - v0) / (x1 - x0)
+      return v0 - k * x0, k
+    (yl0, yl1), (zl0, zl1) = linear(c0[0], c1[0]), linear(c0[1], c1[1])
+    (yr0, yr1), (zr0, zr1) = linear(c0[2], c1[2]), linear(c0[3], c1[3])
+    w0, w1 = yr0 - yl0, yr1 - yl1
+    width = w0 + w1 * middle
+    if not width > 0.5 or not -2.0 < (y0 + slope * middle - yl0 - yl1 * middle) / width < 3.0:
+      return []
+    q0, q1, r0, r1 = y0 - yl0, slope - yl1, zr0 - zl0, zr1 - zl1
+    p0, p1, p2 = q0 * r0, q0 * r1 + q1 * r0, q1 * r1
+    a0 = a * y0 + b * zl0   # constant term of a*y + b*zL
+    e0 = -a0 * w0 * w0 - b * p0 * w0
+    e1 = -2.0 * a0 * w0 * w1 - 2.0 * b * p0 * w1
+    e2 = -a0 * w1 * w1 + b * (p2 * w0 - p1 * w1)
+    scale = abs(e0) + abs(e1) * middle + abs(e2) * middle * middle + 1e-300
+    if abs(e2) * middle * middle <= 1e-12 * scale:
+      roots = [-e0 / e1] if abs(e1) * middle > 1e-12 * scale else []
+    else:
+      disc = e1 * e1 - 4.0 * e2 * e0
+      if disc < 0.0:
+        return []
+      k = -0.5 * (e1 + math.copysign(math.sqrt(disc), e1))
+      roots = [k / e2] + ([e0 / k] if k != 0.0 else [])
+    return [x for x in roots if xa < x < xb]
+
   def _change(self, p: float, q: float, y_at: Any, visible: bool) -> float | None:
     """First x in [p, q] where the road leaves `visible`, on a piece with one depth formula. There
     weight * (x - K depth) is a polynomial of degree <= 2 in x, fitted exactly from three inner points (so a
@@ -464,12 +505,17 @@ def _surface_stretch(points: list, surface: Any) -> list:
       if x is None:
         continue
       started = True
-      stretch.append(at(x))
-      if not xb > x:
+      point = at(x)
+      if x - VIEW_K * point[2] < -1e-6 and xb > x + 1e-6:   # entered at a jump (lane width 0.5 m): the side in view
+        point = at(x + 1e-6)
+      stretch.append(point)
+      if not xb > point[0]:
         continue
-      xa, ya = x, stretch[-1][1]
+      xa, ya = point[0], point[1]
     exit_x = surface.crossing(xa, ya, xb, yb, visible=True)
     end = at(exit_x) if exit_x is not None else (xb, yb, surface.depth(xb, yb))
+    if exit_x is not None and exit_x - VIEW_K * end[2] < -1e-6 and exit_x - 1e-6 > xa:   # left at a jump
+      end = at(exit_x - 1e-6)
     inner = _road_candidates(surface, at, stretch[-1], end)
     stretch += _bends(stretch[-1], inner, end) + [end]   # the road's own shape between the line's samples
     if exit_x is not None:
@@ -487,59 +533,79 @@ def _road_candidates(surface: Any, at: Any, first: tuple, last: tuple) -> list:
   road's shape.
 
   At every column where depth's form changes the road point is a candidate; where it can jump (a lane line's
-  samples end, the lane width passes 0.5 m, the lateral mix clamps) both sides are. Between those, midpoints are
-  added wherever the curved surface leaves the straight view segment by more than REFINE_TOLERANCE_PX.
+  samples end, the lane width passes 0.5 m, the lateral mix clamps) both sides are. Between those, the farthest
+  surface point from the straight view segment is added wherever it is more than REFINE_TOLERANCE_PX off.
   _bends then keeps what shows."""
   start, end = first[0], last[0]
   if not end > start:
     return []
   slope = (last[1] - first[1]) / (end - start)
+  y0 = first[1] - slope * start
 
   def y_at(x: float) -> float:
-    return first[1] + slope * (x - start)
+    return y0 + slope * x
+
+  def refine(a: tuple, b: tuple) -> None:
+    _refine(surface, at, y0, slope, a, b, points)
   inset = 1e-6
   cuts = [start] + surface.between(start, end) + [end]
-  marks = []   # inner boundaries in order: (x, may jump)
+  marks = []   # inner boundaries in order: (x, may jump), clear of the ends (a solved end may sit on a boundary)
   for a, b in zip(cuts, cuts[1:], strict=False):
     marks += [(p, True) for p, _ in surface._regimes(a, b, y_at)[1:]]
     if b < end:
       marks.append((b, b in surface.edges))
-  points, anchor = [], first
+  marks = [(x, jump) for x, jump in marks if start + 2.0 * inset < x < end - 2.0 * inset]
+  points: list = []
+  anchor = first
   if start in surface.edges:
     anchor = at(start + inset)
     points.append(anchor)
   for x, jump in marks:
     if jump:
       before, after = at(x - inset), at(x + inset)
-      _refine(at, anchor, before, points)
+      refine(anchor, before)
       points += [before, after]
       anchor = after
     else:
       here = at(x)
-      _refine(at, anchor, here, points)
+      refine(anchor, here)
       points.append(here)
       anchor = here
   if end in surface.edges:
     before = at(end - inset)
-    _refine(at, anchor, before, points)
+    refine(anchor, before)
     points.append(before)
   else:
-    _refine(at, anchor, last, points)
-  return points
+    refine(anchor, last)
+  return [point for point in points if point[0] - VIEW_K * point[2] >= -1e-6]   # only road that is in view
 
 
-def _refine(at: Any, a: tuple, b: tuple, points: list, views: tuple | None = None, level: int = 0) -> None:
-  """Midpoints between road points a and b where the surface leaves their straight view segment."""
+def _refine(surface: Any, at: Any, y0: float, slope: float, a: tuple, b: tuple, points: list,
+            views: tuple | None = None, level: int = 0) -> None:
+  """Between road points a and b (one piece), add the surface point farthest from their view segment while it is
+  more than REFINE_TOLERANCE_PX off, and recurse on both sides. The farthest point is where the distance across
+  the segment or the position along it is extremal (a point can rise past an end while the midpoint sits on the
+  segment), both found in closed form by _RoadProfile.extrema."""
   if level >= REFINE_DEPTH:
     return
   va, vb = views if views is not None else (_view_uv(*a), _view_uv(*b))
-  middle = at((a[0] + b[0]) / 2.0)
-  vm = _view_uv(*middle)
-  if va is None or vb is None or vm is None or _off_line(vm, va, vb) <= REFINE_TOLERANCE_PX:
+  if va is None or vb is None:
     return
-  _refine(at, a, middle, points, (va, vm), level + 1)
-  points.append(middle)
-  _refine(at, middle, b, points, (vm, vb), level + 1)
+  du, dv = vb[0] - va[0], vb[1] - va[1]
+  best = None
+  for x in surface.extrema(a[0], b[0], y0, slope, dv, -du) + surface.extrema(a[0], b[0], y0, slope, du, dv):
+    point = at(x)
+    view = _view_uv(*point)
+    if view is not None:
+      off = _off_line(view, va, vb)
+      if best is None or off > best[0]:
+        best = (off, point, view)
+  if best is None or best[0] <= REFINE_TOLERANCE_PX:
+    return
+  _, point, view = best
+  _refine(surface, at, y0, slope, a, point, points, (va, view), level + 1)
+  points.append(point)
+  _refine(surface, at, y0, slope, point, b, points, (view, vb), level + 1)
 
 
 def _bends(start: tuple, inner: list, end: tuple) -> list:
