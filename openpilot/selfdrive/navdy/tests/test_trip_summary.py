@@ -4,7 +4,7 @@ from types import SimpleNamespace as NS
 import pytest
 
 from openpilot.selfdrive.navdy import bridge
-from openpilot.selfdrive.navdy.trip_summary import FUEL_ML_PER_COUNT, MAX_STEP_S, SHOW_S, TripSummary
+from openpilot.selfdrive.navdy.trip_summary import FUEL_ML_PER_COUNT, GAP_MAX_S, RESTORE_MAX_AGE_S, SHOW_S, TripSummary
 from openpilot.selfdrive.navdy.tests.test_bridge import Messages, sm, no_hardware_door_thread, dark_ambient_off  # noqa: F401
 
 START = datetime(2026, 11, 12, 20, 43, 29)
@@ -89,11 +89,11 @@ def test_unknown_road_state_pauses_without_ending_or_stretching():
   for k in range(50):  # 10 s of unknown ignition (stale device/panda)
     trip.observe(now=now + 0.2 * (k + 1), onroad=None)
   assert trip.active and trip.payload(now + 10) is None
-  resumed = now + 30.0
+  resumed = now + GAP_MAX_S + 10.0
   trip.observe(now=resumed, onroad=True, car_state=NS(vEgo=10.0, vehicleCare=care()), selfdrive_state=NS(enabled=True))
-  assert trip.duration_s == pytest.approx(60.0)  # the gap adds nothing
+  assert trip.duration_s == pytest.approx(60.0)  # a gap longer than GAP_MAX_S adds nothing
   trip.observe(now=resumed + 5.0, onroad=True, car_state=NS(vEgo=10.0, vehicleCare=care()), selfdrive_state=NS(enabled=True))
-  assert trip.duration_s == pytest.approx(60.0 + MAX_STEP_S)
+  assert trip.duration_s == pytest.approx(65.0)
 
 
 def test_next_ignition_drops_the_previous_summary():
@@ -130,3 +130,82 @@ def test_bridge_inputs_and_payload(sm):  # noqa: F811
   assert bridge.live_payload(sm, 1, trip=Fixed())["tripSummary"] == {"id": 1, "distanceKm": 3.7}
   assert "tripSummary" not in bridge.live_payload(sm, 2, trip=NS(payload=lambda now: None))
   assert "tripSummary" not in bridge.live_payload(sm, 3)
+
+
+def test_partial_odometer_keeps_the_speed_distance_elsewhere():
+  clock = Clock(); trip = TripSummary(clock)
+  # 100 s at 20 m/s; the odometer (matching the speed) is valid only for the second half
+  now = drive(trip, clock, seconds=100, speed=20.0, odometer=lambda t: 1000.0 + 0.02 * t if t >= 50 else None)
+  trip.observe(now=now + 0.2, onroad=False)
+  assert trip.payload(now + 0.2)["distanceKm"] == 2.0
+  trip2 = TripSummary(Clock())
+  now = drive(trip2, Clock(), seconds=100, speed=20.0, odometer=lambda t: 1000.0 + 0.02 * t if t < 50 else None)
+  trip2.observe(now=now + 0.2, onroad=False)
+  assert trip2.payload(now + 0.2)["distanceKm"] == 2.0
+
+
+def test_odometer_glitch_falls_back_to_speed():
+  trip = TripSummary(Clock())
+  for now, odo in ((0.0, 100.0), (0.2, 100.004), (0.4, 150.0), (0.6, 150.004)):
+    trip.observe(now=now, onroad=True, car_state=NS(vEgo=20.0, vehicleCare=care(odo)), selfdrive_state=None)
+  assert trip.distance_km == pytest.approx(0.004 + 0.004 + 0.004)  # the 50 km jump counts as 0.2 s at 20 m/s
+
+
+def test_blocked_loop_still_counts_the_real_time():
+  clock = Clock(); trip = TripSummary(clock)
+  now = drive(trip, clock, seconds=40, speed=20.0)
+  # a Bluetooth connect holds the bridge loop for 15 s
+  now = drive(trip, clock, seconds=60, start_now=now + 15.0, speed=20.0)
+  trip.observe(now=now + 0.2, onroad=False)
+  summary = trip.payload(now + 0.2)
+  assert summary["durationS"] == 115 and summary["distanceKm"] == 2.3 and summary["opPercent"] == 100
+
+
+def test_engagement_changes_count_half_a_step():
+  trip = TripSummary(Clock())
+  for k, enabled in enumerate((True, True, False, False, True)):
+    trip.observe(now=k * 1.0, onroad=True, car_state=None, selfdrive_state=NS(enabled=enabled))
+  assert trip.engaged_s == pytest.approx(1.0 + 0.5 + 0.0 + 0.5)
+
+
+def test_reversing_counts_as_distance():
+  clock = Clock(); trip = TripSummary(clock)
+  now = drive(trip, clock, seconds=120, speed=-2.0)
+  trip.observe(now=now + 0.2, onroad=False)
+  assert trip.payload(now + 0.2)["distanceKm"] == 0.2  # 0.24 km
+
+
+def test_restarted_bridge_resumes_the_trip(tmp_path):
+  path = tmp_path / "trip.json"
+  mono = {"t": 1000.0}
+  clock = Clock()
+  first = TripSummary(clock, save_path=path, monotonic=lambda: mono["t"])
+  now = drive(first, clock, seconds=600, speed=20.0)
+  first._save(now, force=True)
+  mono["t"] += 5.0  # the bridge restarts within seconds
+  second = TripSummary(clock, save_path=path, monotonic=lambda: mono["t"])
+  assert second.active and second.duration_s == pytest.approx(600.0)
+  now = drive(second, clock, seconds=60, start_now=now + 3.0, speed=20.0)
+  second.observe(now=now + 0.2, onroad=False)
+  summary = second.payload(now + 0.2)
+  assert summary["durationS"] == 663 and summary["distanceKm"] == 13.3 and summary["startedAt"] == "20:43"
+  # and a summary being shown survives a restart too
+  mono["t"] += 2.0
+  third = TripSummary(clock, save_path=path, monotonic=lambda: mono["t"])
+  assert third.payload(now + 5.0) == summary
+
+
+def test_old_or_broken_saves_are_ignored(tmp_path):
+  path = tmp_path / "trip.json"
+  mono = {"t": 1000.0}
+  clock = Clock()
+  first = TripSummary(clock, save_path=path, monotonic=lambda: mono["t"])
+  drive(first, clock, seconds=100)
+  first._save(100.0, force=True)
+  mono["t"] += RESTORE_MAX_AGE_S + 1
+  assert not TripSummary(clock, save_path=path, monotonic=lambda: mono["t"]).active
+  path.write_text("{not json")
+  assert not TripSummary(clock, save_path=path).active
+  path.write_text('{"saved_mono": 0}')
+  broken = TripSummary(clock, save_path=path, monotonic=lambda: 10.0)
+  assert not broken.active and broken.duration_s == 0.0

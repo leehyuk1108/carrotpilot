@@ -21,6 +21,7 @@ from openpilot.selfdrive.navdy.bluetooth import BluetoothTransport, CONFIG_PATH,
 from openpilot.selfdrive.navdy.connection import UsbProbe
 from openpilot.selfdrive.navdy.ambient import DoorMonitor, led_gamma, read_override, road_state
 from openpilot.selfdrive.navdy.ambient_dark import DarkAmbient
+from openpilot.selfdrive.navdy import trip_summary
 from openpilot.selfdrive.navdy.trip_summary import TripSummary
 from openpilot.selfdrive.navdy.model_navigation import ModelNavigationTracker, ModelRouteCache, age_model_feedback
 from openpilot.selfdrive.navdy.diagnostics import LinkDiagnostics, public_error
@@ -300,7 +301,7 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
     doors = DoorMonitor(camera=camera)
     dark_ambient = DarkAmbient()
     observe_dark = True
-    trip = TripSummary()
+    trip = TripSummary(save_path=trip_summary.SAVE_PATH)  # a restarted bridge resumes the ignition's trip
     observe_trip = True
     diagnostics = LinkDiagnostics(cloudlog.event, journal=LocalJournal())
     recovery_events = queue.Queue(maxsize=32)
