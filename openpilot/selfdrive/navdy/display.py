@@ -520,10 +520,47 @@ def navdy_model_line(x_values: Any, y_values: Any, z_values: Any = None, lateral
   projected = [uv for uv in (_view_uv(x, y, z) for x, y, z in stretch) if uv is not None]
   if len(projected) < 2:
     return []
-  if len(projected) > MAX_PROJECTED_POINTS:
-    last = len(projected) - 1
-    projected = [projected[round(i * last / (MAX_PROJECTED_POINTS - 1))] for i in range(MAX_PROJECTED_POINTS)]
+  projected = _reduce(projected, MAX_PROJECTED_POINTS)
   return [value for u, v in projected for value in (rounded(u), rounded(min(v, VIEW_BOTTOM_Y)))]
+
+
+def _off_line(point: tuple, a: tuple, b: tuple) -> float:
+  (u, v), (u0, v0), (u1, v1) = point, a, b
+  length = math.hypot(u1 - u0, v1 - v0)
+  return abs((u1 - u0) * (v0 - v) - (u0 - u) * (v1 - v0)) / length if length > 0.0 else math.hypot(u - u0, v - v0)
+
+
+def _reduce(points: list, budget: int) -> list:
+  """At most `budget` view points that keep the line's shape: the ends, then repeatedly the point farthest off
+  the polyline kept so far (top-down Douglas-Peucker with a point budget). While no point is 0.1 px off (the
+  output resolution), the longest run of points is split at its middle, so straight stretches stay evenly
+  spaced as before. Neither a road bend point nor a path bend can push out a more visible one."""
+  if len(points) <= budget:
+    return points
+
+  def rank(first: int, last: int) -> tuple | None:
+    if last - first < 2:
+      return None
+    (u0, v0), (u1, v1) = points[first], points[last]
+    du, dv = u1 - u0, v1 - v0
+    length = math.hypot(du, dv)
+    if length > 0.0:
+      off, index = max((abs(du * (v0 - v) - (u0 - u) * dv), i) for i, (u, v) in enumerate(points[first + 1:last], first + 1))
+      off /= length
+    else:
+      off, index = max((_off_line(points[i], points[first], points[last]), i) for i in range(first + 1, last))
+    off = round(off, 1)
+    return off, last - first, (first + last) // 2 if off == 0.0 else index
+
+  runs = {(0, len(points) - 1): rank(0, len(points) - 1)}   # each run is ranked once, when it is made
+  for _ in range(budget - 2):
+    candidates = [(value[0], value[1], -run[0], run) for run, value in runs.items() if value is not None]
+    if not candidates:
+      break
+    first, last = max(candidates)[3]
+    split = runs.pop((first, last))[2]
+    runs[(first, split)], runs[(split, last)] = rank(first, split), rank(split, last)
+  return [points[i] for i in sorted({index for run in runs for index in run})]
 
 
 def _probability(values: list, index: int) -> float:

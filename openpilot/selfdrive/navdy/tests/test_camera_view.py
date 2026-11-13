@@ -192,6 +192,19 @@ def test_a_dip_inside_one_path_segment_keeps_the_band_area():
   assert min(a['navPathRight'][1::2]) == pytest.approx(min(a['navLaneRight'][1::2]), abs=1.0)
 
 
+def test_the_point_budget_keeps_the_bends_that_show_most():
+  # Codex review r5: a road bend point made 11 points and the even 10-point pick dropped the path's own bend
+  px = [0.0, 8.0, 12.0, 16.0, 20.0, 24.0, 32.0, 44.0, 60.0, 80.0]
+  xs = sorted(px + [14.0])
+  lanes = [NS(x=xs[:], y=[y] * len(xs), z=[1.45 if x == 14.0 else 1.36 for x in xs]) for y in (-5.4, -1.8, 1.8, 5.4)]
+  m = NS(position=NS(x=px, y=[0.0, 0.0, 0.0, 0.0, 0.3, 0.0, 0.0, 0.0, 0.0, 0.0]), laneLines=lanes, laneLineProbs=[0.9] * 4)
+  right = navdy_model_geometry(m)['navPathRight']
+  points = list(zip(right[::2], right[1::2]))
+  assert len(points) <= 10
+  bend = (round(160 + VIEW_F * 1.3 / 20, 1), round(8 + VIEW_F * 1.36 / 20, 1))   # the path's 0.3 m kink at 20 m
+  assert bend in points
+
+
 def test_a_slanted_segment_starting_on_hidden_road_keeps_its_line():
   m = model()   # one long path segment from 0 m: the search skips the hidden near road but stays on the same line
   m.position = NS(x=[0.0, 80.0], y=[0.0, 4.0])
