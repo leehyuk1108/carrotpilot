@@ -21,6 +21,7 @@ from openpilot.selfdrive.navdy.bluetooth import BluetoothTransport, CONFIG_PATH,
 from openpilot.selfdrive.navdy.connection import UsbProbe
 from openpilot.selfdrive.navdy.ambient import DoorMonitor, led_gamma, read_override, road_state
 from openpilot.selfdrive.navdy.ambient_dark import DarkAmbient
+from openpilot.selfdrive.navdy.trip_summary import TripSummary
 from openpilot.selfdrive.navdy.model_navigation import ModelNavigationTracker, ModelRouteCache, age_model_feedback
 from openpilot.selfdrive.navdy.diagnostics import LinkDiagnostics, public_error
 from openpilot.selfdrive.navdy.feedback import is_no_observation
@@ -194,8 +195,16 @@ def dark_ambient_inputs(sm, sources=None, tunnel=None) -> dict:
           'tunnel': tunnel if usable and tunnel in (True, False) else None}
 
 
+def trip_inputs(sm, sources=None) -> dict:
+  """Road state and fresh carState/selfdriveState for TripSummary."""
+  sources = display_sources(sm) if sources is None else sources
+  usable = lambda service: sm[service] if sources[service]['usable'] else None
+  return {'onroad': road_state(usable('deviceState'), usable('pandaStates')),
+          'car_state': usable('carState'), 'selfdrive_state': usable('selfdriveState')}
+
+
 def live_payload(sm, sequence, *, sources=None, door_open=False, ambient_override=None, vehicles=None, dark_ambient=None,
-                 camera=None, tunnel=None):
+                 camera=None, tunnel=None, trip=None):
   from openpilot.selfdrive.navdy.display import payload_from_messages, resolve_operating_state
   sources = display_sources(sm) if sources is None else sources
 
@@ -243,6 +252,10 @@ def live_payload(sm, sequence, *, sources=None, door_open=False, ambient_overrid
       ambient_override = dark_override
   if ambient_override is not None:
     payload['ambientOverride'] = ambient_override
+  if trip is not None:
+    summary = trip.payload(time.monotonic())
+    if summary is not None:
+      payload['tripSummary'] = summary  # post-drive screen on the Navdy (v182); absent otherwise
   if payload['active'] and 'navPathLeft' not in payload:
     # The HUD retains geometry when keys are omitted; empty arrays explicitly clear it.
     payload.update(navPathLeft=[], navPathRight=[], navLaneLeft=[], navLaneRight=[])
@@ -287,6 +300,8 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
     doors = DoorMonitor(camera=camera)
     dark_ambient = DarkAmbient()
     observe_dark = True
+    trip = TripSummary()
+    observe_trip = True
     diagnostics = LinkDiagnostics(cloudlog.event, journal=LocalJournal())
     recovery_events = queue.Queue(maxsize=32)
     def record_recovery(*args, **kwargs):
@@ -321,6 +336,13 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
           except Exception:
             observe_dark = False
             cloudlog.exception('navdy dark ambient observe failed; observing only with payloads')
+        if observe_trip:
+          try:
+            # Every loop, linked or not, so the trip covers the whole ignition cycle.
+            trip.observe(now=time.monotonic(), **trip_inputs(sm))
+          except Exception:
+            observe_trip = False
+            cloudlog.exception('navdy trip summary failed; no post-drive summary this run')
         if tick - config_checked >= 5:
           config_checked = tick
           old_policy = policy
@@ -440,7 +462,8 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
           camera_on = doors.gm and device is not None and bool(device.started)
           payload = live_payload(sm, sequence, sources=sources, door_open=doors.door_open,
                                  ambient_override=read_override(), vehicles=vehicles, dark_ambient=dark_ambient,
-                                 camera=camera if camera_on else None, tunnel=camera.tunnel())
+                                 camera=camera if camera_on else None, tunnel=camera.tunnel(),
+                                 trip=trip if observe_trip else None)
           payload['modelRoute'] = model_navigation.request(time.monotonic())
           car_state = sm['carState']
           diagnostics.sources(sources, payload,
