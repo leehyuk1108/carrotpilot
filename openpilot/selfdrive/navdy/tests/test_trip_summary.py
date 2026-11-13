@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+import math
 from types import SimpleNamespace as NS
 
 import pytest
@@ -209,3 +210,24 @@ def test_old_or_broken_saves_are_ignored(tmp_path):
   path.write_text('{"saved_mono": 0}')
   broken = TripSummary(clock, save_path=path, monotonic=lambda: 10.0)
   assert not broken.active and broken.duration_s == 0.0
+
+
+@pytest.mark.parametrize("kmh", [36, 72, 90, 108, 140])
+def test_one_hertz_odometer_repeated_at_five_hertz(kmh):
+  """The odometer updates once a second in 1/64 km steps and carState repeats it in between (vehicle_care.py)."""
+  clock = Clock(); trip = TripSummary(clock)
+  speed = kmh / 3.6
+  odometer = lambda t: math.floor((62000.0 + speed * math.floor(t) / 1000.0) * 64) / 64
+  now = drive(trip, clock, seconds=100, speed=speed, odometer=odometer)
+  trip.observe(now=now + 0.2, onroad=False)
+  assert trip.distance_km == pytest.approx(speed * 100 / 1000, abs=1 / 64 + 0.001)
+
+
+def test_long_gap_excludes_fuel_too():
+  clock = Clock(); trip = TripSummary(clock)
+  now = drive(trip, clock, seconds=100, speed=20.0, counter=lambda t: int(20 * t))
+  # the bridge is gone for 60 s (> GAP_MAX_S) while the engine keeps burning 20 counts/s
+  now = drive(trip, clock, seconds=40, start_now=now + 60.0, speed=20.0, counter=lambda t: int(2000 + 1200 + 20 * t))
+  trip.observe(now=now + 0.2, onroad=False)
+  assert trip.fuel_counts == 2000 + 800 and trip.duration_s == pytest.approx(140.0)
+  assert trip.payload(now + 0.2)["distanceKm"] == 2.8
