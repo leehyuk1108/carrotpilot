@@ -25,6 +25,22 @@ def test_frogpilot_limit_keeps_3_0_lateral_accel_at_low_speed():
   assert lat_accel_after(v, 2.5, low_speed_allowance=False)[0] == pytest.approx(2.5, abs=1e-6)
 
 
+
+@pytest.mark.parametrize("roll", [-0.05, 0.0, 0.05])
+def test_frogpilot_limit_moves_with_roll_and_clamps_an_outside_target_at_once(roll):
+  """The band is roll*g +- 3.0 (FrogPilot/stock), so a 2.8 target on a -0.05 rad road is cut to 2.5095, and a previous
+  target outside the band (e.g. carrot's 4.5 allowance just before) is clamped in one step, as in FrogPilot."""
+  from opendbc.car.vehicle_model import ACCELERATION_DUE_TO_GRAVITY as G
+  v = 15.0
+  for target in (2.8, -2.8, 3.8, -3.8):
+    k = target / v ** 2
+    frog, limited = clip_curvature(v, k, k, roll, low_speed_allowance=False)
+    expected = min(max(target, roll * G - 3.0), roll * G + 3.0)
+    assert frog * v ** 2 == pytest.approx(expected, abs=1e-9)
+    assert limited == (abs(expected - target) > 1e-9)
+    carrot, _ = clip_curvature(v, k, k, roll)   # carrot's own path: 4.5 below 80 km/h, so none of these is cut
+    assert carrot * v ** 2 == pytest.approx(target, abs=1e-9)
+
 def test_frogpilot_integrator_is_not_dumped_at_the_limit():
   frog = FrogPilotWindupPID(1.0, 0.3, k_f=1.0, pos_limit=1.0, neg_limit=-1.0)
   carrot = PIDController(1.0, 0.3, k_f=1.0, pos_limit=1.0, neg_limit=-1.0)
@@ -89,3 +105,28 @@ def test_traverse_adds_no_friction_override_like_frogpilot(traverse_controller):
   src = inspect.getsource(latcontrol_torque.LatControlTorque.update)
   assert "if self.nn_friction_override and not self.nnff_frogpilot_parity:" in src
   assert lc.nnff_frogpilot_parity   # so the carrot-only friction error is skipped for the Traverse
+
+
+def test_traverse_fallback_feedforward_has_no_friction_like_frogpilot(traverse_controller):
+  """Model too short for the NN (model_data=None): FrogPilot's fallback FF is the plain linear torque."""
+  from types import SimpleNamespace as NS
+  from openpilot.cereal import car, log
+  from opendbc.car.vehicle_model import VehicleModel
+  from openpilot.selfdrive.controls.lib import latcontrol_torque as lt
+  lc, CP = traverse_controller
+  carrot = lt.LatControlTorque(CP.as_reader(), lc_ci(CP))
+  carrot.nnff_frogpilot_parity = False   # the carrot path for the same car, for comparison
+  VM = VehicleModel(CP.as_reader())
+  params = log.LiveParametersData.new_message()
+  CS = car.CarState.new_message(vEgo=20.0, steeringAngleDeg=4.0)
+  outs = []
+  for ctl in (lc, carrot):
+    ctl.torque_params.friction = 0.18   # a friction to show the term (frame 1: the custom settings are not re-read)
+    ctl.update(True, CS, VM, params, False, 0.002, NS(angularVelocity=[], orientationNED=[]), False, model_data=None)
+    outs.append(ctl.pid.f)
+  assert outs[0] != pytest.approx(outs[1])   # carrot adds the friction torque to the fallback FF, FrogPilot does not
+
+
+def lc_ci(CP):
+  from opendbc.car.car_helpers import interfaces
+  return interfaces[CP.carFingerprint](CP)

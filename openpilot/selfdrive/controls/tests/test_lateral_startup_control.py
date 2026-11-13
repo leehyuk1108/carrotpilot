@@ -67,6 +67,7 @@ def control_fixture():
                carrot_controls=NS(lat_suspend_control=lambda cs, active: active), is_vw_meb=False,
                desired_curvature=0.0, lateral_startup=LateralStartupGate(), lateral_started=False,
                steer_limited_by_safety=False)
+  control.lat_frog_parity = bool(getattr(control.LaC, 'nnff_frogpilot_parity', False))   # as Controls.__init__
   return control, lambda: ns['state_control'](control)
 
 
