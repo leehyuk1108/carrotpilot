@@ -120,6 +120,7 @@ VIEW_MIN_X_M = 0.5
 VIEW_BAND_X = (-160.0, 480.0)     # the HUD band around the 320 px view is 640 px wide
 DEFAULT_ROAD_DEPTH_M = 1.36       # road below the camera when the model gives no lane height
 RADAR_TO_CAMERA_M = 1.52          # radarState/liveTracks dRel is from the radar; the view's origin is the camera
+HIDDEN_BAND = (VIEW_CENTER_X, 1000.0, VIEW_CENTER_X, 1000.0)  # a valid, zero-area path far below the HUD's display
 
 
 VIEW_K = VIEW_F / (VIEW_BOTTOM_Y - VIEW_HORIZON_Y)   # a road point is on the bottom row where x = K * depth
@@ -147,57 +148,87 @@ def _depth(value: Any) -> float | None:
 
 
 class _RoadProfile:
-  """The model's road height, parsed once per model message (lookups run many times per payload)."""
+  """The road surface of one model message, parsed once (lookups run many times per payload).
+
+  The surface is the plane through the own-lane lines (laneLines 1 and 2) at each distance: depth(x, y) follows
+  their heights across, so each lane line keeps its own height and a vehicle between or beside them sits on the same
+  tilted road. Samples with an implausible height are dropped before any interpolation. Without lane heights the
+  plan's height plus the default camera height, else the flat default."""
 
   def __init__(self, model: Any):
-    self.lanes = []
-    for line in _items(getattr(model, "laneLines", None), 3)[1:3]:
-      zs = _line_depths(line)
-      points = _model_points(getattr(line, "x", None), zs) if zs is not None else []
-      if points:
-        self.lanes.append(([x for x, _ in points], [z for _, z in points]))
+    lanes = _items(getattr(model, "laneLines", None), 3)
+    self.left = self._line(lanes[1]) if len(lanes) > 1 else None
+    self.right = self._line(lanes[2]) if len(lanes) > 2 else None
     position = getattr(model, "position", None)
-    zs = _line_depths(position)
-    points = _model_points(getattr(position, "x", None), zs) if zs is not None else []
-    self.plan = ([x for x, _ in points], [z for _, z in points]) if points else None
-    self.entry = None
+    plan = self._line(position, with_y=False)
+    self.plan = plan
+    grid = {VIEW_MIN_X_M, MAX_DISTANCE_M}
+    for line in (self.left, self.right, self.plan):
+      if line is not None:
+        grid.update(x for x in line[0] if VIEW_MIN_X_M < x < MAX_DISTANCE_M)
+    self.grid = sorted(grid)
+    self.entries: dict = {}
 
   @staticmethod
-  def _at(xs: list, zs: list, x: float) -> float | None:
+  def _line(line: Any, with_y: bool = True):
+    xs, ys = getattr(line, "x", None), getattr(line, "y", None) if with_y else getattr(line, "x", None)
+    zs = _line_depths(line)
+    if zs is None:
+      return None
+    points = _model_points(xs, ys)
+    out = ([], [], [])
+    for index, (x, y) in enumerate(points):
+      z = _depth(zs[index]) if index < len(zs) else None
+      if z is not None:
+        out[0].append(x); out[1].append(y); out[2].append(z)
+    return out if len(out[0]) >= 2 else None
+
+  @staticmethod
+  def _at(xs: list, values: list, x: float) -> float | None:
     if not xs[0] <= x <= xs[-1]:
       return None
     i = min(len(xs) - 1, max(1, bisect.bisect_left(xs, x)))
-    x0, x1, z0, z1 = xs[i - 1], xs[i], zs[i - 1], zs[i]
-    return _depth(z0 + (z1 - z0) * (x - x0) / (x1 - x0)) if x1 > x0 else _depth(z1)
+    x0, x1, v0, v1 = xs[i - 1], xs[i], values[i - 1], values[i]
+    return v0 + (v1 - v0) * (x - x0) / (x1 - x0) if x1 > x0 else v1
 
-  def depth(self, x: float) -> float:
-    depths = [z for z in (self._at(xs, zs, x) for xs, zs in self.lanes) if z is not None]
-    if depths:
-      return sum(depths) / len(depths)
-    z = self._at(*self.plan, x) if self.plan else None
-    return DEFAULT_ROAD_DEPTH_M + z if z is not None else DEFAULT_ROAD_DEPTH_M
+  def depth(self, x: float, y: float | None = None) -> float:
+    sides = []
+    for line in (self.left, self.right):
+      if line is not None:
+        z = self._at(line[0], line[2], x)
+        if z is not None:
+          sides.append((self._at(line[0], line[1], x), z))
+    if len(sides) == 2:
+      (y_left, z_left), (y_right, z_right) = sides
+      if y is not None and y_right - y_left > 0.5:
+        t = max(-2.0, min(3.0, (y - y_left) / (y_right - y_left)))   # beside the lane: the same tilt, bounded
+        return z_left + t * (z_right - z_left)
+      return (z_left + z_right) / 2.0
+    if sides:
+      return sides[0][1]
+    if self.plan is not None:
+      z = self._at(self.plan[0], self.plan[2], x)
+      if z is not None:
+        return DEFAULT_ROAD_DEPTH_M + z
+    return DEFAULT_ROAD_DEPTH_M
 
-  def bottom(self) -> float:
-    if self.entry is None:
-      self.entry = self._bottom()
-    return self.entry
+  def entry(self, y: float = 0.0) -> float:
+    """First distance where the road at lateral y enters the bottom row (x = K depth), solved per sample segment."""
+    key = round(y, 1)
+    if key not in self.entries:
+      self.entries[key] = self._entry(key)
+    return self.entries[key]
 
-  def _bottom(self) -> float:
-    def ahead(x):
-      return x - VIEW_K * self.depth(x)
-    low = VIEW_MIN_X_M
-    if ahead(low) >= 0.0:
-      return low
-    x = low
-    while x < MAX_DISTANCE_M:
-      nxt = min(MAX_DISTANCE_M, x + 1.0)
-      if ahead(nxt) >= 0.0:
-        a, b = x, nxt
-        for _ in range(24):
-          mid = (a + b) / 2.0
-          a, b = (mid, b) if ahead(mid) < 0.0 else (a, mid)
-        return b
-      x = nxt
+  def _entry(self, y: float) -> float:
+    prev_x = self.grid[0]
+    prev_f = prev_x - VIEW_K * self.depth(prev_x, y)
+    if prev_f >= 0.0:
+      return prev_x
+    for x in self.grid[1:]:
+      f = x - VIEW_K * self.depth(x, y)
+      if f >= 0.0:
+        return prev_x + (x - prev_x) * (-prev_f) / (f - prev_f)
+      prev_x, prev_f = x, f
     return VIEW_K * DEFAULT_ROAD_DEPTH_M
 
 
@@ -216,25 +247,21 @@ def _profile(model: Any) -> _RoadProfile:
     except (TypeError, IndexError, KeyError):
       return ()
   key = (id(model), getattr(model, "frameId", None), edge(getattr(position, "x", None)), edge(getattr(position, "z", None)),
-         tuple(edge(getattr(line, "z", None)) + edge(getattr(line, "x", None)) for line in lanes[1:3]))
+         tuple(edge(getattr(line, "z", None)) + edge(getattr(line, "x", None)) + edge(getattr(line, "y", None))
+               for line in lanes[1:3]))
   if _PROFILE_CACHE[0] != key:
     _PROFILE_CACHE[0], _PROFILE_CACHE[1] = key, _RoadProfile(model)
   return _PROFILE_CACHE[1]
 
 
-def road_depth_at(model: Any, x: float) -> float:
-  """Depth of the road below the camera at camera distance x, one policy for lanes, path and vehicles.
-
-  The mean of the own-lane lines' depth there (either one if only one has it), else the plan's height plus the
-  default camera height, else the flat-road default. A rising road may give a small or negative depth; it is kept."""
-  return _profile(model).depth(x)
+def road_depth_at(model: Any, x: float, y: float | None = None) -> float:
+  """Depth of the road below the camera at camera distance x (and lateral y), one surface for every drawing."""
+  return _profile(model).depth(x, y)
 
 
-def bottom_distance(model: Any) -> float:
-  """Camera distance where the road enters the bottom row: the first x with x >= K * depth(x).
-
-  Found on the road profile itself (a slope moves it); the flat-road value when the profile never crosses."""
-  return _profile(model).bottom()
+def bottom_distance(model: Any, y: float = 0.0) -> float:
+  """Camera distance where the road at lateral y enters the bottom row: the first x with x >= K * depth(x, y)."""
+  return _profile(model).entry(y)
 
 
 def navdy_project_point(x_value: Any, y_value: Any, z_value: Any = DEFAULT_ROAD_DEPTH_M) -> list[float]:
@@ -260,8 +287,10 @@ def navdy_vehicle_view(model: Any, distance: float, lateral: float) -> dict[str,
   if not math.isfinite(distance) or not math.isfinite(lateral):
     return None
   profile = _profile(model)
-  x = max(camera_x(distance), profile.bottom())
-  uv = _view_uv(x, lateral, profile.depth(x))
+  x = camera_x(distance)
+  if x < 3.0 * VIEW_K * DEFAULT_ROAD_DEPTH_M:   # only a near vehicle can be under the hood line (~21 m bound)
+    x = max(x, profile.entry(lateral))
+  uv = _view_uv(x, lateral, profile.depth(x, lateral))
   if uv is None or not VIEW_BAND_X[0] <= uv[0] <= VIEW_BAND_X[1]:
     return None
   return {"screenX": rounded(uv[0]), "screenY": rounded(min(uv[1], VIEW_BOTTOM_Y)), "pxPerM": rounded(VIEW_F / x, 2)}
@@ -271,17 +300,20 @@ def navdy_model_line(x_values: Any, y_values: Any, z_values: Any = None, lateral
                      depth: Any = None) -> list[float]:
   """The first visible stretch of a model line in view px, at most MAX_PROJECTED_POINTS points.
 
-  z_values: the line's own depth per sample (laneLines z). A missing or out-of-range depth uses depth(x) when
-  given (road_depth_at), else the flat default. The stretch starts where the 3D line enters the bottom row
-  (x = K z) and, if it later drops out again (a crest), ends where it leaves; both points are on the 3D line."""
+  depth(x, y): the road surface (road_depth_at); every sample uses it, so lines, path and vehicles share one road.
+  Without it, z_values (a valid per-sample depth) or the flat default. The stretch starts where the 3D line enters the
+  bottom row (x = K z) and, if it later drops out again (a crest), ends where it leaves; both on the 3D line."""
   points = [(x, y) for x, y in _model_points(x_values, y_values) if x <= MAX_DISTANCE_M]
   zs = _line_depths(z_values, from_line=False)
   road = []
   for index, (x, y) in enumerate(points):
-    z = _depth(zs[index]) if zs is not None and index < len(zs) else None
-    if z is None:
-      z = depth(x) if depth is not None else DEFAULT_ROAD_DEPTH_M
-    road.append((x, y + lateral_offset, z))
+    y = y + lateral_offset
+    if depth is not None:
+      z = depth(x, y)
+    else:
+      z = _depth(zs[index]) if zs is not None and index < len(zs) else None
+      z = DEFAULT_ROAD_DEPTH_M if z is None else z
+    road.append((x, y, z))
 
   def crossing(a, b):
     (x0, y0, z0), (x1, y1, z1) = a, b
@@ -339,14 +371,10 @@ def navdy_model_geometry(model: Any) -> dict[str, Any]:
 
   path_left = navdy_model_line(path_x, path_y, None, -1.0, depth=road)
   path_right = navdy_model_line(path_x, path_y, None, 1.0, depth=road)
-  path_points = _model_points(path_x, path_y)
-  if path_points and not (path_left and path_right):
+  if _model_points(path_x, path_y) and not (path_left and path_right):
     # A short plan (stopped, creeping) ends under the hood line: nothing of the band is visible. Keep lanes and
-    # vehicles drawn with a zero-area band on the bottom row where the road enters the view.
-    entry = profile.bottom()
-    end_y = path_points[-1][1]
-    path_left, path_right = ([rounded(VIEW_CENTER_X + VIEW_F * (end_y + side) / entry), VIEW_BOTTOM_Y] * 2
-                             for side in (-1.0, 1.0))
+    # vehicles drawn (the HUD draws the road only with a path) with a zero-area band off the view.
+    path_left, path_right = list(HIDDEN_BAND), list(HIDDEN_BAND)
   geometry = {
     "navPathLeft": path_left,
     "navPathRight": path_right,
@@ -551,8 +579,14 @@ def payload_from_messages(*, car_state: Any = None, selfdrive_state: Any = None,
     payload['fuelPercent'] = fuel
   if payload['longActive'] and payload['alertSize'] == 'none' and payload['alertStatus'] == 'normal':
     payload['decel'] = badge_code(car_state, selfdrive_state, car_control, longitudinal_plan, carrot_man)
-  if active:
+  # Disengaged but onroad (HUD v183): the road preview, lanes and vehicles without the path (user request
+  # 2026-11-13). The HUD draws the road only with a path, so the path becomes a zero-area band off the view.
+  preview = not active and driving  # fresh, valid inputs, onroad, not reversing: as for every other driving visual
+  if active or preview:
     geometry = navdy_model_geometry(model)
+    if geometry and preview:
+      geometry["navPathLeft"], geometry["navPathRight"] = list(HIDDEN_BAND), list(HIDDEN_BAND)
+      payload["roadPreview"] = True
     payload.update(geometry)
     if geometry:
       payload.update(navdy_lead_geometry(model, radar_state, longitudinal_plan, radar_alignment))

@@ -85,8 +85,9 @@ def vehicle_yaw(model, lane, distance, lateral):
   heading = lane_heading(model, lane, distance)
   step = 1.0 if distance + 1.0 <= MAX_DISTANCE else -1.0
   x0 = camera_x(distance)
-  start = _view_uv(x0, lateral, road_depth_at(model, x0))
-  end = _view_uv(x0 + step, lateral + math.tan(heading) * step, road_depth_at(model, x0 + step))
+  y1 = lateral + math.tan(heading) * step
+  start = _view_uv(x0, lateral, road_depth_at(model, x0, lateral))
+  end = _view_uv(x0 + step, y1, road_depth_at(model, x0 + step, y1))
   if not start or not end:
     return 0.0
   dx, dy = (end[0] - start[0]) / step, (start[1] - end[1]) / step
@@ -99,29 +100,34 @@ def vehicle_yaw(model, lane, distance, lateral):
 def merge_long_vehicles(entries):
   """A truck or bus returns several radar points along its side; draw it once, at its rearmost point.
 
-  Same lane, each point within CLUSTER_GAP_M behind the previous one, CLUSTER_LATERAL_M sideways and
-  CLUSTER_SPEED_MPS in relative speed, the whole run within CLUSTER_MAX_M: one vehicle (two separate cars cannot be
-  closer than a car length while moving together). Anything else stays separate. Spread over CLUSTER_TRUCK_M or
-  more it is drawn as a truck unless the camera names it later."""
+  From each rearmost point r, later points in the same lane join while each is within CLUSTER_GAP_M of the previous
+  one, and all stay within CLUSTER_LATERAL_M and CLUSTER_SPEED_MPS of r and CLUSTER_MAX_M behind it. A run is one
+  vehicle only with at least three points (the side of a long vehicle); two points are kept as they are, since
+  two short vehicles or a motorcycle can be that close. Spread over CLUSTER_TRUCK_M or more it is drawn as a truck
+  unless the camera names it later."""
   merged, used = [], set()
   ordered = sorted(entries, key=lambda vehicle: vehicle['distanceM'])
-  for i, vehicle in enumerate(ordered):
+  for i, rear in enumerate(ordered):
     if i in used:
       continue
-    last = vehicle
+    run, last = [i], rear
     for j in range(i + 1, len(ordered)):
       other = ordered[j]
-      if j in used or other['lane'] != vehicle['lane']:
+      if j in used or other['lane'] != rear['lane']:
         continue
-      if other['distanceM'] - last['distanceM'] >= CLUSTER_GAP_M or other['distanceM'] - vehicle['distanceM'] > CLUSTER_MAX_M:
+      if other['distanceM'] - last['distanceM'] >= CLUSTER_GAP_M or other['distanceM'] - rear['distanceM'] > CLUSTER_MAX_M:
         break
-      if (abs(other['lateralM'] - last['lateralM']) < CLUSTER_LATERAL_M
-          and abs(other['relativeSpeedMps'] - last['relativeSpeedMps']) < CLUSTER_SPEED_MPS):
-        used.add(j)
+      if (abs(other['lateralM'] - rear['lateralM']) < CLUSTER_LATERAL_M
+          and abs(other['relativeSpeedMps'] - rear['relativeSpeedMps']) < CLUSTER_SPEED_MPS):
+        run.append(j)
         last = other
-    if last['distanceM'] - vehicle['distanceM'] >= CLUSTER_TRUCK_M and 'kind' not in vehicle:
-      vehicle = dict(vehicle, kind='truck')
-    merged.append(vehicle)
+    if len(run) < 3:
+      merged.append(rear)
+      continue
+    used.update(run[1:])
+    if last['distanceM'] - rear['distanceM'] >= CLUSTER_TRUCK_M and 'kind' not in rear:
+      rear = dict(rear, kind='truck')
+    merged.append(rear)
   return merged
 
 
@@ -143,7 +149,7 @@ class VehicleOverlay:
   def update(self, payload, model, data, *, timestamp, now, radar_alignment=None):
     """radar_alignment (car.radar_display_alignment.RadarDisplayAlignment or None): radar lateral -> camera frame."""
     errors = getattr(data, 'errors', None)
-    if (not payload['active'] or not payload.get('navPathLeft') or data is None or errors is None
+    if (not (payload['active'] or payload.get('roadPreview')) or not payload.get('navPathLeft') or data is None or errors is None
         or any(bool(getattr(errors, name, False)) for name in
                ('canError', 'radarFault', 'wrongConfig', 'radarUnavailableTemporary'))
         or not math.isfinite(timestamp) or not math.isfinite(now) or timestamp <= 0
@@ -280,7 +286,7 @@ def annotate_camera(payload, model, objects, lamps):
     if objects[o_index].get('track1'):
       track1 = vehicles[v_index]
   extra = []
-  if payload.get('active') and payload.get('navPathLeft'):
+  if (payload.get('active') or payload.get('roadPreview')) and payload.get('navPathLeft'):
     for o_index, obj in enumerate(objects):
       if o_index in matched_objects:
         continue

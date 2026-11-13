@@ -114,10 +114,9 @@ def test_empty_snapshot_disappearance_and_late_reappearance_require_confirmation
 
 
 @pytest.mark.parametrize('kwargs', [
-  {'onroad': False}, {'selfdrive_state': selfdrive(enabled=False, active=False)},
-  {'selfdrive_state': None}, {'car_state': None},
+  {'onroad': False}, {'selfdrive_state': None}, {'car_state': None},
 ])
-def test_disengagement_and_invalid_state_clear_immediately(kwargs):
+def test_invalid_state_clears_immediately(kwargs):
   overlay = VehicleOverlay()
   confirmed(overlay)
   assert render(overlay, timestamp=100.3, **kwargs)['navVehicles'] == []
@@ -333,3 +332,10 @@ def test_changing_track_namespace_requires_two_new_samples():
   radar.hasDisplayData = False
   assert render(overlay, radar, timestamp=100.5)['navVehicles'] == []
   assert render(overlay, radar, timestamp=100.6)['navVehicles']
+
+
+def test_disengaging_keeps_the_road_preview_tracks():
+  overlay = VehicleOverlay()
+  confirmed(overlay)
+  result = render(overlay, timestamp=100.3, selfdrive_state=selfdrive(enabled=False, active=False))
+  assert result['roadPreview'] and len(result['navVehicles']) == 1 and overlay.tracks

@@ -129,14 +129,19 @@ class TestDisplay:
     for overrides in ({"onroad": False}, {"car_state": None}, {"selfdrive_state": None},
                       {"car_state": car(canValid=False)}, {"car_state": car(canTimeout=True)},
                       {"car_state": car(vEgo=math.nan)},
-                      {"car_state": car(gearShifter="reverse")},
-                      {"selfdrive_state": selfdrive(enabled=False, active=True)}):
+                      {"car_state": car(gearShifter="reverse")}):
       result = payload(model=model(), radar_state=NS(leadOne=lead()), **overrides)
       assert not result["active"]
       assert not result["engaged"]
       assert result["navVehicles"] == []
-      assert "navPathLeft" not in result
+      assert "navPathLeft" not in result and "roadPreview" not in result
       assert result["longitudinalActuator"] == "none"
+    # Disengaged with valid inputs (HUD v183): the road preview, never active visuals and never a visible path.
+    for disengaged in (selfdrive(enabled=False, active=True), selfdrive(active=False)):
+      result = payload(model=model(), radar_state=NS(leadOne=lead()), selfdrive_state=disengaged)
+      assert not result["active"] and not result["engaged"] and result["longitudinalActuator"] == "none"
+      assert result["roadPreview"] is True and len(result["navVehicles"]) == 1
+      assert result["navPathLeft"] == result["navPathRight"] == [160.0, 1000.0, 160.0, 1000.0]
     empty = payload_from_messages()
     assert empty["ambientState"] == "disconnected"
     assert not empty["enabled"]

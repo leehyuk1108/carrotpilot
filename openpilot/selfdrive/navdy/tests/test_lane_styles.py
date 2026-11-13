@@ -100,8 +100,6 @@ def test_missing_fields_send_explicit_unknown_for_existing_renderer_fallback():
   {"onroad": False}, {"car_state": None}, {"selfdrive_state": None},
   {"car_state": car(canValid=False)}, {"car_state": car(canTimeout=True)},
   {"car_state": car(vEgo=math.nan)}, {"car_state": car(gearShifter="reverse")},
-  {"selfdrive_state": selfdrive(enabled=False, active=True)},
-  {"selfdrive_state": selfdrive(active=False)},
 ])
 def test_inactive_invalid_or_absent_critical_input_omits_styles(overrides):
   inputs = {"car_state": car(leftLaneLine=0, rightLaneLine=1), "model": model()} | overrides
@@ -258,3 +256,10 @@ def test_bluetooth_v2_compressed_round_trip_and_bounded_overhead(monkeypatch, le
       pipeline.close()
   assert 53 <= headers[1][4] - headers[0][4] <= 57
   assert len(frames[1]) - len(frames[0]) <= 40
+
+
+@pytest.mark.parametrize("disengaged", [selfdrive(enabled=False, active=True), selfdrive(active=False)])
+def test_disengaged_road_preview_keeps_lanes_and_styles(disengaged):
+  result = payload(car_state=car(leftLaneLine=0, rightLaneLine=1), model=model(), selfdrive_state=disengaged)
+  assert not result["active"] and result["roadPreview"] is True
+  assert result["navLaneLeft"] and result["navLaneRight"] and all(key in result for key in STYLE_KEYS)

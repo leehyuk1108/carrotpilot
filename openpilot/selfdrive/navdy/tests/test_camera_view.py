@@ -5,7 +5,7 @@ from types import SimpleNamespace as NS
 import pytest
 
 from openpilot.selfdrive.navdy.display import (
-  VIEW_BOTTOM_Y, VIEW_F, VIEW_K, bottom_distance, navdy_model_geometry, navdy_model_line, navdy_vehicle_view,
+  HIDDEN_BAND, VIEW_BOTTOM_Y, VIEW_F, VIEW_K, bottom_distance, navdy_model_geometry, navdy_model_line, navdy_vehicle_view,
   road_depth_at,
 )
 from openpilot.selfdrive.navdy.tests.test_display import model
@@ -50,9 +50,7 @@ def test_stopped_short_path_still_draws_lanes_and_vehicles():
   stopped.position = NS(x=[0.0, 1.0, 2.0], y=[0.0, 0.0, 0.0])
   geometry = navdy_model_geometry(stopped)
   assert geometry['navLaneLeft'] and geometry['navLaneRight']
-  left, right = geometry['navPathLeft'], geometry['navPathRight']
-  assert left[1] == left[3] == right[1] == right[3] == VIEW_BOTTOM_Y   # zero-height band on the bottom row
-  assert left[0] < 160 < right[0]
+  assert geometry['navPathLeft'] == geometry['navPathRight'] == list(HIDDEN_BAND)   # zero-area band off the view
 
 
 def test_truck_side_points_become_one_vehicle_at_its_rear():
@@ -71,10 +69,17 @@ def test_separate_cars_and_other_lanes_stay_separate():
   assert len(merge_long_vehicles(offset)) == 2
 
 
-def test_short_cluster_stays_a_car_and_a_camera_kind_wins():
-  assert merge_long_vehicles([entry(10.0, 3.0), entry(12.0, 3.1)])[0].get('kind') is None
+def test_two_close_points_stay_two_and_a_camera_kind_wins():
+  assert len(merge_long_vehicles([entry(10.0, 3.2), entry(12.8, 3.2)])) == 2   # two motorcycles can be that close
   named = merge_long_vehicles([entry(8.0, 3.0, kind='car'), entry(11.0, 3.0), entry(14.0, 3.0)])
   assert [v.get('kind') for v in named] == ['car']
+
+
+def test_drifting_speed_or_side_cannot_chain_a_run():
+  speeds = [entry(10.0 + 3.0 * i, 3.2, speed=1.4 * i) for i in range(5)]       # 1.4 m/s per step, 5.6 m/s in all
+  assert len(merge_long_vehicles(speeds)) == 5                                  # no run of three: nothing merged
+  sides = [entry(10.0 + 3.0 * i, 2.0 + 0.7 * i) for i in range(4)]
+  assert len(merge_long_vehicles(sides)) == 4
 
 
 def test_points_moving_apart_or_across_are_separate_vehicles():
@@ -121,13 +126,49 @@ def test_near_vehicle_on_a_slope_sits_where_its_lane_enters_the_view():
   assert near['pxPerM'] == round(VIEW_F / entry_x, 2)
 
 
+def tilted():
+  m = model()
+  m.laneLines[1].z = [1.16] * len(m.laneLines[1].x)
+  m.laneLines[2].z = [1.56] * len(m.laneLines[2].x)
+  return m
+
+
+def test_a_tilted_road_is_one_surface_for_lanes_and_vehicles():
+  m = tilted()
+  right = navdy_model_geometry(m)['navLaneRight']
+  u, v = right[-4], right[-3]                                  # a far sample of the right lane line (y 1.8)
+  x = VIEW_F * 1.8 / (u - 160)
+  vehicle = navdy_vehicle_view(m, x - 1.52, 1.8)
+  assert vehicle['screenY'] == pytest.approx(v, abs=0.15)      # the vehicle on the line sits on the line
+  near, line = navdy_vehicle_view(m, 2.0, 1.8), right[:2]
+  assert near['screenY'] == VIEW_BOTTOM_Y and near['screenX'] == pytest.approx(line[0], abs=0.15)
+
+
+def test_an_implausible_height_sample_is_dropped_not_interpolated():
+  m = model()
+  for line in m.laneLines[1:3]:
+    line.z = [21.0 if 9.0 < x < 11.0 else 1.36 for x in line.x]   # one sample far beyond a road
+  assert road_depth_at(m, 10.0) == pytest.approx(1.36) and road_depth_at(m, 15.0) == pytest.approx(1.36)
+
+
+def test_the_first_crossing_is_found_even_in_a_short_gap():
+  m = model()
+  xs, zs = [0, 6, 6.7, 6.9, 7, 10, 20, 80], [2, 2, 1.29, 1.29, 2, 2, 2, 2]
+  for line in m.laneLines:
+    line.x, line.z = list(map(float, xs)), list(map(float, zs))
+    line.y = [line.y[0]] * len(xs)
+  line = navdy_model_geometry(m)['navLaneRight']
+  near = navdy_vehicle_view(m, 2.0, 1.8)
+  assert near['screenX'] == pytest.approx(line[0], abs=0.15) and line[1] == near['screenY'] == VIEW_BOTTOM_Y
+
+
 def test_short_path_with_a_zero_depth_end_does_not_raise():
   m = model()
   for line in m.laneLines:
     line.z = [math.nan] * len(line.x)
   m.position = NS(x=[0.0, 1.0, 2.0], y=[0.0, 0.0, 0.0], z=[0.0, -0.68, -1.36])
-  geometry = navdy_model_geometry(m)
-  assert geometry['navPathLeft'][1] == VIEW_BOTTOM_Y
+  geometry = navdy_model_geometry(m)   # must not raise; whatever such a bogus plan draws, lanes are still there
+  assert geometry['navLaneLeft'] and geometry['navPathLeft']
 
 
 def test_a_line_that_drops_out_of_view_again_ends_where_it_leaves():
@@ -154,3 +195,45 @@ def test_road_profile_is_parsed_once_per_message_but_never_stale():
   other = sloped(-0.01)                          # a different message
   assert road_depth_at(other, 40.0) == pytest.approx(0.96)
   assert road_depth_at(m, 40.0) == pytest.approx(1.76)
+
+
+def preview_payload(**kwargs):
+  from openpilot.selfdrive.navdy.tests.test_display import lead, payload, selfdrive
+  return payload(model=model(), radar_state=NS(leadOne=lead(), leadTwo=lead(status=False)), **kwargs)
+
+
+def test_disengaged_onroad_sends_the_road_without_the_path():
+  from openpilot.selfdrive.navdy.tests.test_display import selfdrive
+  result = preview_payload(selfdrive_state=selfdrive(enabled=False, active=False, state='disabled'), onroad=True)
+  assert result['active'] is False and result['roadPreview'] is True
+  assert result['navLaneLeft'] and result['navLaneRight'] and len(result['navVehicles']) == 1
+  assert result['navPathLeft'] == result['navPathRight'] == list(HIDDEN_BAND)
+
+
+def test_engaged_keeps_the_path_and_offroad_sends_no_road():
+  from openpilot.selfdrive.navdy.tests.test_display import selfdrive
+  engaged = preview_payload(onroad=True)
+  assert engaged['active'] and 'roadPreview' not in engaged and engaged['navPathLeft'] != list(HIDDEN_BAND)
+  offroad = preview_payload(selfdrive_state=selfdrive(enabled=False, active=False, state='disabled'), onroad=False)
+  assert 'roadPreview' not in offroad and not offroad['navVehicles'] and 'navLaneLeft' not in offroad
+
+
+def test_raw_tracks_and_camera_objects_also_show_in_the_preview():
+  from openpilot.selfdrive.navdy.tests.test_display import payload, selfdrive
+  from openpilot.selfdrive.navdy.tests.test_vehicles import data, point
+  from openpilot.selfdrive.navdy.vehicles import VehicleOverlay, annotate_camera
+  m, overlay = model(), VehicleOverlay()
+  for timestamp in (100.0, 100.2):
+    result = payload(model=m, selfdrive_state=selfdrive(enabled=False, active=False, state='disabled'), onroad=True)
+    overlay.update(result, m, data([point(7, 30.0, -3.6)]), timestamp=timestamp, now=timestamp)
+  annotate_camera(result, m, [{'id': 5, 'kind': 'ped', 'distance': 20.0, 'lateral': 3.0}], None)
+  assert {v['trackId'] for v in result['navVehicles']} == {7, 900005}
+
+
+def test_no_preview_on_stale_car_or_selfdrive_state():
+  from openpilot.selfdrive.navdy.tests.test_display import selfdrive
+  stale_car = preview_payload(selfdrive_state=selfdrive(enabled=False, active=False, state='disabled'), onroad=True,
+                              car_state=None)
+  stale_selfdrive = preview_payload(selfdrive_state=None, onroad=True)
+  for result in (stale_car, stale_selfdrive):
+    assert 'roadPreview' not in result and 'navPathLeft' not in result and result['navVehicles'] == []
