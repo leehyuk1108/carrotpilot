@@ -179,6 +179,19 @@ def test_a_sparse_path_finds_the_short_visible_gap_like_a_vehicle():
   assert near['screenY'] == VIEW_BOTTOM_Y
 
 
+def test_a_dip_inside_one_path_segment_keeps_the_band_area():
+  # Codex review r4: entry and exit inside the one sparse path segment left the band flat on the bottom row
+  xs, zs = [0.0, 6.0, 6.7, 6.9, 7.0, 10.0, 20.0, 80.0], [2.0, 2.0, 1.29, 1.29, 2.0, 2.0, 2.0, 2.0]
+  lanes = [NS(x=xs, y=[y] * len(xs), z=zs) for y in (-5.4, -1.8, 1.8, 5.4)]
+  sparse = NS(position=NS(x=[0.0, 80.0], y=[0.0, 0.0]), laneLines=lanes, laneLineProbs=[0.9] * 4)
+  dense = NS(position=NS(x=xs[:], y=[0.0] * len(xs)), laneLines=lanes, laneLineProbs=[0.9] * 4)   # same straight path
+  a, b = navdy_model_geometry(sparse), navdy_model_geometry(dense)
+  for key in ('navPathLeft', 'navPathRight'):
+    assert a[key] == b[key]                                  # the drawing does not depend on the path's sampling
+    assert min(a[key][1::2]) < VIEW_BOTTOM_Y - 3.0           # the band keeps its area (the dip shows)
+  assert min(a['navPathRight'][1::2]) == pytest.approx(min(a['navLaneRight'][1::2]), abs=1.0)
+
+
 def test_a_slanted_segment_starting_on_hidden_road_keeps_its_line():
   m = model()   # one long path segment from 0 m: the search skips the hidden near road but stays on the same line
   m.position = NS(x=[0.0, 80.0], y=[0.0, 4.0])

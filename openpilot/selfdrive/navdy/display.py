@@ -339,6 +339,10 @@ class _RoadProfile:
           return x
     return None
 
+  def between(self, a: float, b: float) -> list:
+    """Sample columns strictly between a and b."""
+    return self.grid[bisect.bisect_right(self.grid, a):bisect.bisect_left(self.grid, b)]
+
   def entry(self, y: float = 0.0) -> float:
     """First distance where the road at lateral y enters the bottom row (x = K depth)."""
     key = round(y, 4)
@@ -432,12 +436,46 @@ def _surface_stretch(points: list, surface: Any) -> list:
       if not xb > x:
         continue
       xa, ya = x, stretch[-1][1]
-    x = surface.crossing(xa, ya, xb, yb, visible=True)
-    if x is not None:
-      stretch.append(at(x))
+    exit_x = surface.crossing(xa, ya, xb, yb, visible=True)
+    end = at(exit_x) if exit_x is not None else (xb, yb, surface.depth(xb, yb))
+    inner = [at(x) for x in surface.between(stretch[-1][0], end[0])]
+    stretch += _bends(stretch[-1], inner, end) + [end]   # the road's own shape between the line's samples
+    if exit_x is not None:
       break
-    stretch.append((xb, yb, surface.depth(xb, yb)))
   return stretch
+
+
+SHAPE_TOLERANCE_PX = 0.3
+
+
+def _bends(start: tuple, inner: list, end: tuple) -> list:
+  """The road columns inside one straight line segment whose view point leaves the straight view segment through
+  its kept neighbours by more than SHAPE_TOLERANCE_PX (Douglas-Peucker). Where the road is planar along the line
+  (lane lines between their samples) none is kept, so the drawing is unchanged; where it bends between the line's
+  samples (a short visible dip inside one long path segment), its shape stays and the band keeps its area."""
+  if not inner:
+    return []
+  views = [_view_uv(*point) for point in [start] + inner + [end]]
+  if any(view is None for view in views):
+    return []
+  keep = set()
+
+  def split(first: int, last: int) -> None:
+    (u0, v0), (u1, v1) = views[first], views[last]
+    length = math.hypot(u1 - u0, v1 - v0)
+    best, index = 0.0, None
+    for i in range(first + 1, last):
+      u, v = views[i]
+      off = (abs((u1 - u0) * (v0 - v) - (u0 - u) * (v1 - v0)) / length if length > 0.0
+             else math.hypot(u - u0, v - v0))
+      if off > best:
+        best, index = off, i
+    if index is not None and best > SHAPE_TOLERANCE_PX:
+      keep.add(index)
+      split(first, index)
+      split(index, last)
+  split(0, len(views) - 1)
+  return [inner[i - 1] for i in sorted(keep)]
 
 
 def _chord_stretch(points: list, zs: list | None) -> list:
