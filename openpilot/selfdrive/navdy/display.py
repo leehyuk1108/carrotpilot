@@ -449,8 +449,8 @@ SHAPE_TOLERANCE_PX = 0.3
 
 
 def _bends(start: tuple, inner: list, end: tuple) -> list:
-  """The road columns inside one straight line segment whose view point leaves the straight view segment through
-  its kept neighbours by more than SHAPE_TOLERANCE_PX (Douglas-Peucker). Where the road is planar along the line
+  """The road columns inside one straight line segment whose view point is more than SHAPE_TOLERANCE_PX from the
+  view segment between its kept neighbours (Douglas-Peucker). Where the road is planar along the line
   (lane lines between their samples) none is kept, so the drawing is unchanged; where it bends between the line's
   samples (a short visible dip inside one long path segment), its shape stays and the band keeps its area."""
   if not inner:
@@ -461,13 +461,9 @@ def _bends(start: tuple, inner: list, end: tuple) -> list:
   keep = set()
 
   def split(first: int, last: int) -> None:
-    (u0, v0), (u1, v1) = views[first], views[last]
-    length = math.hypot(u1 - u0, v1 - v0)
     best, index = 0.0, None
     for i in range(first + 1, last):
-      u, v = views[i]
-      off = (abs((u1 - u0) * (v0 - v) - (u0 - u) * (v1 - v0)) / length if length > 0.0
-             else math.hypot(u - u0, v - v0))
+      off = _off_line(views[i], views[first], views[last])
       if off > best:
         best, index = off, i
     if index is not None and best > SHAPE_TOLERANCE_PX:
@@ -525,9 +521,13 @@ def navdy_model_line(x_values: Any, y_values: Any, z_values: Any = None, lateral
 
 
 def _off_line(point: tuple, a: tuple, b: tuple) -> float:
+  """Distance from a view point to the drawn segment a-b (not its infinite line: a point beyond either end, such
+  as a crest that rises above both kept points, is as far as that end)."""
   (u, v), (u0, v0), (u1, v1) = point, a, b
-  length = math.hypot(u1 - u0, v1 - v0)
-  return abs((u1 - u0) * (v0 - v) - (u0 - u) * (v1 - v0)) / length if length > 0.0 else math.hypot(u - u0, v - v0)
+  du, dv = u1 - u0, v1 - v0
+  squared = du * du + dv * dv
+  t = max(0.0, min(1.0, ((u - u0) * du + (v - v0) * dv) / squared)) if squared > 0.0 else 0.0
+  return math.hypot(u - u0 - t * du, v - v0 - t * dv)
 
 
 def _reduce(points: list, budget: int) -> list:
@@ -541,14 +541,8 @@ def _reduce(points: list, budget: int) -> list:
   def rank(first: int, last: int) -> tuple | None:
     if last - first < 2:
       return None
-    (u0, v0), (u1, v1) = points[first], points[last]
-    du, dv = u1 - u0, v1 - v0
-    length = math.hypot(du, dv)
-    if length > 0.0:
-      off, index = max((abs(du * (v0 - v) - (u0 - u) * dv), i) for i, (u, v) in enumerate(points[first + 1:last], first + 1))
-      off /= length
-    else:
-      off, index = max((_off_line(points[i], points[first], points[last]), i) for i in range(first + 1, last))
+    a, b = points[first], points[last]
+    off, index = max((_off_line(points[i], a, b), i) for i in range(first + 1, last))
     off = round(off, 1)
     return off, last - first, (first + last) // 2 if off == 0.0 else index
 
