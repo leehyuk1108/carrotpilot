@@ -12,6 +12,7 @@ from openpilot.selfdrive.ui.vision_status import blindspot_source_packet, blinds
 from openpilot.selfdrive.ui.road_markings import lane_dash_segments, project_blindspot_barrier, blindspot_barrier_quads
 from openpilot.selfdrive.ui.mici.onroad import blend_colors
 from openpilot.selfdrive.ui.mici.onroad.lead_bar import LeadBar, LeadBarTarget
+from openpilot.selfdrive.car.radar_display_alignment import for_fingerprint
 from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.lib.text_draw import draw_text_ui_style
 from openpilot.system.ui.lib.shader_polygon import draw_polygon, Gradient
@@ -158,13 +159,26 @@ class ModelRenderer(Widget):
       if lead.status and np.isfinite(lead.dRel) and np.isfinite(lead.yRel) and lead.dRel > 0:
         idx = self._get_path_length_idx(self._path.raw_points[:, 0], lead.dRel)
         z = float(self._path.raw_points[idx, 2]) + self._path_offset_z
-        left = self._map_to_screen(lead.dRel, -lead.yRel - 1.2, z)
-        right = self._map_to_screen(lead.dRel, -lead.yRel + 1.2, z)
+        y_rel = float(lead.yRel)
+        alignment = self._radar_display_alignment()
+        if alignment is not None and bool(lead.radar):
+          y_rel = alignment.left(float(lead.dRel), y_rel)  # display only: radarState itself is untouched
+        left = self._map_to_screen(lead.dRel, -y_rel - 1.2, z)
+        right = self._map_to_screen(lead.dRel, -y_rel + 1.2, z)
         if left is not None and right is not None:
           x, y = (left[0] + right[0]) / 2, (left[1] + right[1]) / 2
           if rect.x <= x <= rect.x + rect.width and rect.y <= y <= rect.y + rect.height - LeadBar.HEIGHT:
             target = LeadBarTarget(x, y, abs(right[0] - left[0]) * 0.8, bool(lead.radar), int(lead.radarTrackId))
     self._lead_bar.draw(target, now)
+
+  def _radar_display_alignment(self):
+    """Traverse front-radar display alignment for the lead bar (None for other cars or before CarParams)."""
+    cp = getattr(ui_state, 'CP', None)
+    fingerprint = str(cp.carFingerprint) if cp is not None else None
+    if fingerprint != getattr(self, '_alignment_fingerprint', object()):
+      self._alignment_fingerprint = fingerprint
+      self._alignment = for_fingerprint(fingerprint) if fingerprint is not None else None
+    return self._alignment
 
   def _paint(self, rect: rl.Rectangle):
     self._display_clock.tick()

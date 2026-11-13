@@ -200,8 +200,13 @@ def _lead_lane(model: Any, distance: float, y: float) -> str:
   return ""
 
 
-def navdy_lead_geometry(model: Any, radar_state: Any, longitudinal_plan: Any = None) -> dict[str, Any]:
-  """Only the two published, visible leads, never inferred raw radar tracks."""
+def navdy_lead_geometry(model: Any, radar_state: Any, longitudinal_plan: Any = None,
+                        radar_alignment: Any = None) -> dict[str, Any]:
+  """Only the two published, visible leads, never inferred raw radar tracks.
+
+  radar_alignment (car.radar_display_alignment.RadarDisplayAlignment or None) moves a radar-measured lead's
+  lateral into the camera frame of the drawn lanes, for display only; vision leads already are in it.
+  """
   vehicles = []
   source = enum_text(getattr(longitudinal_plan, "longitudinalPlanSource", ""))
   for index, name in enumerate(("leadOne", "leadTwo")):
@@ -213,6 +218,8 @@ def navdy_lead_geometry(model: Any, radar_state: Any, longitudinal_plan: Any = N
     relative_speed = finite_float(getattr(lead, "vRel", None), math.nan)
     if not 2.0 <= distance <= MAX_DISTANCE_M or not math.isfinite(relative_speed):
       continue
+    if radar_alignment is not None and bool(getattr(lead, "radar", False)):
+      lateral = radar_alignment.right(distance, lateral)
     path_y = model_line_y_at(getattr(model, "position", None), distance)
     lane = _lead_lane(model, distance, lateral)
     if not lane:
@@ -272,7 +279,7 @@ def payload_from_messages(*, car_state: Any = None, selfdrive_state: Any = None,
                           car_output: Any = None, model: Any = None,
                           radar_state: Any = None, longitudinal_plan: Any = None,
                           carrot_man: Any = None, seq: int = 0, onroad: bool = False,
-                          door_open: bool | None = None) -> dict[str, Any]:
+                          door_open: bool | None = None, radar_alignment: Any = None) -> dict[str, Any]:
   """Map fresh service structs without retaining state or synthesizing alerts.
 
   Only the display-only deceleration verdict uses carrot_man here; navigation
@@ -361,7 +368,7 @@ def payload_from_messages(*, car_state: Any = None, selfdrive_state: Any = None,
     geometry = navdy_model_geometry(model)
     payload.update(geometry)
     if geometry:
-      payload.update(navdy_lead_geometry(model, radar_state, longitudinal_plan))
+      payload.update(navdy_lead_geometry(model, radar_state, longitudinal_plan, radar_alignment))
       probs = _items(getattr(model, "laneLineProbs", None), 3)
       left_code, right_code = stock_lane_codes(car_state) or (
         getattr(car_state, "leftLaneLine", None), getattr(car_state, "rightLaneLine", None),

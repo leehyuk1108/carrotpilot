@@ -291,3 +291,33 @@ def test_actual_projection_anchors_bar_to_original_rectangle_bottom(lead_rendere
   assert target.x == pytest.approx((old_rect[2][0] + old_rect[3][0]) / 2)
   assert target.y == pytest.approx(old_rect[2][1])
   assert target.width == pytest.approx(400 * 2.4 / distance * 0.8)
+
+
+@pytest.mark.parametrize('fingerprint,radar,shifted', [
+  ('CHEVROLET_TRAVERSE', True, True), ('CHEVROLET_TRAVERSE', False, False),
+  ('CHEVROLET_TRAILBLAZER', True, False), (None, True, False),
+])
+def test_traverse_radar_lead_bar_is_drawn_in_the_camera_frame(lead_renderer, fingerprint, radar, shifted):
+  """Display only: the Traverse radar lead's yRel gets 0.29 + 0.0064 * dRel to the left; radarState is untouched."""
+  module, renderer, state, lead, calls = lead_renderer
+  if fingerprint is not None:
+    state.CP = SimpleNamespace(carFingerprint=fingerprint)
+  lead.radar = radar
+  renderer._draw_lead_bar(module.rl.Rectangle(0, 0, 536, 240))
+  target, _ = calls[0]
+  shift = 0.29 + 0.0064 * 20 if shifted else 0.0
+  # Fixture projection: x = 268 - y * 20 with y = -yRel, so a left move of `shift` adds shift * 20.
+  assert target.x == pytest.approx(268 + shift * 20)
+  assert target.radar == radar and lead.yRel == 0
+  assert target.width == pytest.approx(38.4)
+
+
+def test_lead_bar_alignment_follows_a_car_params_change(lead_renderer):
+  module, renderer, state, lead, calls = lead_renderer
+  rect = module.rl.Rectangle(0, 0, 536, 240)
+  state.CP = SimpleNamespace(carFingerprint='CHEVROLET_TRAILBLAZER')
+  renderer._draw_lead_bar(rect)
+  state.CP = SimpleNamespace(carFingerprint='CHEVROLET_TRAVERSE')
+  renderer._draw_lead_bar(rect)
+  assert calls[0][0].x == pytest.approx(268)
+  assert calls[1][0].x == pytest.approx(268 + (0.29 + 0.0064 * 20) * 20)

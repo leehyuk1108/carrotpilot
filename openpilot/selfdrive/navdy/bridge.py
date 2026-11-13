@@ -29,7 +29,9 @@ from openpilot.selfdrive.navdy.feedback import is_no_observation
 from openpilot.selfdrive.navdy.journal import CONNECT_TIMINGS, LocalJournal, sanitize
 from openpilot.selfdrive.navdy.camera_objects import CameraObjects
 from openpilot.selfdrive.navdy.vehicles import VehicleOverlay, annotate_camera
+from openpilot.selfdrive.navdy.sprite_clearance import settle_adjacent
 from openpilot.selfdrive.navdy.policy import read_transport_mode, transport_policy
+from openpilot.selfdrive.car.radar_display_alignment import read_alignment
 from openpilot.selfdrive.navdy.usb_health import RecoveryGuard, UsbHealth, recovery_messages
 from openpilot.selfdrive.navdy.usb_faults import UsbFaultRecorder
 
@@ -205,7 +207,7 @@ def trip_inputs(sm, sources=None) -> dict:
 
 
 def live_payload(sm, sequence, *, sources=None, door_open=False, ambient_override=None, vehicles=None, dark_ambient=None,
-                 camera=None, tunnel=None, trip=None):
+                 camera=None, tunnel=None, trip=None, radar_alignment=None):
   from openpilot.selfdrive.navdy.display import payload_from_messages, resolve_operating_state
   sources = display_sources(sm) if sources is None else sources
 
@@ -224,15 +226,21 @@ def live_payload(sm, sequence, *, sources=None, door_open=False, ambient_overrid
     seq=sequence, onroad=onroad, car_state=car_state, selfdrive_state=recent('selfdriveState'),
     controls_state=recent('controlsState'), car_control=recent('carControl'), car_output=recent('carOutput'),
     model=recent('modelV2'), radar_state=recent('radarState'), longitudinal_plan=recent('longitudinalPlan'),
-    carrot_man=recent('carrotMan'), door_open=door_open,
+    carrot_man=recent('carrotMan'), door_open=door_open, radar_alignment=radar_alignment,
   )
   if vehicles is not None:
     vehicles.update(payload, recent('modelV2'), recent('liveTracks'),
-                    timestamp=sm.logMonoTime['liveTracks'] / 1e9, now=time.monotonic())
+                    timestamp=sm.logMonoTime['liveTracks'] / 1e9, now=time.monotonic(), radar_alignment=radar_alignment)
   if camera is not None:
     now = time.monotonic()
     objects, lamps = camera.snapshot(now)  # one consistent observation: lamps carry the id they belong to
     annotate_camera(payload, recent('modelV2'), objects, lamps)
+  if vehicles is not None:
+    try:
+      settle_adjacent(payload, recent('modelV2'))  # last: needs every entry's lane, kind and yaw
+    except Exception:
+      from openpilot.common.swaglog import cloudlog
+      cloudlog.exception('navdy adjacent sprite clearance failed; drawing measured positions')
   # Offroad has no card/selfdrived messages. Ambient/power state instead comes
   # from fresh device/panda state; never grant active telemetry from this path.
   payload['displayPower'] = 'unknown' if known_road is None else 'onroad' if known_road else 'offroad'
@@ -287,6 +295,7 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
     connection_mode = 0
     config_error = ''
     config_checked = -math.inf
+    radar_alignment = None
     last_handover = None
     last_connected_transport = None
     previous_available = False
@@ -346,6 +355,7 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
             cloudlog.exception('navdy trip summary failed; no post-drive summary this run')
         if tick - config_checked >= 5:
           config_checked = tick
+          radar_alignment = read_alignment()  # display only; never raises; None unless the last car was a Traverse
           old_policy = policy
           try:
             peer, legacy_bluetooth_only = configured_connection(bluetooth_config)
@@ -464,7 +474,7 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
           payload = live_payload(sm, sequence, sources=sources, door_open=doors.door_open,
                                  ambient_override=read_override(), vehicles=vehicles, dark_ambient=dark_ambient,
                                  camera=camera if camera_on else None, tunnel=camera.tunnel(),
-                                 trip=trip if observe_trip else None)
+                                 trip=trip if observe_trip else None, radar_alignment=radar_alignment)
           payload['modelRoute'] = model_navigation.request(time.monotonic())
           car_state = sm['carState']
           diagnostics.sources(sources, payload,
@@ -540,7 +550,8 @@ def run(*, feedback=FEEDBACK_PATH, status=STATUS_PATH, duration=None, bluetooth_
                                'connectedAt': connected_at, 'extendedFeedback': extended_feedback,
                                'display': {'sequence': sequence, 'onroad': payload['onroad'], 'active': payload['active'],
                                            'ambientState': payload['ambientState'], 'sources': sources,
-                                           'vehicleCount': len(payload['navVehicles'])},
+                                           'vehicleCount': len(payload['navVehicles']),
+                                           'radarAlignment': None if radar_alignment is None else list(radar_alignment.key())},
                                'power': payload['displayPower'],
                                'ambient': {'doorOpen': payload['doorOpen'], 'gmDoorMonitor': doors.gm, 'error': doors.error,
                                            'darkOff': dark_ambient.state()},

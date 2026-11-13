@@ -96,14 +96,17 @@ class VehicleOverlay:
     self.timestamp = 0.0
     self.flipped = None
     self.display_data = None
+    self.alignment = None
 
   def clear(self):
     self.tracks.clear()
     self.timestamp = 0.0
     self.flipped = None
     self.display_data = None
+    self.alignment = None
 
-  def update(self, payload, model, data, *, timestamp, now):
+  def update(self, payload, model, data, *, timestamp, now, radar_alignment=None):
+    """radar_alignment (car.radar_display_alignment.RadarDisplayAlignment or None): radar lateral -> camera frame."""
     errors = getattr(data, 'errors', None)
     if (not payload['active'] or not payload.get('navPathLeft') or data is None or errors is None
         or any(bool(getattr(errors, name, False)) for name in
@@ -114,10 +117,13 @@ class VehicleOverlay:
       return
     flipped = bool(getattr(data, 'radarTrackFlipped', False))
     display_data = bool(getattr(data, 'hasDisplayData', False))
-    if timestamp < self.timestamp or flipped != self.flipped or display_data != self.display_data:
+    alignment = None if radar_alignment is None else radar_alignment.key()
+    if (timestamp < self.timestamp or flipped != self.flipped or display_data != self.display_data
+        or alignment != self.alignment):
       self.clear()
     self.flipped = flipped
     self.display_data = display_data
+    self.alignment = alignment
     self.tracks = {key: value for key, value in self.tracks.items() if now - value['time'] <= TRACK_MAX_AGE}
     if timestamp > self.timestamp:
       self.timestamp = timestamp
@@ -138,10 +144,13 @@ class VehicleOverlay:
         previous = self.tracks.get(ident)
         # Published liveTracks already includes RadarTrackFlip. Convert only
         # radar-left-positive to model-right-positive; never flip a second time.
-        values = {'dRel': distance, 'yRel': -lateral, 'vRel': speed}
+        lateral = -lateral
+        if radar_alignment is not None:
+          lateral = radar_alignment.right(distance, lateral)
+        values = {'dRel': distance, 'yRel': lateral, 'vRel': speed}
         if (previous and timestamp - previous['time'] <= TRACK_MAX_AGE
             and abs(previous['dRel'] - distance) <= max(8.0, distance * 0.35)
-            and abs(previous['yRel'] + lateral) <= 2.5):
+            and abs(previous['yRel'] - lateral) <= 2.5):
           values = {key: previous[key] + 0.55 * (value - previous[key]) for key, value in values.items()}
           samples = min(2, previous['samples'] + 1)
         else:
