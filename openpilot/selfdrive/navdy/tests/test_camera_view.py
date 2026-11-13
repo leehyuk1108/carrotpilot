@@ -5,8 +5,8 @@ from types import SimpleNamespace as NS
 import pytest
 
 from openpilot.selfdrive.navdy.display import (
-  HIDDEN_BAND, VIEW_BOTTOM_Y, VIEW_F, VIEW_K, _profile, bottom_distance, navdy_model_geometry, navdy_model_line,
-  navdy_vehicle_view, road_depth_at,
+  HIDDEN_BAND, VIEW_BOTTOM_Y, VIEW_F, VIEW_K, _off_line, _profile, bottom_distance, navdy_model_geometry,
+  navdy_model_line, navdy_vehicle_view, road_depth_at,
 )
 from openpilot.selfdrive.navdy.tests.test_display import model
 from openpilot.selfdrive.navdy.vehicles import vehicle_lane
@@ -213,6 +213,45 @@ def test_a_crest_beyond_both_kept_points_is_kept():
   right = navdy_model_geometry(m)['navPathRight']
   assert len(right) <= 20 and set(right[::2]) == {160.0}       # a vertical line on the view
   assert min(right[1::2]) == round(8 + VIEW_F * road_depth_at(m, 60.0, 0.0) / 60.0, 1)   # its top (60 m) stays
+
+
+def surface_model(xs, left_y, right_y, left_z, right_z, left_x=None, right_x=None):
+  left, right = NS(x=left_x or xs, y=left_y, z=left_z), NS(x=right_x or xs, y=right_y, z=right_z)
+  return NS(position=NS(x=right.x, y=[0.0] * len(right.x)), laneLines=[left, left, right, right], laneLineProbs=[0.9] * 4)
+
+
+ROAD_SHAPES = {   # Codex review r7: the road between a line's samples bends, changes formula or jumps
+  'continuous_bow': (surface_model([0.0, 8.0, 24.0, 80.0], [-1.8, -1.8, -0.6, -0.6], [1.8, 1.8, 3.0, 3.0],
+                                   [1.36, 1.16, 1.56, 1.56], [1.36, 1.56, 1.16, 1.16]), 1.0),
+  'single_cell_window': (surface_model([0.0, 6.0, 12.0, 20.0, 80.0], [-0.8, -0.8, 0.4, 0.4, 0.4], [2.8, 2.8, 4.0, 4.0, 4.0],
+                                       [1.36, (6.01 / VIEW_K) - 0.3, 12.01 / VIEW_K, 1.36, 1.36],
+                                       [1.36, (6.01 / VIEW_K) + 0.3, 12.01 / VIEW_K, 1.36, 1.36]), 1.0),
+  'lateral_clamp': (surface_model([0.0, 8.0, 24.0, 80.0], [-1.8] * 4, [1.8, 1.8, -0.8, -0.8], [1.3] * 4, [1.5] * 4), 3.6),
+  'lane_sample_end': (surface_model([0.0, 8.0, 20.0, 80.0], [-1.8] * 3, [1.8] * 4, [1.16] * 3, [1.56] * 4,
+                                    left_x=[0.0, 8.0, 20.0]), 1.0),
+  'width_fallback': (surface_model([0.0, 8.0, 24.0, 80.0], [-1.8] * 4, [1.8, 1.8, -1.6, -1.6], [1.3] * 4, [1.5] * 4), 1.0),
+}
+
+
+@pytest.mark.parametrize('case', sorted(ROAD_SHAPES))
+def test_a_line_follows_the_road_between_its_samples(case):
+  m, lateral = ROAD_SHAPES[case]
+  surface = _profile(m)
+  xs = m.laneLines[2].x
+  line = navdy_model_line(xs, [lateral] * len(xs), surface=surface)
+  drawn = list(zip(line[::2], line[1::2]))
+  assert 2 <= len(drawn) <= 10
+  near, far = (VIEW_F * lateral / (drawn[i][0] - 160) for i in (0, -1))
+  far = min(far, xs[-1])   # the 0.1 px rounding of the last point must not reach past the line's samples
+  def off(point):
+    return min(_off_line(point, a, b) for a, b in zip(drawn, drawn[1:]))
+  worst = 0.0
+  for i in range(2001):
+    x = near + (far - near) * i / 2000
+    u, v = 160 + VIEW_F * lateral / x, 8 + VIEW_F * surface.depth(x, lateral) / x
+    if v <= VIEW_BOTTOM_Y:
+      worst = max(worst, off((u, v)))
+  assert worst <= 0.5   # every visible road point within half a pixel of the drawing (0.1 px rounding included)
 
 
 def test_a_slanted_segment_starting_on_hidden_road_keeps_its_line():

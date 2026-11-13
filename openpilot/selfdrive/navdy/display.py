@@ -162,13 +162,25 @@ class _RoadProfile:
     position = getattr(model, "position", None)
     plan = self._line(position, with_y=False)
     self.plan = plan
-    grid = {VIEW_MIN_X_M, MAX_DISTANCE_M}
+    every = {VIEW_MIN_X_M, MAX_DISTANCE_M}
     for line in (self.left, self.right, self.plan):
       if line is not None:
+        every.update(x for x in line[0] if VIEW_MIN_X_M < x < MAX_DISTANCE_M)
+    self.lookup_x = sorted(every)   # every sample column: between two of them each value is linear
+    self.at_columns = [self._lookup_at(x) for x in self.lookup_x]
+    # Where depth's form can change: the lane lines' samples and ends, and the plan's samples where no lane line is
+    # there (the plan is used only then). Solving and shaping split only here.
+    grid = {VIEW_MIN_X_M, MAX_DISTANCE_M}
+    for line in (self.left, self.right):
+      if line is not None:
         grid.update(x for x in line[0] if VIEW_MIN_X_M < x < MAX_DISTANCE_M)
+    for x, (left, right, _) in zip(self.lookup_x, self.at_columns, strict=True):
+      if left is None and right is None:
+        grid.add(x)
     self.grid = sorted(grid)
+    self.edges = {line[0][i] for line in (self.left, self.right, self.plan) if line is not None for i in (0, -1)}
+    self.side_columns = [self._sides(x) for x in self.grid]   # (y_left, z_left, y_right, z_right) or None
     self.entries: dict = {}
-    self.lookups: dict = {}
     self.columns = [self._column_bounds(x) for x in self.grid]   # (min, max) depth candidates at each column
     pieces = len(self.grid) - 1
     self.hidden_until = self.grid[0]   # the road is hidden on every piece before this column
@@ -204,18 +216,30 @@ class _RoadProfile:
     x0, x1, v0, v1 = xs[i - 1], xs[i], values[i - 1], values[i]
     return v0 + (v1 - v0) * (x - x0) / (x1 - x0) if x1 > x0 else v1
 
+  def _lookup_at(self, x: float) -> tuple:
+    sides = []
+    for line in (self.left, self.right):
+      z = self._at(line[0], line[2], x) if line is not None else None
+      sides.append(None if z is None else (self._at(line[0], line[1], x), z))
+    plan = self._at(self.plan[0], self.plan[2], x) if self.plan is not None else None
+    return sides[0], sides[1], plan
+
   def _lookup(self, x: float) -> tuple:
-    """((y, z) of the left line, of the right line, plan z) at x, each None where absent; memoised per message
-    (lane lines share sample columns, and the solver revisits points)."""
-    hit = self.lookups.get(x)
-    if hit is None:
-      sides = []
-      for line in (self.left, self.right):
-        z = self._at(line[0], line[2], x) if line is not None else None
-        sides.append(None if z is None else (self._at(line[0], line[1], x), z))
-      plan = self._at(self.plan[0], self.plan[2], x) if self.plan is not None else None
-      hit = self.lookups[x] = (sides[0], sides[1], plan)
-    return hit
+    """((y, z) of the left line, of the right line, plan z) at x, each None where absent. Every line sample inside
+    the grid is a column, so between two columns each value is linear and a line is there only if it is at both
+    columns: one bisect and a blend instead of a bisect per line and value."""
+    grid = self.lookup_x
+    i = bisect.bisect_left(grid, x)
+    if i < len(grid) and grid[i] == x:
+      return self.at_columns[i]
+    if i == 0 or i == len(grid):
+      return self._lookup_at(x)
+    t = (x - grid[i - 1]) / (grid[i] - grid[i - 1])
+    a, b = self.at_columns[i - 1], self.at_columns[i]
+    left = (a[0][0] + t * (b[0][0] - a[0][0]), a[0][1] + t * (b[0][1] - a[0][1])) if a[0] and b[0] else None
+    right = (a[1][0] + t * (b[1][0] - a[1][0]), a[1][1] + t * (b[1][1] - a[1][1])) if a[1] and b[1] else None
+    plan = a[2] + t * (b[2] - a[2]) if a[2] is not None and b[2] is not None else None
+    return left, right, plan
 
   def depth(self, x: float, y: float | None = None) -> float:
     left, right, plan = self._lookup(x)
@@ -265,13 +289,21 @@ class _RoadProfile:
     return width if width > 0.5 and -2.0 < (y - sides[0]) / width < 3.0 else 1.0
 
   def _regimes(self, a: float, b: float, y_at: Any) -> list:
-    """Split a sample piece where the depth formula changes: lane width 0.5 m, lateral mix clamps at -2 and 3."""
+    """Split a sample piece where the depth formula changes: lane width 0.5 m, lateral mix clamps at -2 and 3.
+    Inside one grid interval both lane lines are linear (or absent), so their columns give them directly."""
     cuts = [a, b]
     m1, m2 = a + (b - a) / 3.0, a + 2.0 * (b - a) / 3.0
-    s1, s2 = self._sides(m1), self._sides(m2)
-    if s1 is not None and s2 is not None:
-      w1, w2 = s1[2] - s1[0], s2[2] - s2[0]
-      u1, u2 = y_at(m1) - s1[0], y_at(m2) - s2[0]
+    i = min(len(self.grid) - 2, max(0, bisect.bisect_right(self.grid, m1) - 1))
+    c0, c1 = self.side_columns[i], self.side_columns[i + 1]
+    if c0 is not None and c1 is not None:
+      x0, x1 = self.grid[i], self.grid[i + 1]
+
+      def side(m: float) -> tuple:
+        t = (m - x0) / (x1 - x0)
+        y_left = c0[0] + t * (c1[0] - c0[0])
+        return y_left, c0[2] + t * (c1[2] - c0[2]) - y_left   # left line, width
+      (l1, w1), (l2, w2) = side(m1), side(m2)
+      u1, u2 = y_at(m1) - l1, y_at(m2) - l2
       for g1, g2 in ((w1 - 0.5, w2 - 0.5), (u1 + 2.0 * w1, u2 + 2.0 * w2), (u1 - 3.0 * w1, u2 - 3.0 * w2)):
         if g1 != g2:   # each is linear in x on the piece
           x = m1 + (m2 - m1) * g1 / (g1 - g2)
@@ -438,7 +470,7 @@ def _surface_stretch(points: list, surface: Any) -> list:
       xa, ya = x, stretch[-1][1]
     exit_x = surface.crossing(xa, ya, xb, yb, visible=True)
     end = at(exit_x) if exit_x is not None else (xb, yb, surface.depth(xb, yb))
-    inner = [at(x) for x in surface.between(stretch[-1][0], end[0])]
+    inner = _road_candidates(surface, at, stretch[-1], end)
     stretch += _bends(stretch[-1], inner, end) + [end]   # the road's own shape between the line's samples
     if exit_x is not None:
       break
@@ -446,6 +478,68 @@ def _surface_stretch(points: list, surface: Any) -> list:
 
 
 SHAPE_TOLERANCE_PX = 0.3
+REFINE_TOLERANCE_PX = 0.1   # candidates are found finer than they are kept
+REFINE_DEPTH = 8
+
+
+def _road_candidates(surface: Any, at: Any, first: tuple, last: tuple) -> list:
+  """Road points strictly between the road points first and last of one straight line segment that can carry the
+  road's shape.
+
+  At every column where depth's form changes the road point is a candidate; where it can jump (a lane line's
+  samples end, the lane width passes 0.5 m, the lateral mix clamps) both sides are. Between those, midpoints are
+  added wherever the curved surface leaves the straight view segment by more than REFINE_TOLERANCE_PX.
+  _bends then keeps what shows."""
+  start, end = first[0], last[0]
+  if not end > start:
+    return []
+  slope = (last[1] - first[1]) / (end - start)
+
+  def y_at(x: float) -> float:
+    return first[1] + slope * (x - start)
+  inset = 1e-6
+  cuts = [start] + surface.between(start, end) + [end]
+  marks = []   # inner boundaries in order: (x, may jump)
+  for a, b in zip(cuts, cuts[1:], strict=False):
+    marks += [(p, True) for p, _ in surface._regimes(a, b, y_at)[1:]]
+    if b < end:
+      marks.append((b, b in surface.edges))
+  points, anchor = [], first
+  if start in surface.edges:
+    anchor = at(start + inset)
+    points.append(anchor)
+  for x, jump in marks:
+    if jump:
+      before, after = at(x - inset), at(x + inset)
+      _refine(at, anchor, before, points)
+      points += [before, after]
+      anchor = after
+    else:
+      here = at(x)
+      _refine(at, anchor, here, points)
+      points.append(here)
+      anchor = here
+  if end in surface.edges:
+    before = at(end - inset)
+    _refine(at, anchor, before, points)
+    points.append(before)
+  else:
+    _refine(at, anchor, last, points)
+  return points
+
+
+def _refine(at: Any, a: tuple, b: tuple, points: list, views: tuple | None = None, level: int = 0) -> None:
+  """Midpoints between road points a and b where the surface leaves their straight view segment."""
+  if level >= REFINE_DEPTH:
+    return
+  va, vb = views if views is not None else (_view_uv(*a), _view_uv(*b))
+  middle = at((a[0] + b[0]) / 2.0)
+  vm = _view_uv(*middle)
+  if va is None or vb is None or vm is None or _off_line(vm, va, vb) <= REFINE_TOLERANCE_PX:
+    return
+  _refine(at, a, middle, points, (va, vm), level + 1)
+  points.append(middle)
+  _refine(at, middle, b, points, (vm, vb), level + 1)
 
 
 def _bends(start: tuple, inner: list, end: tuple) -> list:
