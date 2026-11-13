@@ -416,12 +416,19 @@ class _RoadProfile:
     """Sample columns strictly between a and b."""
     return self.grid[bisect.bisect_right(self.grid, a):bisect.bisect_left(self.grid, b)]
 
+  def in_view(self, x: float, y: float, after: bool) -> float:
+    """x, or the point just after (entering) / before (leaving) it when the road at x itself is the hidden side of
+    a jump (lane width 0.5 m): lines and vehicles take the same side."""
+    if x - VIEW_K * self.depth(x, y) >= -1e-6:
+      return x
+    return x + 1e-6 if after else x - 1e-6
+
   def entry(self, y: float = 0.0) -> float:
-    """First distance where the road at lateral y enters the bottom row (x = K depth)."""
+    """First distance where the road at lateral y enters the bottom row (x = K depth), on the side in view."""
     key = round(y, 4)
     if key not in self.entries:
       x = self.crossing(self.grid[0], key, self.grid[-1], key, visible=False)
-      self.entries[key] = VIEW_K * DEFAULT_ROAD_DEPTH_M if x is None else x
+      self.entries[key] = VIEW_K * DEFAULT_ROAD_DEPTH_M if x is None else self.in_view(x, key, True)
     return self.entries[key]
 
 
@@ -505,17 +512,16 @@ def _surface_stretch(points: list, surface: Any) -> list:
       if x is None:
         continue
       started = True
-      point = at(x)
-      if x - VIEW_K * point[2] < -1e-6 and xb > x + 1e-6:   # entered at a jump (lane width 0.5 m): the side in view
-        point = at(x + 1e-6)
+      point = at(min(surface.in_view(x, at(x)[1], True), xb))   # entered at a jump: the side in view
       stretch.append(point)
       if not xb > point[0]:
         continue
       xa, ya = point[0], point[1]
     exit_x = surface.crossing(xa, ya, xb, yb, visible=True)
-    end = at(exit_x) if exit_x is not None else (xb, yb, surface.depth(xb, yb))
-    if exit_x is not None and exit_x - VIEW_K * end[2] < -1e-6 and exit_x - 1e-6 > xa:   # left at a jump
-      end = at(exit_x - 1e-6)
+    if exit_x is not None:
+      end = at(max(surface.in_view(exit_x, at(exit_x)[1], False), xa))   # left at a jump: the side in view
+    else:
+      end = (xb, yb, surface.depth(xb, yb))
     inner = _road_candidates(surface, at, stretch[-1], end)
     stretch += _bends(stretch[-1], inner, end) + [end]   # the road's own shape between the line's samples
     if exit_x is not None:
@@ -549,23 +555,27 @@ def _road_candidates(surface: Any, at: Any, first: tuple, last: tuple) -> list:
     _refine(surface, at, y0, slope, a, b, points)
   inset = 1e-6
   cuts = [start] + surface.between(start, end) + [end]
-  marks = []   # inner boundaries in order: (x, may jump), clear of the ends (a solved end may sit on a boundary)
+  marks = []   # inner boundaries in order: (x, may jump)
   for a, b in zip(cuts, cuts[1:], strict=False):
     marks += [(p, True) for p, _ in surface._regimes(a, b, y_at)[1:]]
     if b < end:
       marks.append((b, b in surface.edges))
-  marks = [(x, jump) for x, jump in marks if start + 2.0 * inset < x < end - 2.0 * inset]
   points: list = []
   anchor = first
   if start in surface.edges:
     anchor = at(start + inset)
     points.append(anchor)
   for x, jump in marks:
-    if jump:
-      before, after = at(x - inset), at(x + inset)
-      refine(anchor, before)
-      points += [before, after]
-      anchor = after
+    if jump:   # each side that lies inside; a solved end can sit within the inset of a jump
+      if x - inset > start:
+        before = at(x - inset)
+        refine(anchor, before)
+        points.append(before)
+        anchor = before
+      if x + inset < end:
+        after = at(x + inset)
+        points.append(after)
+        anchor = after
     else:
       here = at(x)
       refine(anchor, here)
@@ -592,8 +602,10 @@ def _refine(surface: Any, at: Any, y0: float, slope: float, a: tuple, b: tuple, 
   if va is None or vb is None:
     return
   du, dv = vb[0] - va[0], vb[1] - va[1]
+  # across and along the view segment; when both ends project to one point, along both view axes
+  directions = ((dv, -du), (du, dv)) if du * du + dv * dv > 1e-18 else ((1.0, 0.0), (0.0, 1.0))
   best = None
-  for x in surface.extrema(a[0], b[0], y0, slope, dv, -du) + surface.extrema(a[0], b[0], y0, slope, du, dv):
+  for x in [x for a_, b_ in directions for x in surface.extrema(a[0], b[0], y0, slope, a_, b_)]:
     point = at(x)
     view = _view_uv(*point)
     if view is not None:

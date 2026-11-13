@@ -310,6 +310,40 @@ def test_a_path_keeps_a_crest_past_the_segment_end():
   assert worst_miss(_profile(m), c['position_x'], ys, drawn) <= 0.5   # was 1.24 px: the 60 m crest was dropped
 
 
+R9 = {   # Codex review r9
+  'degenerate': dict(lane_x=[0.0, 80.0], left_y=[-2.0, 3.0], right_y=[2.0, 7.0], left_z=[0.04296875, 5.35546875],
+                     right_z=[0.54296875, 4.60546875], position_x=[0.0, 6.0, 20.0, 60.0, 80.0],
+                     position_y=[0.0, -1.0, -1.0, -1.0, -1.0]),
+  'jump_vehicle': dict(lane_x=[0.0, 80.0], left_y=[-0.1875, -0.8125], right_y=[0.1875, 0.8125], left_z=[2.25, 2.25],
+                       right_z=[1.75, 1.75], position_x=[0.0, 80.0], position_y=[0.0, 0.0]),
+  'near_end': dict(lane_x=[0.0, 80.0], left_y=[-0.1875, -0.4375], right_y=[0.1875, 0.4375], left_z=[2.25, 2.25],
+                   right_z=[1.75, 1.75], position_x=[0.0, 20.000001907348633], position_y=[0.0, 0.0]),
+}
+
+
+def r9_model(c):
+  left, right = NS(x=c['lane_x'], y=c['left_y'], z=c['left_z']), NS(x=c['lane_x'], y=c['right_y'], z=c['right_z'])
+  return NS(position=NS(x=c['position_x'], y=c['position_y']), laneLines=[left, left, right, right], laneLineProbs=[0.9] * 4)
+
+
+@pytest.mark.parametrize('case', ['degenerate', 'near_end'])
+def test_the_path_keeps_its_shape_at_degenerate_ends(case):
+  # degenerate: two ends project to one view point (20 m and 60 m); near_end: a width jump 1.9 um before the end
+  c = R9[case]
+  m = r9_model(c)
+  right = navdy_model_geometry(m)['navPathRight']
+  drawn = list(zip(right[::2], right[1::2]))
+  assert worst_miss(_profile(m), c['position_x'], [y + 1.0 for y in c['position_y']], drawn) <= 0.5
+
+
+def test_a_near_vehicle_and_the_line_take_the_same_side_of_a_jump():
+  m = r9_model(R9['jump_vehicle'])   # the lane width passes 0.5 m at 8 m, where the road enters the view
+  right = navdy_model_geometry(m)['navPathRight']
+  near = navdy_vehicle_view(m, 2.0, 1.0)
+  assert (near['screenX'], near['screenY']) == (right[0], right[1])
+  assert near['screenY'] < VIEW_BOTTOM_Y - 30.0   # the road just past the jump, not the hidden side at it
+
+
 def test_a_slanted_segment_starting_on_hidden_road_keeps_its_line():
   m = model()   # one long path segment from 0 m: the search skips the hidden near road but stays on the same line
   m.position = NS(x=[0.0, 80.0], y=[0.0, 4.0])
