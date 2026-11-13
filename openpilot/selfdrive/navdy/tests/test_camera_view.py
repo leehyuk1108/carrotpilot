@@ -53,44 +53,86 @@ def test_stopped_short_path_still_draws_lanes_and_vehicles():
   assert geometry['navPathLeft'] == geometry['navPathRight'] == list(HIDDEN_BAND)   # zero-area band off the view
 
 
+FAST = 20.0   # m/s ego speed: separate vehicles cannot follow within CLUSTER_GAP_M
+TRUCK_SIDE = [(8.7, 3.46), (11.1, 2.63), (14.0, 2.58)]   # one dump truck (2026-11-13 log, ego 10.5 km/h)
+
+
 def test_truck_side_points_become_one_vehicle_at_its_rear():
-  points = [entry(8.7, 3.46), entry(11.1, 2.63), entry(14.0, 2.58)]   # one dump truck (2026-11-13 log)
-  merged = merge_long_vehicles(points)
+  merged = merge_long_vehicles([entry(*p) for p in TRUCK_SIDE], FAST)
   assert [(v['distanceM'], v['lateralM'], v.get('kind')) for v in merged] == [(8.7, 3.46, 'truck')]
+  vouched = merge_long_vehicles([entry(*p) for p in TRUCK_SIDE], 10.5 / 3.6, trucks=[(11.5, 3.3)])
+  assert [(v['distanceM'], v.get('kind')) for v in vouched] == [(8.7, 'truck')]   # slow, but the camera saw a truck
+
+
+def test_slow_dense_run_without_a_camera_truck_keeps_every_point():
+  queue = [entry(10.0 + 3.0 * i, 3.2) for i in range(4)]   # Codex review: two cars with two points each, say
+  assert len(merge_long_vehicles(queue)) == 4                                    # no speed known
+  assert len(merge_long_vehicles(queue, 0.0)) == 4                               # stopped
+  assert len(merge_long_vehicles(queue, 10.5 / 3.6)) == 4                        # crawling
+  assert len(merge_long_vehicles([entry(*p) for p in TRUCK_SIDE], 10.5 / 3.6)) == 3
+  passing = [entry(10.0 + 3.0 * i, 3.2, speed=-15.0) for i in range(4)]          # we pass a crawling queue at 72 km/h
+  assert len(merge_long_vehicles(passing, FAST)) == 4
+  assert len(merge_long_vehicles(queue, FAST)) == 1                              # 3 m bumper gaps at 72 km/h: one body
+
+
+def test_only_a_camera_truck_inside_the_run_vouches_for_it():
+  queue = [entry(10.0 + 3.0 * i, 3.2) for i in range(4)]
+  assert len(merge_long_vehicles(queue, 0.0, trucks=[(15.0, -3.3)])) == 4         # truck in the other lane
+  assert len(merge_long_vehicles(queue, 0.0, trucks=[(30.0, 3.2)])) == 4          # truck well ahead of the run
+  assert len(merge_long_vehicles(queue, 0.0, trucks=[(20.5, 3.4)])) == 1          # truck at its front end
+
+
+def test_overlay_uses_the_ego_speed_and_the_camera_trucks():
+  from openpilot.selfdrive.navdy.tests.test_display import car, payload as make_payload
+  from openpilot.selfdrive.navdy.tests.test_vehicles import data, point
+  from openpilot.selfdrive.navdy.vehicles import VehicleOverlay
+  radar = data([point(i + 1, 10.0 + 3.0 * i, -3.2, 0.0) for i in range(4)])   # radar left-positive: right lane
+
+  def shown(speed, objects=None):
+    overlay, m = VehicleOverlay(), model()
+    for t in (100.0, 100.2):
+      result = make_payload(model=m, car_state=car(vEgo=speed, vEgoCluster=0))
+      overlay.update(result, m, radar, timestamp=t, now=t, camera_objects=objects)
+    return [v for v in result['navVehicles'] if v['source'] == 'radar']
+
+  assert len(shown(2.0)) == 4
+  assert len(shown(20.0)) == 1 and shown(20.0)[0]['kind'] == 'truck'
+  assert len(shown(2.0, [{'id': 3, 'kind': 'truck', 'distance': 15.0, 'lateral': 3.2}])) == 1
+  assert len(shown(2.0, [{'id': 3, 'kind': 'car', 'distance': 15.0, 'lateral': 3.2}])) == 4
 
 
 def test_separate_cars_and_other_lanes_stay_separate():
   queue = [entry(10.0, 3.2), entry(16.5, 3.4), entry(23.0, 3.3)]       # a car length plus a gap apart
-  assert len(merge_long_vehicles(queue)) == 3
-  assert len(merge_long_vehicles([entry(10.0, 3.2), entry(13.6, 3.2)])) == 2   # 3.6 m: not one vehicle
+  assert len(merge_long_vehicles(queue, FAST)) == 3
+  assert len(merge_long_vehicles([entry(10.0, 3.2), entry(13.6, 3.2)], FAST)) == 2   # 3.6 m: not one vehicle
   side_by_side = [entry(10.0, 3.3), entry(11.0, -3.3, lane='left')]
-  assert len(merge_long_vehicles(side_by_side)) == 2
+  assert len(merge_long_vehicles(side_by_side, FAST)) == 2
   offset = [entry(10.0, 2.0), entry(12.0, 4.0)]                        # 2 m apart sideways
-  assert len(merge_long_vehicles(offset)) == 2
+  assert len(merge_long_vehicles(offset, FAST)) == 2
 
 
 def test_two_close_points_stay_two_and_a_camera_kind_wins():
-  assert len(merge_long_vehicles([entry(10.0, 3.2), entry(12.8, 3.2)])) == 2   # two motorcycles can be that close
-  named = merge_long_vehicles([entry(8.0, 3.0, kind='car'), entry(11.0, 3.0), entry(14.0, 3.0)])
+  assert len(merge_long_vehicles([entry(10.0, 3.2), entry(12.8, 3.2)], FAST)) == 2   # two motorcycles can be that close
+  named = merge_long_vehicles([entry(8.0, 3.0, kind='car'), entry(11.0, 3.0), entry(14.0, 3.0)], FAST)
   assert [v.get('kind') for v in named] == ['car']
 
 
 def test_drifting_speed_or_side_cannot_chain_a_run():
   speeds = [entry(10.0 + 3.0 * i, 3.2, speed=1.4 * i) for i in range(5)]       # 1.4 m/s per step, 5.6 m/s in all
-  assert len(merge_long_vehicles(speeds)) == 5                                  # no run of three: nothing merged
+  assert len(merge_long_vehicles(speeds, FAST)) == 5                            # no run of three: nothing merged
   sides = [entry(10.0 + 3.0 * i, 2.0 + 0.7 * i) for i in range(4)]
-  assert len(merge_long_vehicles(sides)) == 4
+  assert len(merge_long_vehicles(sides, FAST)) == 4
 
 
 def test_points_moving_apart_or_across_are_separate_vehicles():
   crossing = [entry(10.0, 2.2, speed=-12.0), entry(13.0, 3.0, speed=12.0)]   # e.g. a motorcycle passing
-  assert len(merge_long_vehicles(crossing)) == 2
-  assert len(merge_long_vehicles([entry(10.0, 2.2), entry(12.0, 3.6)])) == 2   # 1.4 m sideways
+  assert len(merge_long_vehicles(crossing, FAST)) == 2
+  assert len(merge_long_vehicles([entry(10.0, 2.2), entry(12.0, 3.6)], FAST)) == 2   # 1.4 m sideways
 
 
 def test_a_run_longer_than_any_vehicle_is_split():
   run = [entry(10.0 + 3.0 * i, 3.2) for i in range(10)]                         # 27 m of points 3 m apart
-  merged = merge_long_vehicles(run)
+  merged = merge_long_vehicles(run, FAST)
   assert len(merged) == 2 and merged[0]['distanceM'] == 10.0 and merged[0]['kind'] == 'truck'
 
 
@@ -160,6 +202,20 @@ def test_the_first_crossing_is_found_even_in_a_short_gap():
   line = navdy_model_geometry(m)['navLaneRight']
   near = navdy_vehicle_view(m, 2.0, 1.8)
   assert near['screenX'] == pytest.approx(line[0], abs=0.15) and line[1] == near['screenY'] == VIEW_BOTTOM_Y
+
+
+def test_bottom_crossing_is_solved_on_the_bent_surface():
+  m = model()   # Codex review 2026-11-13: lane positions and heights both change inside one sample segment
+  xs = [0.0, 10.0, 20.0, 40.0, 60.0, 80.0]
+  m.laneLines[1].x, m.laneLines[1].y, m.laneLines[1].z = xs[:], [-1.8] + [-0.8] * 5, [1.16] + [1.56] * 5
+  m.laneLines[2].x, m.laneLines[2].y, m.laneLines[2].z = xs[:], [1.8] + [2.8] * 5, [1.56] + [1.16] * 5
+  x = bottom_distance(m, 1.0)
+  assert x == pytest.approx(6.92455, abs=2e-3)                     # the chord solution was 7.139 m
+  assert abs(x - VIEW_K * road_depth_at(m, x, 1.0)) < 2e-3          # on the surface: no residual
+  near = navdy_vehicle_view(m, 2.0, 1.0)
+  path_right = navdy_model_geometry(m)['navPathRight']
+  assert near['screenY'] == VIEW_BOTTOM_Y == path_right[1]
+  assert near['screenX'] == pytest.approx(path_right[0], abs=0.15)  # the near vehicle meets the path edge on the row
 
 
 def test_short_path_with_a_zero_depth_end_does_not_raise():

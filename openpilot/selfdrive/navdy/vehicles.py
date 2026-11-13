@@ -17,6 +17,11 @@ CLUSTER_LATERAL_M = 1.2  # within a truck's width
 CLUSTER_SPEED_MPS = 1.5  # moving together
 CLUSTER_MAX_M = 18.0     # no single vehicle is longer
 CLUSTER_TRUCK_M = 4.5    # points spread over this length: a long vehicle
+# Evidence that a dense run is one vehicle, not a queue (Codex review 2026-11-13): from about 40 km/h separate
+# vehicles keep more than CLUSTER_GAP_M bumper to bumper (0.4 s is 4.4 m), so a chain of shorter gaps cannot
+# cross from one to the next; slower, a queue can be that dense.
+CLUSTER_MIN_SPEED_MPS = 11.0
+CLUSTER_TRUCK_GATE_M = 2.0  # a stock camera truck within the run's extent (plus this) vouches for it at any speed
 
 
 def vehicle_lane(model, distance, lateral):
@@ -97,14 +102,35 @@ def vehicle_yaw(model, lane, distance, lateral):
   return rounded(max(-24.0, min(24.0, -yaw)))
 
 
-def merge_long_vehicles(entries):
+def _truck_points(objects):
+  points = []
+  for obj in objects or ():
+    if obj.get('kind') != 'truck':
+      continue
+    distance, lateral = finite_float(obj.get('distance'), math.nan), finite_float(obj.get('lateral'), math.nan)
+    if math.isfinite(distance) and math.isfinite(lateral):
+      points.append((distance, lateral))
+  return points
+
+
+def _one_vehicle(rear, last, ego_speed, trucks):
+  if ego_speed is not None and math.isfinite(ego_speed) and ego_speed + rear['relativeSpeedMps'] >= CLUSTER_MIN_SPEED_MPS:
+    return True
+  return any(rear['distanceM'] - CLUSTER_TRUCK_GATE_M <= distance <= last['distanceM'] + CLUSTER_TRUCK_GATE_M
+             and abs(lateral - rear['lateralM']) < CAMERA_GATE_LATERAL for distance, lateral in trucks)
+
+
+def merge_long_vehicles(entries, ego_speed=None, trucks=()):
   """A truck or bus returns several radar points along its side; draw it once, at its rearmost point.
 
   From each rearmost point r, later points in the same lane join while each is within CLUSTER_GAP_M of the previous
   one, and all stay within CLUSTER_LATERAL_M and CLUSTER_SPEED_MPS of r and CLUSTER_MAX_M behind it. A run is one
   vehicle only with at least three points (the side of a long vehicle); two points are kept as they are, since
-  two short vehicles or a motorcycle can be that close. Spread over CLUSTER_TRUCK_M or more it is drawn as a truck
-  unless the camera names it later."""
+  two short vehicles or a motorcycle can be that close. A run is merged only with evidence that separate vehicles
+  could not make it: it moves at CLUSTER_MIN_SPEED_MPS or more (ego_speed in m/s plus its relative speed), or the
+  stock camera reports a truck within it (trucks: (distance, lateral) in the radar frame). Otherwise every point is
+  kept: a slow queue can be that dense. Spread over CLUSTER_TRUCK_M or more it is drawn as a truck unless the
+  camera names it later."""
   merged, used = [], set()
   ordered = sorted(entries, key=lambda vehicle: vehicle['distanceM'])
   for i, rear in enumerate(ordered):
@@ -121,7 +147,7 @@ def merge_long_vehicles(entries):
           and abs(other['relativeSpeedMps'] - rear['relativeSpeedMps']) < CLUSTER_SPEED_MPS):
         run.append(j)
         last = other
-    if len(run) < 3:
+    if len(run) < 3 or not _one_vehicle(rear, last, ego_speed, trucks):
       merged.append(rear)
       continue
     used.update(run[1:])
@@ -146,8 +172,9 @@ class VehicleOverlay:
     self.display_data = None
     self.alignment = None
 
-  def update(self, payload, model, data, *, timestamp, now, radar_alignment=None):
-    """radar_alignment (car.radar_display_alignment.RadarDisplayAlignment or None): radar lateral -> camera frame."""
+  def update(self, payload, model, data, *, timestamp, now, radar_alignment=None, camera_objects=None):
+    """radar_alignment (car.radar_display_alignment.RadarDisplayAlignment or None): radar lateral -> camera frame.
+    camera_objects (CameraObjects.snapshot objects or None): stock camera trucks vouch for merging a truck's points."""
     errors = getattr(data, 'errors', None)
     if (not (payload['active'] or payload.get('roadPreview')) or not payload.get('navPathLeft') or data is None or errors is None
         or any(bool(getattr(errors, name, False)) for name in
@@ -227,7 +254,9 @@ class VehicleOverlay:
         'relativeSpeedMps': rounded(track['vRel']), 'lateralM': rounded(lateral, 2),
         'lane': lane, 'source': 'radar', 'longitudinalLead': False, 'confidence': 0.65,
       })
-    surrounding = merge_long_vehicles(surrounding)
+    ego_speed = finite_float(payload.get('vEgoKph'), math.nan) / 3.6
+    surrounding = merge_long_vehicles(surrounding, ego_speed if math.isfinite(ego_speed) else None,
+                                      _truck_points(camera_objects))
     surrounding.sort(key=lambda vehicle: vehicle['distanceM'])
     selected = leads + surrounding[:max(0, MAX_VEHICLES - len(leads))]
     payload['navVehicles'] = sorted(selected, key=lambda vehicle: vehicle['distanceM'], reverse=True)

@@ -227,12 +227,14 @@ def live_payload(sm, sequence, *, sources=None, door_open=False, ambient_overrid
     model=recent('modelV2'), radar_state=recent('radarState'), longitudinal_plan=recent('longitudinalPlan'),
     carrot_man=recent('carrotMan'), door_open=door_open, radar_alignment=radar_alignment,
   )
+  objects = lamps = None
+  if camera is not None:
+    objects, lamps = camera.snapshot(time.monotonic())  # one consistent observation: lamps carry the id they belong to
   if vehicles is not None:
     vehicles.update(payload, recent('modelV2'), recent('liveTracks'),
-                    timestamp=sm.logMonoTime['liveTracks'] / 1e9, now=time.monotonic(), radar_alignment=radar_alignment)
+                    timestamp=sm.logMonoTime['liveTracks'] / 1e9, now=time.monotonic(), radar_alignment=radar_alignment,
+                    camera_objects=objects)
   if camera is not None:
-    now = time.monotonic()
-    objects, lamps = camera.snapshot(now)  # one consistent observation: lamps carry the id they belong to
     annotate_camera(payload, recent('modelV2'), objects, lamps)
   # Offroad has no card/selfdrived messages. Ambient/power state instead comes
   # from fresh device/panda state; never grant active telemetry from this path.

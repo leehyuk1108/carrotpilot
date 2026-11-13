@@ -147,6 +147,47 @@ def _depth(value: Any) -> float | None:
   return z if math.isfinite(z) and abs(z) <= MAX_DEPTH_M else None
 
 
+CROSSING_RESIDUAL_M = 1e-6  # |x - K depth| at a solved crossing: far below 0.1 px
+
+
+def _surface_crossing(g: Any, a: float, b: float, tol: float, steps: int = 2) -> float:
+  """First parameter in [a, b] where the continuous g (metres) leaves the sign it has at a, solved on g itself.
+
+  g >= 0 is the visible side. A short sub-scan finds the first change when the surface bends inside [a, b]; the
+  bracket is then closed by regula falsi with the Illinois step (a few evaluations), down to a residual of
+  CROSSING_RESIDUAL_M or a bracket of tol, whose visible end is returned."""
+  g_lo = g(a)
+  inside = g_lo >= 0.0
+  lo = a
+  for step in range(1, steps + 1):
+    hi = a + (b - a) * step / steps
+    g_hi = g(hi)
+    if (g_hi >= 0.0) != inside:
+      break
+    lo, g_lo = hi, g_hi
+  else:
+    return b
+  kept = 0
+  for _ in range(60):
+    if hi - lo <= tol:
+      break
+    mid = lo + (hi - lo) * g_lo / (g_lo - g_hi) if g_lo != g_hi else (lo + hi) / 2.0
+    if not lo < mid < hi:
+      mid = (lo + hi) / 2.0
+    g_mid = g(mid)
+    if abs(g_mid) <= CROSSING_RESIDUAL_M:
+      return mid
+    if (g_mid >= 0.0) == inside:
+      lo, g_lo = mid, g_mid
+      g_hi = g_hi / 2.0 if kept == 1 else g_hi   # Illinois: the far end stayed twice, so pull the next point to it
+      kept = 1
+    else:
+      hi, g_hi = mid, g_mid
+      g_lo = g_lo / 2.0 if kept == -1 else g_lo
+      kept = -1
+  return lo if inside else hi
+
+
 class _RoadProfile:
   """The road surface of one model message, parsed once (lookups run many times per payload).
 
@@ -220,15 +261,17 @@ class _RoadProfile:
     return self.entries[key]
 
   def _entry(self, y: float) -> float:
+    def below(x: float) -> float:   # >= 0 where the road at (x, y) is in view
+      return x - VIEW_K * self.depth(x, y)
+
     prev_x = self.grid[0]
-    prev_f = prev_x - VIEW_K * self.depth(prev_x, y)
-    if prev_f >= 0.0:
+    if below(prev_x) >= 0.0:
       return prev_x
     for x in self.grid[1:]:
-      f = x - VIEW_K * self.depth(x, y)
-      if f >= 0.0:
-        return prev_x + (x - prev_x) * (-prev_f) / (f - prev_f)
-      prev_x, prev_f = x, f
+      if below(x) >= 0.0:
+        # depth(x, y) mixes the lane heights across, so it bends inside a sample segment: solve on it, not a chord
+        return _surface_crossing(below, prev_x, x, tol=1e-5)  # 0.01 mm: well under 0.1 px
+      prev_x = x
     return VIEW_K * DEFAULT_ROAD_DEPTH_M
 
 
@@ -302,7 +345,8 @@ def navdy_model_line(x_values: Any, y_values: Any, z_values: Any = None, lateral
 
   depth(x, y): the road surface (road_depth_at); every sample uses it, so lines, path and vehicles share one road.
   Without it, z_values (a valid per-sample depth) or the flat default. The stretch starts where the 3D line enters the
-  bottom row (x = K z) and, if it later drops out again (a crest), ends where it leaves; both on the 3D line."""
+  bottom row (x = K z) and, if it later drops out again (a crest), ends where it leaves: on the road surface when
+  depth is given (solved on it, as vehicles are), else on the 3D chord between samples."""
   points = [(x, y) for x, y in _model_points(x_values, y_values) if x <= MAX_DISTANCE_M]
   zs = _line_depths(z_values, from_line=False)
   road = []
@@ -317,6 +361,13 @@ def navdy_model_line(x_values: Any, y_values: Any, z_values: Any = None, lateral
 
   def crossing(a, b):
     (x0, y0, z0), (x1, y1, z1) = a, b
+    if depth is not None:   # on the road surface itself, where a vehicle at the same lateral meets the bottom row too
+      def visible_by(t):
+        x = x0 + t * (x1 - x0)
+        return min(x - VIEW_K * depth(x, y0 + t * (y1 - y0)), x - VIEW_MIN_X_M)
+      t = _surface_crossing(visible_by, 0.0, 1.0, tol=1e-6)
+      x, y = x0 + t * (x1 - x0), y0 + t * (y1 - y0)
+      return x, y, depth(x, y)
     denominator = (x1 - x0) - VIEW_K * (z1 - z0)
     t = (VIEW_K * z0 - x0) / denominator if denominator != 0.0 else 1.0
     t = max(0.0, min(1.0, t))
