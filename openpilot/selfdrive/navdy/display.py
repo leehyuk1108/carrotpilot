@@ -8,6 +8,7 @@ All speed fields ending in Kph are km/h regardless of the vehicle's UI units.
 """
 from __future__ import annotations
 
+import bisect
 from itertools import islice
 import math
 from typing import Any
@@ -145,45 +146,95 @@ def _depth(value: Any) -> float | None:
   return z if math.isfinite(z) and abs(z) <= MAX_DEPTH_M else None
 
 
+class _RoadProfile:
+  """The model's road height, parsed once per model message (lookups run many times per payload)."""
+
+  def __init__(self, model: Any):
+    self.lanes = []
+    for line in _items(getattr(model, "laneLines", None), 3)[1:3]:
+      zs = _line_depths(line)
+      points = _model_points(getattr(line, "x", None), zs) if zs is not None else []
+      if points:
+        self.lanes.append(([x for x, _ in points], [z for _, z in points]))
+    position = getattr(model, "position", None)
+    zs = _line_depths(position)
+    points = _model_points(getattr(position, "x", None), zs) if zs is not None else []
+    self.plan = ([x for x, _ in points], [z for _, z in points]) if points else None
+    self.entry = None
+
+  @staticmethod
+  def _at(xs: list, zs: list, x: float) -> float | None:
+    if not xs[0] <= x <= xs[-1]:
+      return None
+    i = min(len(xs) - 1, max(1, bisect.bisect_left(xs, x)))
+    x0, x1, z0, z1 = xs[i - 1], xs[i], zs[i - 1], zs[i]
+    return _depth(z0 + (z1 - z0) * (x - x0) / (x1 - x0)) if x1 > x0 else _depth(z1)
+
+  def depth(self, x: float) -> float:
+    depths = [z for z in (self._at(xs, zs, x) for xs, zs in self.lanes) if z is not None]
+    if depths:
+      return sum(depths) / len(depths)
+    z = self._at(*self.plan, x) if self.plan else None
+    return DEFAULT_ROAD_DEPTH_M + z if z is not None else DEFAULT_ROAD_DEPTH_M
+
+  def bottom(self) -> float:
+    if self.entry is None:
+      self.entry = self._bottom()
+    return self.entry
+
+  def _bottom(self) -> float:
+    def ahead(x):
+      return x - VIEW_K * self.depth(x)
+    low = VIEW_MIN_X_M
+    if ahead(low) >= 0.0:
+      return low
+    x = low
+    while x < MAX_DISTANCE_M:
+      nxt = min(MAX_DISTANCE_M, x + 1.0)
+      if ahead(nxt) >= 0.0:
+        a, b = x, nxt
+        for _ in range(24):
+          mid = (a + b) / 2.0
+          a, b = (mid, b) if ahead(mid) < 0.0 else (a, mid)
+        return b
+      x = nxt
+    return VIEW_K * DEFAULT_ROAD_DEPTH_M
+
+
+_PROFILE_CACHE: list = [None, None]  # (key, profile): the one model message currently being drawn
+
+
+def _profile(model: Any) -> _RoadProfile:
+  """Reuse the parse while the same model message is drawn; a cheap content key guards a reused object id."""
+  lanes = _items(getattr(model, "laneLines", None), 3)
+  position = getattr(model, "position", None)
+
+  def edge(values):
+    try:
+      count = len(values)
+      return (count, finite_float(values[0], math.nan), finite_float(values[count - 1], math.nan)) if count else ()
+    except (TypeError, IndexError, KeyError):
+      return ()
+  key = (id(model), getattr(model, "frameId", None), edge(getattr(position, "x", None)), edge(getattr(position, "z", None)),
+         tuple(edge(getattr(line, "z", None)) + edge(getattr(line, "x", None)) for line in lanes[1:3]))
+  if _PROFILE_CACHE[0] != key:
+    _PROFILE_CACHE[0], _PROFILE_CACHE[1] = key, _RoadProfile(model)
+  return _PROFILE_CACHE[1]
+
+
 def road_depth_at(model: Any, x: float) -> float:
   """Depth of the road below the camera at camera distance x, one policy for lanes, path and vehicles.
 
   The mean of the own-lane lines' depth there (either one if only one has it), else the plan's height plus the
   default camera height, else the flat-road default. A rising road may give a small or negative depth; it is kept."""
-  depths = []
-  for line in _items(getattr(model, "laneLines", None), 3)[1:3]:
-    zs = _line_depths(line)
-    z = _depth(model_line_y_at_values(getattr(line, "x", None), zs, x)) if zs is not None else None
-    if z is not None:
-      depths.append(z)
-  if depths:
-    return sum(depths) / len(depths)
-  position = getattr(model, "position", None)
-  zs = _line_depths(position)
-  z = _depth(model_line_y_at_values(getattr(position, "x", None), zs, x)) if zs is not None else None
-  return DEFAULT_ROAD_DEPTH_M + z if z is not None else DEFAULT_ROAD_DEPTH_M
+  return _profile(model).depth(x)
 
 
 def bottom_distance(model: Any) -> float:
   """Camera distance where the road enters the bottom row: the first x with x >= K * depth(x).
 
   Found on the road profile itself (a slope moves it); the flat-road value when the profile never crosses."""
-  def ahead(x):
-    return x - VIEW_K * road_depth_at(model, x)
-  low = VIEW_MIN_X_M
-  if ahead(low) >= 0.0:
-    return low
-  x = low
-  while x < MAX_DISTANCE_M:
-    nxt = min(MAX_DISTANCE_M, x + 1.0)
-    if ahead(nxt) >= 0.0:
-      a, b = x, nxt
-      for _ in range(24):
-        mid = (a + b) / 2.0
-        a, b = (mid, b) if ahead(mid) < 0.0 else (a, mid)
-      return b
-    x = nxt
-  return VIEW_K * DEFAULT_ROAD_DEPTH_M
+  return _profile(model).bottom()
 
 
 def navdy_project_point(x_value: Any, y_value: Any, z_value: Any = DEFAULT_ROAD_DEPTH_M) -> list[float]:
@@ -208,8 +259,9 @@ def navdy_vehicle_view(model: Any, distance: float, lateral: float) -> dict[str,
   line), on the same road point and scale as the lanes there. None when invalid or outside the HUD band."""
   if not math.isfinite(distance) or not math.isfinite(lateral):
     return None
-  x = max(camera_x(distance), bottom_distance(model))
-  uv = _view_uv(x, lateral, road_depth_at(model, x))
+  profile = _profile(model)
+  x = max(camera_x(distance), profile.bottom())
+  uv = _view_uv(x, lateral, profile.depth(x))
   if uv is None or not VIEW_BAND_X[0] <= uv[0] <= VIEW_BAND_X[1]:
     return None
   return {"screenX": rounded(uv[0]), "screenY": rounded(min(uv[1], VIEW_BOTTOM_Y)), "pxPerM": rounded(VIEW_F / x, 2)}
@@ -279,7 +331,8 @@ def navdy_model_geometry(model: Any) -> dict[str, Any]:
   if position is None or len(lanes) < 3:
     return {}
   path_x, path_y = getattr(position, "x", None), getattr(position, "y", None)
-  road = lambda x: road_depth_at(model, x)  # noqa: E731  one height policy for every line
+  profile = _profile(model)
+  road = profile.depth  # one height policy for every line
 
   def line_points(line: Any) -> list[float]:
     return navdy_model_line(getattr(line, "x", None), getattr(line, "y", None), getattr(line, "z", None), depth=road)
@@ -290,7 +343,7 @@ def navdy_model_geometry(model: Any) -> dict[str, Any]:
   if path_points and not (path_left and path_right):
     # A short plan (stopped, creeping) ends under the hood line: nothing of the band is visible. Keep lanes and
     # vehicles drawn with a zero-area band on the bottom row where the road enters the view.
-    entry = bottom_distance(model)
+    entry = profile.bottom()
     end_y = path_points[-1][1]
     path_left, path_right = ([rounded(VIEW_CENTER_X + VIEW_F * (end_y + side) / entry), VIEW_BOTTOM_Y] * 2
                              for side in (-1.0, 1.0))

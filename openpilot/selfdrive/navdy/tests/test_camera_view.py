@@ -143,3 +143,14 @@ def test_lane_is_read_at_the_camera_distance_like_the_drawing():
     line.y = [y + 0.2 * x for x, y in zip(line.x, line.y)]
   # dRel 20 m is 21.52 m from the camera: lanes there are 0.304 m further right than at 20 m
   assert vehicle_lane(m, 20.0, 6.004) == 'center'
+
+
+def test_road_profile_is_parsed_once_per_message_but_never_stale():
+  m = model()
+  assert road_depth_at(m, 40.0) == pytest.approx(1.36)
+  for line in m.laneLines:                       # the same object now carries another road
+    line.z = [1.36 + 0.01 * x for x in line.x]
+  assert road_depth_at(m, 40.0) == pytest.approx(1.76)
+  other = sloped(-0.01)                          # a different message
+  assert road_depth_at(other, 40.0) == pytest.approx(0.96)
+  assert road_depth_at(m, 40.0) == pytest.approx(1.76)
