@@ -278,6 +278,16 @@ def select_for_modeld(cam_w: int, cam_h: int, now: float | None = None) -> Selec
     return None
 
 
+def mark_loading(selected: Selected, now: float | None = None) -> None:
+  """modeld is running the selected model outside the main loop (eGPU standby warmup); a crash there counts."""
+  try:
+    runtime = read_json(runtime_path())
+    _write_runtime(selected.model, selected.model.sha256, False, int(runtime.get("unhealthy_starts") or 0), None, now,
+                   loading=True)
+  except Exception:
+    pass
+
+
 def mark_loaded(selected: Selected, now: float | None = None) -> None:
   try:
     runtime = read_json(runtime_path())
@@ -303,37 +313,44 @@ def _block(selected: Selected, reason: str, now: float | None) -> None:
 
 
 class HealthTracker:
-  """Marks the selected custom model healthy after HEALTHY_PUBLISHES outputs it produced in this modeld start.
+  """Tracks the selected internal model in this modeld start.
 
-  Outputs of an eGPU or Jetlink model that runs while the selected model waits as the internal fallback do not count.
+  It is pending (a stop now counts as unhealthy) only while it produces the outputs: from its first inference until
+  HEALTHY_PUBLISHES of its outputs, and not while an eGPU or Jetlink model it handed over to produces them.
   """
 
   def __init__(self, selected: Selected | None):
     self.selected = selected
     self.published = 0
-    self.attempted = False
+    self.pending = False
 
-  def attempt(self, internal: bool = True) -> None:
-    """Called before an inference; the first one by the selected internal model starts tracking it."""
-    if self.selected is None or self.attempted or not internal:
-      return
-    self.attempted = True
+  def _write(self, pending: bool, used: bool, healthy: bool = False) -> None:
+    assert self.selected is not None
     try:
       runtime = read_json(runtime_path())
-      _write_runtime(self.selected.model, self.selected.model.sha256, True, int(runtime.get("unhealthy_starts") or 0),
-                     None, used=True)
+      unhealthy = 0 if healthy else int(runtime.get("unhealthy_starts") or 0)
+      _write_runtime(self.selected.model, self.selected.model.sha256, pending, unhealthy, None, used=used)
     except Exception:
       pass
 
+  def attempt(self, internal: bool = True) -> None:
+    """Called before an inference: the selected internal model is about to produce the output."""
+    if self.selected is None or self.pending or not internal:
+      return
+    self.pending = True
+    self._write(pending=True, used=True)
+
   def publish(self, produced_by_internal: bool = True) -> None:
-    if self.selected is None or not produced_by_internal:
+    if self.selected is None:
+      return
+    if not produced_by_internal:
+      if self.pending:  # handed over cleanly to an eGPU/Jetlink model; it is not running or failing now
+        self.pending = False
+        self._write(pending=False, used=False)
       return
     self.published += 1
     if self.published >= HEALTHY_PUBLISHES:
-      try:
-        _write_runtime(self.selected.model, self.selected.model.sha256, False, 0, None, used=True)
-      except Exception:
-        pass
+      self._write(pending=False, used=True, healthy=True)
       self.selected = None
 
 

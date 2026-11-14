@@ -370,7 +370,16 @@ def main(demo=False):
   internal_health = internal_model.HealthTracker(internal_selected)
   if usbgpu_model_loaded:
     from openpilot.selfdrive.modeld.internal_model_warmup import warm_internal_model_from_camera
-    warm_internal_model_from_camera(small_model, vipc_client_main)
+    try:
+      if internal_selected is not None:
+        internal_model.mark_loading(internal_selected)
+      warm_internal_model_from_camera(small_model, vipc_client_main)
+      if internal_selected is not None:
+        internal_model.mark_loaded(internal_selected)
+    except Exception:
+      if internal_selected is not None:  # the restart then uses the stock model
+        internal_model.record_runtime_failure(internal_selected)
+      raise
   cloudlog.warning("model startup internal model: %.3fs, loaded=%s", time.monotonic() - phase_start, small_model is not None)
   if model is None:
     model = small_model

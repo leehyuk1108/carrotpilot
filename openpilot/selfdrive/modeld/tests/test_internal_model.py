@@ -313,13 +313,15 @@ def test_runtime_failure_after_healthy_blocks_the_model_with_its_reason():
 def test_outputs_of_an_external_model_do_not_make_the_selected_model_healthy():
   im.write_request(RDF)
   compile_ok(RDF)
+  im.write_json(im.runtime_path(), {"sha256": RDF.sha256, "unhealthy_starts": 1})   # one earlier bad start
   selected = im.select_for_modeld(*CAM)
   im.mark_loaded(selected)
   health = im.HealthTracker(selected)
   health.attempt()                      # it ran once, then an external model took over
   for _ in range(im.HEALTHY_PUBLISHES * 2):
     health.publish(produced_by_internal=False)
-  assert im.read_json(im.runtime_path())["pending"] is True
+  runtime = im.read_json(im.runtime_path())
+  assert runtime["unhealthy_starts"] == 1 and health.selected is selected   # not reset to healthy
 
 
 class FakeChild:
@@ -382,3 +384,59 @@ def test_ignition_on_as_the_compiler_exits_does_not_finish_the_artifact(monkeypa
     run_compile(monkeypatch, m, FakeChild(polls_before_exit=0, on_poll=exits_while_ignition_turns_on))
   assert e.value.code == "waiting_offroad"
   assert not out.exists() and not im.pkl_path(RDF).exists() and not im.compiled_path(RDF).exists()
+
+
+def test_a_clean_handover_to_an_external_model_is_not_a_failure_and_not_in_use():
+  im.write_request(RDF)
+  compile_ok(RDF)
+  for _ in range(4):   # each start: 3 internal outputs, then Jetlink takes over, then a normal stop
+    selected = im.select_for_modeld(*CAM)
+    assert selected is not None
+    im.mark_loaded(selected)
+    health = im.HealthTracker(selected)
+    for _ in range(3):
+      health.attempt(True)
+      health.publish(True)
+    health.attempt(False)
+    health.publish(False)
+    runtime = im.read_json(im.runtime_path())
+    assert runtime["pending"] is False and runtime["used"] is False
+  assert im.read_json(im.runtime_path())["unhealthy_starts"] == 0
+
+
+def test_the_internal_model_is_tracked_again_when_it_takes_back_over():
+  im.write_request(RDF)
+  compile_ok(RDF)
+  selected = im.select_for_modeld(*CAM)
+  im.mark_loaded(selected)
+  health = im.HealthTracker(selected)
+  health.attempt(True)
+  health.publish(False)                 # handed over
+  health.attempt(True)                  # the external model failed; the internal one runs again
+  runtime = im.read_json(im.runtime_path())
+  assert runtime["pending"] is True and runtime["used"] is True
+
+
+def test_egpu_standby_warmup_failure_blocks_the_selected_model(monkeypatch):
+  import ast
+  import sys
+  import types
+  im.write_request(RDF)
+  compile_ok(RDF)
+  selected = im.select_for_modeld(*CAM)
+  im.mark_loaded(selected)
+  tree = ast.parse((Path(im.__file__).parent / "modeld.py").read_text())
+  block = next(n for n in ast.walk(tree) if isinstance(n, ast.If) and isinstance(n.test, ast.Name)
+               and n.test.id == "usbgpu_model_loaded" and any(isinstance(b, ast.ImportFrom) and b.module and
+               b.module.endswith("internal_model_warmup") for b in n.body))
+  def warm(model, client):
+    assert im.read_json(im.runtime_path())["loading"] is True   # a native crash here would count
+    raise RuntimeError("selected internal model output is not finite")
+  monkeypatch.setitem(sys.modules, "openpilot.selfdrive.modeld.internal_model_warmup",
+                      types.SimpleNamespace(warm_internal_model_from_camera=warm))
+  scope = {"usbgpu_model_loaded": True, "internal_selected": selected, "internal_model": im,
+           "small_model": object(), "vipc_client_main": object()}
+  with pytest.raises(RuntimeError):
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[block], type_ignores=[])), "<warmup>", "exec"), scope)
+  assert im.select_for_modeld(*CAM) is None
+  assert im.read_json(im.runtime_path())["fallback_reason"] == "runtime_failed"
