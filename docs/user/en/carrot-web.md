@@ -148,8 +148,9 @@ the inputs and outputs this comma expects.
   - `CD210 = WMI V12` (default): comma's official model. Its weights are identical to sunnypilot's `WMI V12`
     (upstream exported the same weights again).
   - `RDF` (recommended, experimental): an unmerged model comma tested in August 2026.
-  - `WMI V11` (experimental): sunnypilot's `WMI V11`, which reverted V10 and so equals `WMI V9`. Its vision is the
-    stock one; only the policy (path and speed planning) differs.
+  - `WMI V11` (experimental): sunnypilot's `WMI V11`, which reverted V10, so its weights equal `WMI V9`. Its vision
+    is the stock one; only the policy (path and speed planning) differs. In sunnypilot V9 and V11 differ only in
+    lateral smoothing (0.1 s → 0 s); carrot uses the `LatSmoothSec` setting for every model instead.
 - To change it, park with the ignition off, pick a model and press **Apply**. It cannot be changed while driving.
 - While parked the comma downloads the model (about 100 MB), checks it against the pinned checksum and the expected
   inputs/outputs, then compiles it on the comma (about 10-20 minutes). Turning the ignition on pauses this until you park again.
