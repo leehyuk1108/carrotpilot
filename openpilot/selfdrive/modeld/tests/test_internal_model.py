@@ -386,10 +386,10 @@ def test_ignition_on_as_the_compiler_exits_does_not_finish_the_artifact(monkeypa
   assert not out.exists() and not im.pkl_path(RDF).exists() and not im.compiled_path(RDF).exists()
 
 
-def test_a_clean_handover_to_an_external_model_is_not_a_failure_and_not_in_use():
+def test_a_handover_to_an_external_model_then_a_normal_stop_is_not_a_failure():
   im.write_request(RDF)
   compile_ok(RDF)
-  for _ in range(4):   # each start: 3 internal outputs, then Jetlink takes over, then a normal stop
+  for _ in range(4):   # each start: 3 internal outputs, then Jetlink takes over, then the manager stops modeld
     selected = im.select_for_modeld(*CAM)
     assert selected is not None
     im.mark_loaded(selected)
@@ -399,22 +399,77 @@ def test_a_clean_handover_to_an_external_model_is_not_a_failure_and_not_in_use()
       health.publish(True)
     health.attempt(False)
     health.publish(False)
-    runtime = im.read_json(im.runtime_path())
-    assert runtime["pending"] is False and runtime["used"] is False
+    assert im.read_json(im.runtime_path())["used"] is False   # the card does not claim it is running
+    im.mark_clean_stop(selected)
   assert im.read_json(im.runtime_path())["unhealthy_starts"] == 0
 
 
-def test_the_internal_model_is_tracked_again_when_it_takes_back_over():
+def test_a_crash_when_the_internal_model_takes_back_over_is_counted():
+  im.write_request(RDF)
+  compile_ok(RDF)
+  for _ in range(2):   # internal, Jetlink, then the internal model crashes modeld natively as it takes over again
+    selected = im.select_for_modeld(*CAM)
+    assert selected is not None
+    im.mark_loaded(selected)
+    health = im.HealthTracker(selected)
+    health.attempt(True)
+    health.publish(True)
+    health.attempt(False)
+    health.publish(False)
+    health.attempt(True)   # JoiningModel may still look active here; pending was never cleared anyway
+  assert im.select_for_modeld(*CAM) is None
+  assert im.read_json(im.runtime_path())["fallback_reason"] == "crashed"
+
+
+def test_a_normal_stop_before_healthy_is_not_counted():
+  im.write_request(RDF)
+  compile_ok(RDF)
+  for _ in range(3):   # short drives
+    selected = im.select_for_modeld(*CAM)
+    im.mark_loaded(selected)
+    health = im.HealthTracker(selected)
+    for _ in range(10):
+      health.attempt(True)
+      health.publish(True)
+    im.mark_clean_stop(selected)
+  assert im.select_for_modeld(*CAM) is not None
+  assert im.read_json(im.runtime_path())["unhealthy_starts"] == 0
+
+
+def test_in_use_follows_the_producing_model_after_healthy():
   im.write_request(RDF)
   compile_ok(RDF)
   selected = im.select_for_modeld(*CAM)
   im.mark_loaded(selected)
   health = im.HealthTracker(selected)
-  health.attempt(True)
-  health.publish(False)                 # handed over
-  health.attempt(True)                  # the external model failed; the internal one runs again
+  for _ in range(im.HEALTHY_PUBLISHES):
+    health.attempt(True)
+    health.publish(True)
+  assert im.read_json(im.runtime_path())["used"] is True and im.read_json(im.runtime_path())["pending"] is False
+  health.publish(False)
+  assert im.read_json(im.runtime_path())["used"] is False
+  health.publish(True)
   runtime = im.read_json(im.runtime_path())
-  assert runtime["pending"] is True and runtime["used"] is True
+  assert runtime["used"] is True and runtime["unhealthy_starts"] == 0
+
+
+def test_modeld_marks_the_managers_sigint_as_a_clean_stop():
+  import ast
+  tree = ast.parse((Path(im.__file__).parent / "modeld.py").read_text())
+  block = next(n for n in ast.walk(tree) if isinstance(n, ast.If) and ast.unparse(n.test) == "internal_selected is not None"
+               and "signal.signal" in ast.unparse(n))
+  handlers, stops = {}, []
+  def default_int_handler(signum, frame):
+    raise KeyboardInterrupt
+  fake_signal = type("S", (), {"SIGINT": 2, "signal": staticmethod(lambda sig, fn: handlers.__setitem__(sig, fn)),
+                               "default_int_handler": staticmethod(default_int_handler)})
+  selected = object()
+  scope = {"internal_selected": selected, "signal": fake_signal,
+           "internal_model": type("I", (), {"mark_clean_stop": staticmethod(stops.append)})}
+  exec(compile(ast.fix_missing_locations(ast.Module(body=[block], type_ignores=[])), "<sigint>", "exec"), scope)
+  with pytest.raises(KeyboardInterrupt):
+    handlers[2](2, None)
+  assert stops == [selected]
 
 
 def test_egpu_standby_warmup_failure_blocks_the_selected_model(monkeypatch):

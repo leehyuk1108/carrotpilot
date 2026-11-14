@@ -315,43 +315,59 @@ def _block(selected: Selected, reason: str, now: float | None) -> None:
 class HealthTracker:
   """Tracks the selected internal model in this modeld start.
 
-  It is pending (a stop now counts as unhealthy) only while it produces the outputs: from its first inference until
-  HEALTHY_PUBLISHES of its outputs, and not while an eGPU or Jetlink model it handed over to produces them.
+  From its first inference until HEALTHY_PUBLISHES of its own outputs it is pending: if modeld then stops without
+  the clean-stop mark (mark_clean_stop, written when the manager stops modeld), the next start counts it as
+  unhealthy. Handing over to an eGPU/Jetlink model does not end pending, so a crash when it takes back over is
+  still counted; a normal stop is not. "used" follows which model produces the outputs, for the carrot web card.
   """
 
   def __init__(self, selected: Selected | None):
     self.selected = selected
     self.published = 0
     self.pending = False
+    self.healthy = False
+    self.used: bool | None = None
 
-  def _write(self, pending: bool, used: bool, healthy: bool = False) -> None:
+  def _write(self) -> None:
     assert self.selected is not None
     try:
       runtime = read_json(runtime_path())
-      unhealthy = 0 if healthy else int(runtime.get("unhealthy_starts") or 0)
-      _write_runtime(self.selected.model, self.selected.model.sha256, pending, unhealthy, None, used=used)
+      unhealthy = 0 if self.healthy else int(runtime.get("unhealthy_starts") or 0)
+      _write_runtime(self.selected.model, self.selected.model.sha256, self.pending, unhealthy, None, used=bool(self.used))
     except Exception:
       pass
 
   def attempt(self, internal: bool = True) -> None:
-    """Called before an inference: the selected internal model is about to produce the output."""
-    if self.selected is None or self.pending or not internal:
+    """Called before an inference: whether the selected internal model is about to produce the output."""
+    if self.selected is None or not internal or self.pending or self.healthy:
       return
-    self.pending = True
-    self._write(pending=True, used=True)
+    self.pending, self.used = True, True
+    self._write()
 
   def publish(self, produced_by_internal: bool = True) -> None:
     if self.selected is None:
       return
-    if not produced_by_internal:
-      if self.pending:  # handed over cleanly to an eGPU/Jetlink model; it is not running or failing now
-        self.pending = False
-        self._write(pending=False, used=False)
-      return
-    self.published += 1
-    if self.published >= HEALTHY_PUBLISHES:
-      self._write(pending=False, used=True, healthy=True)
-      self.selected = None
+    changed = self.used is not None and self.used != produced_by_internal
+    self.used = produced_by_internal
+    if produced_by_internal and not self.healthy:
+      self.published += 1
+      if self.published >= HEALTHY_PUBLISHES:
+        self.healthy, self.pending, changed = True, False, True
+    if changed:
+      self._write()
+
+
+def mark_clean_stop(selected: Selected | None) -> None:
+  """The manager is stopping modeld (SIGINT): this start ended normally, whatever the selected model did."""
+  if selected is None:
+    return
+  try:
+    runtime = read_json(runtime_path())
+    if runtime.get("sha256") == selected.model.sha256 and (runtime.get("pending") or runtime.get("loading")):
+      runtime.update({"pending": False, "loading": False, "stopped_cleanly": True})
+      write_json(runtime_path(), runtime)
+  except Exception:
+    pass
 
 
 def reset_runtime_block(model: InternalModel) -> None:

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os
+import signal
 os.environ['GMMU'] = '0' # for usbgpu fast loading, noop for qcom
 from tinygrad.tensor import Tensor
 import time
@@ -368,6 +369,13 @@ def main(demo=False):
   small_model, internal_selected = create_internal_model(vipc_client_main.width, vipc_client_main.height,
                                                          usbgpu_model_loaded) if model is None or USBGPU else (None, None)
   internal_health = internal_model.HealthTracker(internal_selected)
+  if internal_selected is not None:
+    # The manager stops modeld with SIGINT. Mark that stop as clean so only a crash (no mark) counts against the
+    # selected model; then raise KeyboardInterrupt as the default handler does.
+    def stop_cleanly(signum, frame, selected=internal_selected):
+      internal_model.mark_clean_stop(selected)
+      signal.default_int_handler(signum, frame)
+    signal.signal(signal.SIGINT, stop_cleanly)
   if usbgpu_model_loaded:
     from openpilot.selfdrive.modeld.internal_model_warmup import warm_internal_model_from_camera
     try:
