@@ -30,6 +30,7 @@ from openpilot.common.file_chunker import open_file_chunked
 from openpilot.selfdrive.modeld.camera_sync import FrameMeta, receive_camera_pair
 from openpilot.selfdrive.modeld.constants import ModelConstants, Plan
 from openpilot.selfdrive.modeld.signal_shadow import ShadowClient
+from openpilot.selfdrive.modeld import internal_model
 from openpilot.selfdrive.modeld.helpers import (get_tg_input_devices, load_oob, modeld_pkl_path,
                                                 refresh_usbgpu_device_cache, select_vision_streams, usbgpu_compiled_path,
                                                 usbgpu_pcie_not_ready, usbgpu_present, wait_for_usbgpu_present)
@@ -341,8 +342,26 @@ def main(demo=False):
   # A standby model must not spawn a separate experimental ONNX observer that
   # receives no live samples. Keep standby inference/warmup and fallback intact;
   # optional comparison remains available when internal inference starts active.
-  small_model = ModelState(vipc_client_main.width, vipc_client_main.height, False,
-                           enable_shadow=not usbgpu_model_loaded) if model is None or USBGPU else None
+  small_model = None
+  internal_selected = None
+  if model is None or USBGPU:
+    # A user-selected internal model (carrot web) replaces the stock one only when its artifact matches this
+    # build and camera; any problem keeps the stock model. Its outputs differ from the stock ONNX the signal
+    # shadow compares against, so the shadow stays off for it.
+    internal_selected = internal_model.select_for_modeld(vipc_client_main.width, vipc_client_main.height)
+    if internal_selected is not None:
+      try:
+        small_model = ModelState(vipc_client_main.width, vipc_client_main.height, False,
+                                 pkl_path=internal_selected.pkl_path, enable_shadow=False)
+        cloudlog.warning("internal model selected: %s %s", internal_selected.model.id, internal_selected.model.sha256)
+      except Exception:
+        cloudlog.exception("selected internal model %s failed to load; using the stock model", internal_selected.model.id)
+        internal_model.record_load_failure(internal_selected)
+        internal_selected = None
+    if small_model is None:
+      small_model = ModelState(vipc_client_main.width, vipc_client_main.height, False,
+                               enable_shadow=not usbgpu_model_loaded)
+  internal_health = internal_model.HealthTracker(internal_selected)
   if usbgpu_model_loaded:
     from openpilot.selfdrive.modeld.internal_model_warmup import warm_internal_model_from_camera
     warm_internal_model_from_camera(small_model, vipc_client_main)
@@ -604,6 +623,7 @@ def main(demo=False):
       pm.send('modelV2', modelv2_send)
       pm.send('drivingModelData', drivingdata_send)
       pm.send('cameraOdometry', posenet_send)
+      internal_health.publish()
       if usbgpu_startup_pending:
         # Clear only after all first-frame outputs are on the bus so selfdrived
         # cannot observe "ready" before modelV2 and its dependants can run.

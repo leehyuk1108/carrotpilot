@@ -1,0 +1,32 @@
+.internal-model-card {
+  border-color: color-mix(in srgb, #6fd3ff 34%, var(--md-outline-var));
+  background:
+    radial-gradient(circle at 12% 0%, rgba(111, 211, 255, 0.2), transparent 45%),
+    linear-gradient(135deg, color-mix(in srgb, var(--md-surface-container) 92%, #13304a), var(--md-surface-container));
+}
+
+.internal-model-card__icon {
+  background: linear-gradient(145deg, #dff6ff, #6fd3ff 58%, #8f9bff);
+}
+
+.internal-model-card__footer {
+  margin-top: 10px;
+  justify-content: flex-start;
+}
+
+.internal-model-card__select {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 320px;
+  padding: 8px 10px;
+  border: 1px solid var(--md-outline-var);
+  border-radius: 10px;
+  color: var(--md-on-surface);
+  background: var(--md-surface-container-high, var(--md-surface-container));
+  font: inherit;
+}
+
+.internal-model-card .egpu-model-card__amount {
+  display: block;
+  margin-top: 6px;
+}

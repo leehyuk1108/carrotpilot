@@ -138,6 +138,24 @@ A comma without a key can get **its own key** on this page and register to the M
 Tools contains management actions that can immediately change device or repository state.
 Manage `ONNX Lane and BSD Detection` in **Settings → Driving → Steering → ONNX Lane & BSD**, not through a Tools shortcut.
 
+### Changing the driving model (internal model)
+
+The **Tools → Driving model card** selects the driving model that runs on the comma's own GPU.
+The default is `CD210` (comma's official model). The list contains only models with exactly
+the inputs and outputs this comma expects.
+
+- Available now: `CD210` (default) and `RDF` (recommended, experimental; an unmerged model comma tested in August 2026).
+- To change it, park with the ignition off, pick a model and press **Apply**. It cannot be changed while driving.
+- While parked the comma downloads the model (about 100 MB), checks it against the pinned checksum and the expected
+  inputs/outputs, then compiles it on the comma (about 10-20 minutes). Turning the ignition on pauses this until you park again.
+- The model is used **from the next drive** once it is ready. `In use` on the card means it actually ran.
+- The stock model is never removed. The comma drives with it automatically, and the card says why, when:
+  - compilation has not finished, or a software update requires compiling again (this runs automatically while parked)
+  - the model could not be loaded
+  - the model did not start properly twice in a row (press **Apply** again to retry once)
+- To go back, select `CD210` and press **Apply**.
+- Each model drives differently (position in the lane, curves, stopping and starting). Check an experimental model carefully at first.
+
 ### Jetson connection, IP and temperature
 
 After Jetson integration, the **Tools → eGPU status card** in `carrot-wip` also

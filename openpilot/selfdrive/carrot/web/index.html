@@ -317,6 +317,25 @@
           </div>
         </section>
 
+        <section id="internalModelCard" class="egpu-model-card internal-model-card" hidden aria-live="polite">
+          <div class="egpu-model-card__icon internal-model-card__icon" aria-hidden="true">AI</div>
+          <div class="egpu-model-card__body">
+            <div class="egpu-model-card__heading">
+              <strong id="internalModelTitle">Driving model</strong>
+              <span id="internalModelState" class="egpu-model-card__state">Checking</span>
+            </div>
+            <p id="internalModelDetail" class="egpu-model-card__detail"></p>
+            <div id="internalModelProgress" class="egpu-model-card__progress" hidden>
+              <div class="egpu-model-card__track"><span id="internalModelProgressBar"></span></div>
+            </div>
+            <div class="egpu-model-card__footer internal-model-card__footer">
+              <select id="internalModelSelect" class="internal-model-card__select" aria-label="Driving model"></select>
+              <button id="btnInternalModelApply" class="btn egpu-model-card__action" type="button" disabled>Apply</button>
+            </div>
+            <span id="internalModelAmount" class="egpu-model-card__amount"></span>
+          </div>
+        </section>
+
         <div id="toolsPrimaryActions" class="tools-primary-actions ui-action-grid ui-action-grid--quick mb-md" role="group" aria-label="Tools shortcuts">
           <button id="btnToolsCarSelect" class="btn" type="button">Car Select</button>
           <button id="btnToolsLanguage" class="btn" type="button" aria-haspopup="dialog">Language</button>

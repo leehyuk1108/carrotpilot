@@ -19,6 +19,8 @@ An accelerometer-detected suspected horizontal impact of at least 1.5g displays 
 >
 > A `carrotMan` name may still appear inside code or messages. It does not mean that the former user app is supported.
 
+The driving model (the internal model running on the comma's own GPU) is changed in **Tools → Driving model card**, not on the settings page. It can only be changed while parked with the ignition off and is used from the next drive. See the [Carrot Web guide](carrot-web.md#changing-the-driving-model-internal-model).
+
 ## Connecting to Carrot Web
 
 **Speed & Decel > Speed Camera > Navdy Connection Mode** selects the existing
