@@ -276,11 +276,13 @@ def test_compile_command_uses_the_stock_build_flags(monkeypatch, tmp_path):
       return 0
   monkeypatch.setattr(imm.subprocess, "Popen", FakeProc)
   monkeypatch.setattr(imm.Path, "is_file", lambda self: str(self) == "/TICI" or Path.exists(self))
+  monkeypatch.setattr(imm, "compile_core_available", lambda: False)   # parked comma: cores 4-7 offline
   import openpilot.selfdrive.modeld.helpers as helpers
   monkeypatch.setattr(helpers, "validate_model_file", lambda path: pytest.fail("must not load the model (GPU) in the manager"))
   im.model_dir(RDF).mkdir(parents=True)
   m.compile(RDF, 1, im.onnx_path(RDF), "stamp-1")
   cmd = seen["cmd"]
+  assert cmd[0] != "taskset"
   assert cmd[cmd.index("--camera-resolutions") + 1] == "1344x760" and cmd[cmd.index("--frame-skip") + 1] == "4"
   assert cmd[cmd.index("--model-size") + 1] == "512x256"
   assert all(seen["env"][k] == v for k, v in imm.QCOM_FLAGS.items())
@@ -510,3 +512,17 @@ def test_egpu_standby_warmup_failure_blocks_the_selected_model(monkeypatch):
     exec(compile(ast.fix_missing_locations(ast.Module(body=[block], type_ignores=[])), "<warmup>", "exec"), scope)
   assert im.select_for_modeld(*CAM) is None
   assert im.read_json(im.runtime_path())["fallback_reason"] == "runtime_failed"
+
+
+def test_compile_core_needs_the_core_online_and_allowed(monkeypatch, tmp_path):
+  states = {"online": "0\n", "affinity": {0, 1, 2, 3, 7}}
+  real_read_text = Path.read_text
+  monkeypatch.setattr(imm.Path, "read_text", lambda self, *a, **k: states["online"] if "cpu7/online" in str(self) else real_read_text(self, *a, **k))
+  monkeypatch.setattr(imm.os, "sched_getaffinity", lambda pid: states["affinity"], raising=False)
+  real_is_file = Path.is_file
+  monkeypatch.setattr(imm.Path, "is_file", lambda self: True if str(self) == "/usr/bin/taskset" else real_is_file(self))
+  assert imm.compile_core_available() is False          # offline while parked
+  states["online"] = "1\n"
+  assert imm.compile_core_available() is True
+  states["affinity"] = {0, 1, 2, 3, 4, 5}
+  assert imm.compile_core_available() is False          # not allowed for the manager's processes

@@ -49,6 +49,19 @@ def camera_resolutions() -> list[tuple[int, int]]:
   return [(_ar_ox_fisheye.width, _ar_ox_fisheye.height), (_os_fisheye.width, _os_fisheye.height)]
 
 
+COMPILE_CORE = 7
+
+
+def compile_core_available() -> bool:
+  """Whether the stock build's isolated core can be used. Parked, the comma takes cores 4-7 offline, and the
+  manager's processes may not be allowed on it either; then the compiler runs on the allowed cores."""
+  try:
+    online = Path(f"/sys/devices/system/cpu/cpu{COMPILE_CORE}/online").read_text().strip() == "1"
+    return online and COMPILE_CORE in os.sched_getaffinity(0) and Path("/usr/bin/taskset").is_file()
+  except (OSError, AttributeError):
+    return False
+
+
 def _set_parent_death_signal() -> None:
   # The manager stops this process when the car turns on; the compiler must not outlive it onto the GPU.
   try:
@@ -153,8 +166,8 @@ class Manager:
            "--model-size", "{}x{}".format(*MEDMODEL_INPUT_SIZE),
            "--camera-resolutions", *(f"{w}x{h}" for w, h in self.cameras),
            "--onnx", str(path), "--output", str(tmp), "--frame-skip", str(frame_skip)]
-    if Path("/usr/bin/taskset").is_file():
-      cmd = ["taskset", "-c", "7", *cmd]  # the isolated core the stock build also compiles on
+    if compile_core_available():
+      cmd = ["taskset", "-c", str(COMPILE_CORE), *cmd]  # the isolated core the stock build also compiles on
     env = {**os.environ, **QCOM_FLAGS} if Path("/TICI").is_file() else dict(os.environ)
     self.status(model, token, "compiling")
     log_path = im.model_dir(model) / "compile.log"
