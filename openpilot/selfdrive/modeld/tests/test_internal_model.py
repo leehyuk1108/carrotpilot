@@ -400,7 +400,7 @@ def test_a_handover_to_an_external_model_then_a_normal_stop_is_not_a_failure():
     health.attempt(False)
     health.publish(False)
     assert im.read_json(im.runtime_path())["used"] is False   # the card does not claim it is running
-    im.mark_clean_stop(selected)
+    im.mark_clean_stop()
   assert im.read_json(im.runtime_path())["unhealthy_starts"] == 0
 
 
@@ -431,7 +431,7 @@ def test_a_normal_stop_before_healthy_is_not_counted():
     for _ in range(10):
       health.attempt(True)
       health.publish(True)
-    im.mark_clean_stop(selected)
+    im.mark_clean_stop()
   assert im.select_for_modeld(*CAM) is not None
   assert im.read_json(im.runtime_path())["unhealthy_starts"] == 0
 
@@ -453,23 +453,38 @@ def test_in_use_follows_the_producing_model_after_healthy():
   assert runtime["used"] is True and runtime["unhealthy_starts"] == 0
 
 
-def test_modeld_marks_the_managers_sigint_as_a_clean_stop():
+def test_modeld_marks_the_managers_sigint_as_a_clean_stop_before_loading_the_model():
   import ast
   tree = ast.parse((Path(im.__file__).parent / "modeld.py").read_text())
-  block = next(n for n in ast.walk(tree) if isinstance(n, ast.If) and ast.unparse(n.test) == "internal_selected is not None"
-               and "signal.signal" in ast.unparse(n))
+  function = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "main")
+  body = ast.unparse(function)
+  assert body.index("signal.signal(signal.SIGINT, stop_cleanly)") < body.index("create_internal_model(vipc_client_main")
+  block = next(n for n in ast.walk(function) if isinstance(n, ast.If) and "signal.signal" in ast.unparse(n.body))
   handlers, stops = {}, []
   def default_int_handler(signum, frame):
     raise KeyboardInterrupt
   fake_signal = type("S", (), {"SIGINT": 2, "signal": staticmethod(lambda sig, fn: handlers.__setitem__(sig, fn)),
                                "default_int_handler": staticmethod(default_int_handler)})
-  selected = object()
-  scope = {"internal_selected": selected, "signal": fake_signal,
-           "internal_model": type("I", (), {"mark_clean_stop": staticmethod(stops.append)})}
-  exec(compile(ast.fix_missing_locations(ast.Module(body=[block], type_ignores=[])), "<sigint>", "exec"), scope)
+  for stock, installed in ((True, False), (False, True)):
+    handlers.clear()
+    internal = type("I", (), {"mark_clean_stop": staticmethod(lambda: stops.append(1)),
+                              "requested_model": staticmethod(lambda stock=stock: type("M", (), {"stock": stock}))})
+    scope = {"signal": fake_signal, "internal_model": internal}
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[block], type_ignores=[])), "<sigint>", "exec"), scope)
+    assert (2 in handlers) == installed   # the stock model keeps the default SIGINT behaviour
   with pytest.raises(KeyboardInterrupt):
     handlers[2](2, None)
-  assert stops == [selected]
+  assert stops == [1]
+
+
+def test_a_normal_stop_while_loading_is_not_counted():
+  im.write_request(RDF)
+  compile_ok(RDF)
+  for _ in range(3):
+    assert im.select_for_modeld(*CAM) is not None   # loading=True
+    im.mark_clean_stop()                            # the manager stopped modeld during the load
+  assert im.select_for_modeld(*CAM) is not None
+  assert im.read_json(im.runtime_path())["unhealthy_starts"] == 0
 
 
 def test_egpu_standby_warmup_failure_blocks_the_selected_model(monkeypatch):

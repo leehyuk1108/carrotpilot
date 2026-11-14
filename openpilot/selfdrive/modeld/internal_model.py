@@ -357,13 +357,14 @@ class HealthTracker:
       self._write()
 
 
-def mark_clean_stop(selected: Selected | None) -> None:
-  """The manager is stopping modeld (SIGINT): this start ended normally, whatever the selected model did."""
-  if selected is None:
-    return
+def mark_clean_stop() -> None:
+  """The manager is stopping modeld (SIGINT): this start ended normally, also while it was still loading.
+
+  The runtime record was rewritten by this start's select_for_modeld, so its pending/loading flags are this start's.
+  """
   try:
     runtime = read_json(runtime_path())
-    if runtime.get("sha256") == selected.model.sha256 and (runtime.get("pending") or runtime.get("loading")):
+    if runtime.get("pending") or runtime.get("loading"):
       runtime.update({"pending": False, "loading": False, "stopped_cleanly": True})
       write_json(runtime_path(), runtime)
   except Exception:
