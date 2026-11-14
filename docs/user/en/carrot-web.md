@@ -144,14 +144,24 @@ The **Tools → Driving model card** selects the driving model that runs on the 
 The default is `CD210` (comma's official model). The list contains only models with exactly
 the inputs and outputs this comma expects.
 
-- Available now: `CD210` (default) and `RDF` (recommended, experimental; an unmerged model comma tested in August 2026).
+- Available now
+  - `CD210 = WMI V12` (default): comma's official model. Its weights are identical to sunnypilot's `WMI V12`
+    (upstream exported the same weights again).
+  - `RDF` (recommended, experimental): an unmerged model comma tested in August 2026.
+  - `WMI V11` (experimental): sunnypilot's `WMI V11`, which reverted V10 and so equals `WMI V9`. Its vision is the
+    stock one; only the policy (path and speed planning) differs.
 - To change it, park with the ignition off, pick a model and press **Apply**. It cannot be changed while driving.
 - While parked the comma downloads the model (about 100 MB), checks it against the pinned checksum and the expected
   inputs/outputs, then compiles it on the comma (about 10-20 minutes). Turning the ignition on pauses this until you park again.
+  - Upstream published `WMI V11` only as a separate policy file, so the comma downloads that file (about 14 MB) and
+    builds the model by replacing the policy weights in the stock model file. The stock file, the policy file and the
+    result are all checked against pinned checksums. If an update changed the stock model file, it is not built and
+    the card says why.
 - The model is used **from the next drive** once it is ready. `In use` on the card means it actually ran.
 - The stock model is never removed. The comma drives with it automatically, and the card says why, when:
   - compilation has not finished, or a software update requires compiling again (this runs automatically while parked)
   - the model could not be loaded
+  - the model failed while driving (an error or invalid output such as NaN; press **Apply** again to retry)
   - the model did not start properly twice in a row (press **Apply** again to retry once)
 - To go back, select `CD210` and press **Apply**.
 - Each model drives differently (position in the lane, curves, stopping and starting). Check an experimental model carefully at first.

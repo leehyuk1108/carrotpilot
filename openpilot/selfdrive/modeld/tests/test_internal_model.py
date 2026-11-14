@@ -526,3 +526,111 @@ def test_compile_core_needs_the_core_online_and_allowed(monkeypatch, tmp_path):
   assert imm.compile_core_available() is True
   states["affinity"] = {0, 1, 2, 3, 4, 5}
   assert imm.compile_core_available() is False          # not allowed for the manager's processes
+
+
+# --- weight patch models (WMI V11) -------------------------------------------------------------------------------
+WMIV11 = im.find("WMIV11")
+
+
+def test_patch_models_are_pinned_and_their_copies_stay_inside_both_files():
+  for m in im.CATALOG:
+    if m.patch is None:
+      continue
+    p = m.patch
+    assert p.template_sha256 == im.stock_model().sha256 and p.template_size == im.stock_model().size
+    assert len(p.part_sha256) == 64 and p.part_size > 0 and m.url.startswith("https://") and not m.stock
+    spans = sorted((dst, dst + n) for dst, _src, n in p.copies)
+    assert all(n > 0 and dst + n <= p.template_size and src + n <= p.part_size for dst, src, n in p.copies)
+    assert all(a_end <= b_start for (_a, a_end), (b_start, _b) in zip(spans, spans[1:], strict=False))
+
+
+def _patch_model(tmp_path, template: bytes, part: bytes, copies, result: bytes | None = None):
+  import dataclasses
+  import hashlib
+  out = bytearray(template)
+  for dst, src, n in copies:
+    out[dst:dst + n] = part[src:src + n]
+  result = bytes(out) if result is None else result
+  stock_onnx = tmp_path / "models" / im.ONNX_NAME
+  stock_onnx.write_bytes(template)
+  sha = lambda b: hashlib.sha256(b).hexdigest()
+  patch = im.WeightPatch(template_sha256=sha(template), template_size=len(template), part_sha256=sha(part),
+                         part_size=len(part), copies=tuple(copies))
+  return dataclasses.replace(WMIV11, size=len(result), sha256=sha(result), patch=patch), bytes(out)
+
+
+def test_build_patched_applies_the_copies_and_checks_every_hash(tmp_path):
+  model, expected = _patch_model(tmp_path, b"T" * 64, b"0123456789", [(4, 0, 3), (40, 7, 3)])
+  part = tmp_path / "part.onnx"
+  part.write_bytes(b"0123456789")
+  target = tmp_path / "out.onnx"
+  imm.build_patched(model, part, target)
+  assert target.read_bytes() == expected == b"TTTT012" + b"T" * 33 + b"789" + b"T" * 21
+
+
+@pytest.mark.parametrize("broken,code", [("template", "template"), ("part", "sha"), ("result", "sha"), ("range", "contract")])
+def test_build_patched_rejects_a_changed_stock_model_part_or_result(tmp_path, broken, code):
+  copies = [(4, 0, 3)] if broken != "range" else [(62, 0, 3)]
+  model, _ = _patch_model(tmp_path, b"T" * 64, b"0123456789", copies,
+                          result=b"x" * 64 if broken == "result" else None)
+  if broken == "template":
+    (tmp_path / "models" / im.ONNX_NAME).write_bytes(b"U" * 64)   # e.g. an update changed the stock model
+  part = tmp_path / "part.onnx"
+  part.write_bytes(b"0123456789" if broken != "part" else b"9123456789")
+  target = tmp_path / "out.onnx"
+  with pytest.raises(imm.StepError) as e:
+    imm.build_patched(model, part, target)
+  assert e.value.code == code and not target.exists() and not target.with_name(target.name + ".tmp").exists()
+
+
+def test_download_of_a_patch_model_fetches_the_part_then_builds_and_verifies_the_onnx(monkeypatch, tmp_path):
+  model, expected = _patch_model(tmp_path, b"T" * 64, b"0123456789", [(4, 0, 3)])
+  monkeypatch.setattr(im, "CATALOG", (*[m for m in im.CATALOG if m.id != model.id], model))
+  seen = []
+
+  def fake_download(manifest, cache_dir, progress_callback=None, phase_callback=None):
+    seen.append(manifest)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    path = cache_dir / manifest.cache_filename
+    path.write_bytes(b"0123456789")
+    return path
+
+  import openpilot.selfdrive.modeld.big_model as big_model
+  monkeypatch.setattr(big_model, "_download_model", fake_download)
+  m = manager()
+  path = m.download(model, 1)
+  assert seen[0].sha256 == model.patch.part_sha256 and seen[0].size == model.patch.part_size and seen[0].url == model.url
+  assert path == im.onnx_path(model) and path.read_bytes() == expected
+  assert im.read_json(im.model_dir(model) / "verified.json")["sha256"] == model.sha256
+  assert not (im.model_dir(model) / seen[0].cache_filename).exists()   # the part is not kept
+  m.download(model, 1)   # verified: no second download
+  assert len(seen) == 1
+
+
+def test_template_mismatch_is_not_retried_until_selected_again(monkeypatch, tmp_path):
+  model, _ = _patch_model(tmp_path, b"T" * 64, b"0123456789", [(4, 0, 3)])
+  monkeypatch.setattr(im, "CATALOG", (*[m for m in im.CATALOG if m.id != model.id], model))
+  im.write_request(model, now=1)
+  m = manager()
+  calls = []
+  def download(model, token):
+    calls.append(1)
+    raise imm.StepError("template", "the stock model differs")
+  monkeypatch.setattr(m, "download", download)
+  m.step()
+  m.step()
+  status = im.read_json(im.status_path())
+  assert status["phase"] == "error" and status["error_code"] == "template" and calls == [1]
+
+
+def test_wmiv11_patch_of_the_real_stock_model_gives_the_pinned_onnx_when_available(tmp_path):
+  stock = Path(os.getenv("CARROT_TEST_STOCK_ONNX", str(Path(im.__file__).parent / "models" / im.ONNX_NAME)))
+  part = Path(os.getenv("CARROT_TEST_WMIV9_POLICY", "/data/tmp/model-sel/wmiv9_policy.onnx"))
+  if not stock.is_file() or stock.stat().st_size != im.STOCK_SIZE or not part.is_file():
+    pytest.skip("stock ONNX or WMI V9 policy not here")
+  (tmp_path / "models" / im.ONNX_NAME).write_bytes(stock.read_bytes())
+  target = tmp_path / "wmiv11.onnx"
+  imm.build_patched(WMIV11, part, target)
+  from openpilot.selfdrive.modeld.get_model_metadata import make_metadata_dict
+  meta = make_metadata_dict(str(target))
+  assert im.contract_errors(meta) == [] and meta["model_checkpoint"] == WMIV11.checkpoint

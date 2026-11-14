@@ -42,6 +42,7 @@ window.CarrotTranslations.register("zh", {
     internal_model_failure_contract: "该模型的输入输出与本设备不一致，无法使用。",
     internal_model_failure_compile: "编译失败，继续使用默认模型。",
     internal_model_failure_build: "正在等待 openpilot 构建完成，将自动重试。",
+    internal_model_failure_template: "此模型基于默认模型文件生成，但更新后默认模型文件已改变，需要更新的软件版本。",
     internal_model_failure_unknown: "准备失败，继续使用默认模型。",
     internal_model_onroad_note: "只能在停车并关闭点火时更换驾驶模型。",
     internal_model_confirm: "将驾驶模型切换为 {name}？停车时下载并编译（约 10~20 分钟），下次行驶起使用。",

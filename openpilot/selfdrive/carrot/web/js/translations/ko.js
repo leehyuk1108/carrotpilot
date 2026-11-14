@@ -42,6 +42,7 @@ window.CarrotTranslations.register("ko", {
     internal_model_failure_contract: "이 모델은 입력·출력 규격이 이 콤마와 달라 쓸 수 없습니다.",
     internal_model_failure_compile: "컴파일에 실패했습니다. 기본 모델을 계속 씁니다.",
     internal_model_failure_build: "openpilot 빌드가 끝나기를 기다립니다. 자동으로 다시 시도합니다.",
+    internal_model_failure_template: "이 모델은 기본 모델 파일을 바탕으로 만드는데, 업데이트로 기본 모델 파일이 바뀌었습니다. 새 버전이 필요합니다.",
     internal_model_failure_unknown: "준비에 실패했습니다. 기본 모델을 계속 씁니다.",
     internal_model_onroad_note: "주행 모델은 주차하고 시동을 끈 상태에서만 바꿀 수 있습니다.",
     internal_model_confirm: "주행 모델을 {name}(으)로 바꿀까요? 주차 중에 내려받기와 컴파일(10~20분)을 하고, 다음 주행부터 씁니다.",

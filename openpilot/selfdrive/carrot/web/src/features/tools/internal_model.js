@@ -46,6 +46,7 @@ const FALLBACK_STRINGS = {
   failure_contract: "This model's inputs or outputs differ from what this comma expects, so it cannot be used.",
   failure_compile: "Compilation failed. The stock model stays in use.",
   failure_build: "Waiting for the openpilot build to finish. It retries automatically.",
+  failure_template: "This model is built from the stock model file, which changed after an update. It needs a newer software version.",
   failure_unknown: "Preparation failed. The stock model stays in use.",
   onroad_note: "The driving model can only be changed while parked with the ignition off.",
   confirm: "Switch the driving model to {name}? It is downloaded and compiled while parked (about 10-20 minutes) and used from the next drive.",

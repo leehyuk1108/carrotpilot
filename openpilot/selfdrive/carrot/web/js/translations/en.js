@@ -42,6 +42,7 @@ window.CarrotTranslations.register("en", {
     internal_model_failure_contract: "This model's inputs or outputs differ from what this comma expects, so it cannot be used.",
     internal_model_failure_compile: "Compilation failed. The stock model stays in use.",
     internal_model_failure_build: "Waiting for the openpilot build to finish. It retries automatically.",
+    internal_model_failure_template: "This model is built from the stock model file, which changed after an update. It needs a newer software version.",
     internal_model_failure_unknown: "Preparation failed. The stock model stays in use.",
     internal_model_onroad_note: "The driving model can only be changed while parked with the ignition off.",
     internal_model_confirm: "Switch the driving model to {name}? It is downloaded and compiled while parked (about 10-20 minutes) and used from the next drive.",

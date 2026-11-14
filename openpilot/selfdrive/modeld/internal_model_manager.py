@@ -8,6 +8,7 @@ start (internal_model.select_for_modeld).
 from __future__ import annotations
 
 import ctypes
+import hashlib
 import os
 import signal
 import subprocess
@@ -60,6 +61,45 @@ def compile_core_available() -> bool:
     return online and COMPILE_CORE in os.sched_getaffinity(0) and Path("/usr/bin/taskset").is_file()
   except (OSError, AttributeError):
     return False
+
+
+PART_NAME = "patch_part.onnx"
+
+
+def build_patched(model: im.InternalModel, part: Path, target: Path) -> None:
+  """Write the ONNX of a WeightPatch model: the stock ONNX with the copies from the verified part applied. The
+  stock ONNX and the result must match their pinned size and sha256, so nothing else is ever compiled."""
+  patch = model.patch
+  assert patch is not None
+  template = im.stock_onnx_path()
+  try:
+    with template.open("rb") as f:
+      data = bytearray(f.read())
+  except OSError as e:
+    raise StepError("template", f"stock model unreadable: {e}") from e
+  if len(data) != patch.template_size or hashlib.sha256(data).hexdigest() != patch.template_sha256:
+    raise StepError("template", "the stock model differs from the one this model is built from")
+  part_data = part.read_bytes()
+  if len(part_data) != patch.part_size or hashlib.sha256(part_data).hexdigest() != patch.part_sha256:
+    raise StepError("sha", "patch part sha256 mismatch")
+  for dst, src, n in patch.copies:
+    if n <= 0 or dst < 0 or src < 0 or dst + n > len(data) or src + n > len(part_data):
+      raise StepError("contract", f"patch copy out of range: {dst} {src} {n}")
+    data[dst:dst + n] = part_data[src:src + n]
+  if len(data) != model.size or hashlib.sha256(data).hexdigest() != model.sha256:
+    raise StepError("sha", "patched model sha256 mismatch")
+  tmp = target.with_name(target.name + ".tmp")
+  try:
+    with tmp.open("wb") as f:
+      f.write(data)
+      f.flush()
+      os.fsync(f.fileno())
+    os.replace(tmp, target)
+  except OSError as e:
+    tmp.unlink(missing_ok=True)
+    if getattr(e, "errno", None) == 28:
+      raise StepError("storage", str(e)) from e
+    raise
 
 
 def _set_parent_death_signal() -> None:
@@ -118,14 +158,18 @@ class Manager:
     target = im.onnx_path(model)
     if target.is_file() and target.stat().st_size == model.size and im.read_json(im.model_dir(model) / "verified.json").get("sha256") == model.sha256:
       return target
-    manifest = BigModelManifest(model_id=model.id, filename=im.ONNX_NAME, size=model.size, sha256=model.sha256, url=str(model.url))
+    patch = model.patch
+    if patch is None:
+      manifest = BigModelManifest(model_id=model.id, filename=im.ONNX_NAME, size=model.size, sha256=model.sha256, url=str(model.url))
+    else:
+      manifest = BigModelManifest(model_id=model.id, filename=PART_NAME, size=patch.part_size, sha256=patch.part_sha256, url=str(model.url))
 
     def progress(_manifest, done: int, total: int) -> None:
       self.check_continue()
       self.status(model, token, "downloading", force=False, downloaded_bytes=done, total_bytes=total)
 
     def phase(name: str, _manifest) -> None:
-      self.status(model, token, name, downloaded_bytes=model.size, total_bytes=model.size)
+      self.status(model, token, name, downloaded_bytes=manifest.size, total_bytes=manifest.size)
 
     try:
       path = _download_model(manifest, im.model_dir(model), progress_callback=progress, phase_callback=phase)
@@ -140,7 +184,13 @@ class Manager:
       raise StepError("network", text) from e
     except Exception as e:
       raise StepError("network", str(e)) from e
-    os.replace(path, target)
+    if patch is not None:
+      self.check_continue()
+      self.status(model, token, "verifying", downloaded_bytes=manifest.size, total_bytes=manifest.size)
+      build_patched(model, path, target)
+      path.unlink(missing_ok=True)
+    else:
+      os.replace(path, target)
     im.write_json(im.model_dir(model) / "verified.json", {"sha256": model.sha256, "size": model.size})
     return target
 

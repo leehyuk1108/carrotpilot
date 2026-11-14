@@ -2,8 +2,8 @@
 
 The stock model stays the built-in artifact (models/driving_tinygrad.pkl). The user can pick another driving
 model from the pinned catalog below in the carrot web. internal_model_manager downloads its ONNX (pinned size and
-sha256), checks that its inputs and outputs match the stock model exactly, and compiles it on the device while
-parked. modeld uses it at the next start only when the compiled artifact matches the current modeld/tinygrad
+sha256) or builds it from the stock ONNX and a downloaded policy (WeightPatch), checks that its inputs and outputs
+match the stock model exactly, and compiles it on the device while parked. modeld uses it at the next start only when the compiled artifact matches the current modeld/tinygrad
 build and camera, and falls back to the stock model on any mismatch, load failure or repeated crash.
 
 Kept light on purpose: modeld imports this at startup.
@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from openpilot.selfdrive.modeld.internal_model_patches import WMIV11_COPIES
+
 STOCK_ID = "CD210"
 # Starts that did not reach HEALTHY_PUBLISHES before modeld stopped. Two in a row block the model until the user
 # selects it again, so a model that crashes modeld cannot keep taking it down.
@@ -31,27 +33,43 @@ COMPILED_NAME = "compiled.json"
 
 
 @dataclass(frozen=True)
+class WeightPatch:
+  """Build the ONNX from the stock ONNX (template) and a downloaded file (part, at InternalModel.url): for models
+  upstream published only as a separate policy whose graph equals the stock policy. Each copy writes
+  part[src:src + n] over template[dst:dst + n]; see make_internal_model_patch.py."""
+  template_sha256: str
+  template_size: int
+  part_sha256: str
+  part_size: int
+  copies: tuple[tuple[int, int, int], ...]
+
+
+@dataclass(frozen=True)
 class InternalModel:
   id: str
   name: str
-  size: int
+  size: int  # the ONNX that is compiled
   sha256: str
-  url: str | None  # None: the built-in stock artifact
+  url: str | None  # None: the built-in stock artifact; else the ONNX, or the part of a patch
   checkpoint: str
   recommended: bool = False
   experimental: bool = False
+  patch: WeightPatch | None = None
 
   @property
   def stock(self) -> bool:
     return self.url is None
 
 
+STOCK_SHA256 = "f73a9e535523d5e9acb9e642c64e33d631825dc8ba74123757d107cedd047bb5"
+STOCK_SIZE = 60_792_584
+
 # Only models with exactly the stock input/output contract (see contract_errors). Others, e.g. RDFv6/TSFDO with a
 # 32-frame history, need modeld changes first.
 CATALOG: tuple[InternalModel, ...] = (
+  # Upstream CD210 (#37050) re-exported the weights of the WMI model (#36798, sunnypilot "WMI V12") unchanged.
   InternalModel(
-    id="CD210", name="CD210", size=60_792_584,
-    sha256="f73a9e535523d5e9acb9e642c64e33d631825dc8ba74123757d107cedd047bb5", url=None,
+    id="CD210", name="CD210 = WMI V12", size=STOCK_SIZE, sha256=STOCK_SHA256, url=None,
     checkpoint="6a7d09ad-bcc9-43bc-916d-29287e60cee2/200+a27b3122-733e-4a65-938b-acfebebbe5e8/100",
   ),
   InternalModel(
@@ -60,6 +78,20 @@ CATALOG: tuple[InternalModel, ...] = (
     url="https://raw.githubusercontent.com/happymaj11r/openpilot-models/main/models/RDF/driving_supercombo.onnx",
     checkpoint="5c5d862b-d4dd-4087-aa8b-232ff9ac943f/100/1c13f8c7-a35d-4796-880a-902f600130db/400",
     recommended=True, experimental=True,
+  ),
+  # sunnypilot "WMI V11": the wmi_driving branch after reverting V10, i.e. the V9 policy (upstream 8950897d,
+  # never merged) with the stock vision. Upstream published it only as a separate opset-17 policy.
+  InternalModel(
+    id="WMIV11", name="WMI V11", size=STOCK_SIZE,
+    sha256="f347eef41776f1a1ea6a469a440aeb2ad92f3e3ce4b16a89c98afef95a79063d",
+    url="https://raw.githubusercontent.com/happymaj11r/openpilot-models/main/models/WMIv9/driving_policy.onnx",
+    checkpoint="6a7d09ad-bcc9-43bc-916d-29287e60cee2/200+887f923b-7e79-43c6-8f1f-053e1490f859/100",
+    experimental=True,
+    patch=WeightPatch(
+      template_sha256=STOCK_SHA256, template_size=STOCK_SIZE,
+      part_sha256="18a71853311aabf4e30384d40f2eee562b9880a7a3f5cbf99e600bcb7c68fa18", part_size=13_926_324,
+      copies=WMIV11_COPIES,
+    ),
   ),
 )
 
@@ -101,6 +133,10 @@ def base_dir() -> Path:
 
 def model_dir(model: InternalModel) -> Path:
   return base_dir() / f"{model.id}-{model.sha256[:16]}"
+
+
+def stock_onnx_path() -> Path:
+  return MODELS_DIR / ONNX_NAME
 
 
 def onnx_path(model: InternalModel) -> Path:
