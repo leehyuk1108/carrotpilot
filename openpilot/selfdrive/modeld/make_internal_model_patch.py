@@ -17,77 +17,7 @@ import hashlib
 import json
 from pathlib import Path
 
-
-def _varint(b: bytes, i: int) -> tuple[int, int]:
-  value = shift = 0
-  while True:
-    c = b[i]
-    i += 1
-    value |= (c & 0x7f) << shift
-    shift += 7
-    if c < 0x80:
-      return value, i
-
-
-def _fields(b: bytes, start: int, end: int):
-  i = start
-  while i < end:
-    key, i = _varint(b, i)
-    fid, wire = key >> 3, key & 7
-    if wire == 0:
-      _, j = _varint(b, i)
-      yield fid, i, j
-      i = j
-    elif wire == 1:
-      yield fid, i, i + 8
-      i += 8
-    elif wire == 5:
-      yield fid, i, i + 4
-      i += 4
-    elif wire == 2:
-      n, j = _varint(b, i)
-      yield fid, j, j + n
-      i = j + n
-    else:
-      raise ValueError(f"unsupported wire type {wire}")
-  if i != end:
-    raise ValueError("truncated protobuf")
-
-
-def raw_data_offsets(b: bytes) -> dict[str, tuple[int, int]]:
-  """initializer name -> byte range of its raw_data (ModelProto.graph=7, GraphProto.initializer=5)."""
-  out = {}
-  for fid, s, e in _fields(b, 0, len(b)):
-    if fid != 7:
-      continue
-    for gfid, gs, ge in _fields(b, s, e):
-      if gfid != 5:
-        continue
-      name, raw = None, None
-      for tfid, ts, te in _fields(b, gs, ge):
-        if tfid == 8:
-          name = b[ts:te].decode()
-        elif tfid == 9:
-          raw = (ts, te)
-      if name is not None and raw is not None:
-        out[name] = raw
-  return out
-
-
-def metadata_offsets(b: bytes) -> dict[str, tuple[int, int]]:
-  out = {}
-  for fid, s, e in _fields(b, 0, len(b)):
-    if fid != 14:
-      continue
-    key, value = None, None
-    for mfid, ms, me in _fields(b, s, e):
-      if mfid == 1:
-        key = b[ms:me].decode()
-      elif mfid == 2:
-        value = (ms, me)
-    if key is not None and value is not None:
-      out[key] = value
-  return out
+from openpilot.selfdrive.modeld.internal_model_onnx import metadata_offsets, raw_data_offsets
 
 
 def make_patch(stock_path: Path, reference_path: Path, target_path: Path) -> dict:

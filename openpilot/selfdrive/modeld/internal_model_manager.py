@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from openpilot.selfdrive.modeld import internal_model as im
+from openpilot.selfdrive.modeld.internal_model_onnx import read_metadata
 
 POLL_SECONDS = 2.0
 NETWORK_RETRY_SECONDS = 30.0
@@ -64,6 +65,14 @@ def compile_core_available() -> bool:
 
 
 PART_NAME = "patch_part.onnx"
+
+
+def sha256_file(path: Path) -> str:
+  h = hashlib.sha256()
+  with path.open("rb") as f:
+    while chunk := f.read(1 << 20):
+      h.update(chunk)
+  return h.hexdigest()
 
 
 def build_patched(model: im.InternalModel, part: Path, target: Path) -> None:
@@ -156,8 +165,12 @@ class Manager:
   def download(self, model: im.InternalModel, token: int) -> Path:
     from openpilot.selfdrive.modeld.big_model import BigModelManifest, _download_model
     target = im.onnx_path(model)
-    if target.is_file() and target.stat().st_size == model.size and im.read_json(im.model_dir(model) / "verified.json").get("sha256") == model.sha256:
-      return target
+    # A file from an earlier run is hashed again: only the pinned ONNX is ever validated and compiled.
+    if target.is_file() and target.stat().st_size == model.size:
+      self.status(model, token, "verifying", downloaded_bytes=model.size, total_bytes=model.size)
+      if sha256_file(target) == model.sha256:
+        return target
+      target.unlink()
     patch = model.patch
     if patch is None:
       manifest = BigModelManifest(model_id=model.id, filename=im.ONNX_NAME, size=model.size, sha256=model.sha256, url=str(model.url))
@@ -191,14 +204,13 @@ class Manager:
       path.unlink(missing_ok=True)
     else:
       os.replace(path, target)
-    im.write_json(im.model_dir(model) / "verified.json", {"sha256": model.sha256, "size": model.size})
     return target
 
   def validate(self, model: im.InternalModel, token: int, path: Path) -> None:
     self.status(model, token, "validating")
-    from openpilot.selfdrive.modeld.get_model_metadata import make_metadata_dict
     try:
-      errors = im.contract_errors(make_metadata_dict(str(path)))
+      # not get_model_metadata: its tinygrad parser runs scalar initializers on the default device (the GPU)
+      errors = im.contract_errors(read_metadata(path))
     except Exception as e:
       raise StepError("contract", f"metadata unreadable: {e}") from e
     if errors:

@@ -601,9 +601,8 @@ def test_download_of_a_patch_model_fetches_the_part_then_builds_and_verifies_the
   path = m.download(model, 1)
   assert seen[0].sha256 == model.patch.part_sha256 and seen[0].size == model.patch.part_size and seen[0].url == model.url
   assert path == im.onnx_path(model) and path.read_bytes() == expected
-  assert im.read_json(im.model_dir(model) / "verified.json")["sha256"] == model.sha256
   assert not (im.model_dir(model) / seen[0].cache_filename).exists()   # the part is not kept
-  m.download(model, 1)   # verified: no second download
+  m.download(model, 1)   # the kept ONNX still has the pinned hash: no second download
   assert len(seen) == 1
 
 
@@ -634,3 +633,92 @@ def test_wmiv11_patch_of_the_real_stock_model_gives_the_pinned_onnx_when_availab
   from openpilot.selfdrive.modeld.get_model_metadata import make_metadata_dict
   meta = make_metadata_dict(str(target))
   assert im.contract_errors(meta) == [] and meta["model_checkpoint"] == WMIV11.checkpoint
+
+
+def test_a_cached_onnx_with_the_right_size_but_wrong_hash_is_rebuilt_not_compiled(monkeypatch, tmp_path):
+  model, expected = _patch_model(tmp_path, b"T" * 64, b"0123456789", [(4, 0, 3)])
+  monkeypatch.setattr(im, "CATALOG", (*[m for m in im.CATALOG if m.id != model.id], model))
+  downloads = []
+
+  def fake_download(manifest, cache_dir, progress_callback=None, phase_callback=None):
+    downloads.append(manifest)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    path = cache_dir / manifest.cache_filename
+    path.write_bytes(b"0123456789")
+    return path
+
+  import openpilot.selfdrive.modeld.big_model as big_model
+  monkeypatch.setattr(big_model, "_download_model", fake_download)
+  m = manager()
+  target = m.download(model, 1)
+  data = bytearray(target.read_bytes())
+  data[5] ^= 1   # same size, one weight byte changed
+  target.write_bytes(bytes(data))
+  assert m.download(model, 1).read_bytes() == expected and len(downloads) == 2
+
+
+# --- metadata without tinygrad -------------------------------------------------------------------------------------
+def _vint(v: int) -> bytes:
+  out = bytearray()
+  while True:
+    out.append((v & 0x7f) | (0x80 if v > 0x7f else 0))
+    v >>= 7
+    if not v:
+      return bytes(out)
+
+
+def _ld(fid: int, payload: bytes) -> bytes:
+  return _vint(fid << 3 | 2) + _vint(len(payload)) + payload
+
+
+def _vi(fid: int, value: int) -> bytes:
+  return _vint(fid << 3) + _vint(value)
+
+
+def tiny_onnx(path, inputs, outputs, slices, checkpoint="ck/1"):
+  import codecs
+  import pickle
+
+  def value_info(name, shape):
+    dims = b"".join(_ld(1, _vi(1, d) if isinstance(d, int) else _ld(2, d.encode())) for d in shape)
+    return _ld(1, name.encode()) + _ld(2, _ld(1, _vi(1, 10) + _ld(2, dims)))
+
+  graph = _ld(1, _ld(4, b"Relu")) + _ld(5, _ld(8, b"w") + _ld(9, b"\x00" * 8))   # a node and an initializer to skip
+  graph += b"".join(_ld(11, value_info(n, s)) for n, s in inputs.items())
+  graph += b"".join(_ld(12, value_info(n, s)) for n, s in outputs.items())
+  meta = lambda k, v: _ld(14, _ld(1, k.encode()) + _ld(2, v.encode()))
+  path.write_bytes(_vi(1, 8) + _ld(7, graph) + meta("model_checkpoint", checkpoint)
+                   + meta("output_slices", codecs.encode(pickle.dumps(slices), "base64").decode()))
+
+
+def test_read_metadata_reads_inputs_outputs_and_metadata_without_initializers(tmp_path):
+  from openpilot.selfdrive.modeld.internal_model_onnx import read_metadata
+  meta = stock_metadata()
+  path = tmp_path / "m.onnx"
+  tiny_onnx(path, {**meta["input_shapes"], "dyn": ("batch", 3)}, meta["output_shapes"], meta["output_slices"])
+  got = read_metadata(path)
+  assert got["input_shapes"] == {**meta["input_shapes"], "dyn": (0, 3)} and got["output_shapes"] == meta["output_shapes"]
+  assert got["output_slices"] == meta["output_slices"] and got["model_checkpoint"] == "ck/1"
+
+
+def test_validate_never_uses_the_tinygrad_metadata_parser(monkeypatch, tmp_path):
+  import openpilot.selfdrive.modeld.get_model_metadata as gmm
+  monkeypatch.setattr(gmm, "make_metadata_dict", lambda *a: pytest.fail("tinygrad parser touches the default device"))
+  meta = stock_metadata()
+  path = tmp_path / "m.onnx"
+  tiny_onnx(path, meta["input_shapes"], meta["output_shapes"], meta["output_slices"])
+  manager().validate(RDF, 1, path)
+  tiny_onnx(path, {**meta["input_shapes"], "features_buffer": (1, 32, 512)}, meta["output_shapes"], meta["output_slices"])
+  with pytest.raises(imm.StepError) as e:
+    manager().validate(RDF, 1, path)
+  assert e.value.code == "contract"
+
+
+@pytest.mark.parametrize("env", ["CARROT_TEST_STOCK_ONNX", "CARROT_TEST_RDF_ONNX"])
+def test_read_metadata_matches_get_model_metadata_on_real_models_when_available(env):
+  path = Path(os.getenv(env, "/nonexistent"))
+  if not path.is_file():
+    pytest.skip(f"{env} not set")
+  from openpilot.selfdrive.modeld.get_model_metadata import make_metadata_dict
+  from openpilot.selfdrive.modeld.internal_model_onnx import read_metadata
+  assert read_metadata(path) == make_metadata_dict(str(path))
