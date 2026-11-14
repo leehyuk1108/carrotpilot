@@ -100,21 +100,60 @@ def test_modeld_keeps_original_artifact_and_output():
   assert source.index('self.signal_shadow.capture(model_output, self.npy)') < source.index("self.npy['prev_feat'][:] = model_output")
 
 
+def _internal_model_creation(model_state, select, record_load_failure=lambda selected: None):
+  tree = ast.parse((Path(__file__).parents[1] / 'modeld.py').read_text())
+  function = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == 'create_internal_model')
+  statement = next(n for n in ast.walk(tree) if isinstance(n, ast.Assign) and isinstance(n.value, ast.IfExp)
+                   and isinstance(n.value.body, ast.Call) and getattr(n.value.body.func, 'id', None) == 'create_internal_model')
+  internal = SimpleNamespace(select_for_modeld=select, record_load_failure=record_load_failure)
+  cloudlog = SimpleNamespace(warning=lambda *a: None, exception=lambda *a: None)
+  return ast.fix_missing_locations(ast.Module(body=[function, statement], type_ignores=[])), {
+    'ModelState': model_state, 'internal_model': internal, 'cloudlog': cloudlog}
+
+
 @pytest.mark.parametrize('external_ready,external_requested', [(True, True), (False, True), (False, False)])
 def test_standby_preserves_internal_model_without_spawning_comparison(external_ready, external_requested):
-  tree = ast.parse((Path(__file__).parents[1] / 'modeld.py').read_text())
-  statement = next(n for n in ast.walk(tree) if isinstance(n, ast.Assign)
-                   and any(isinstance(t, ast.Name) and t.id == 'small_model' for t in n.targets))
   calls = []
   def model_state(*args, **kwargs):
     calls.append((args, kwargs))
     return 'internal'
-  scope = {'ModelState': model_state, 'vipc_client_main': SimpleNamespace(width=1344, height=760),
-           'model': object() if external_ready else None, 'USBGPU': external_requested,
-           'usbgpu_model_loaded': external_ready}
-  exec(compile(ast.fix_missing_locations(ast.Module(body=[statement], type_ignores=[])), '<standby>', 'exec'), scope)
-  assert scope['small_model'] == 'internal'
+  module, scope = _internal_model_creation(model_state, lambda w, h: None)
+  scope.update({'vipc_client_main': SimpleNamespace(width=1344, height=760),
+                'model': object() if external_ready else None, 'USBGPU': external_requested,
+                'usbgpu_model_loaded': external_ready})
+  exec(compile(module, '<standby>', 'exec'), scope)
+  assert scope['small_model'] == 'internal' and scope['internal_selected'] is None
   assert calls == [((1344, 760, False), {'enable_shadow': not external_ready})]
+
+
+def test_selected_internal_model_never_starts_the_stock_comparison_and_checks_outputs():
+  calls = []
+  selected = SimpleNamespace(pkl_path=Path('/selected.pkl'), model=SimpleNamespace(id='RDF', sha256='a' * 64))
+  def model_state(*args, **kwargs):
+    calls.append((args, kwargs))
+    return 'selected'
+  module, scope = _internal_model_creation(model_state, lambda w, h: selected)
+  scope.update({'vipc_client_main': SimpleNamespace(width=1344, height=760), 'model': None, 'USBGPU': False,
+                'usbgpu_model_loaded': False})
+  exec(compile(module, '<selected>', 'exec'), scope)
+  assert scope['small_model'] == 'selected' and scope['internal_selected'] is selected
+  assert calls == [((1344, 760, False), {'pkl_path': Path('/selected.pkl'), 'enable_shadow': False, 'check_finite': True})]
+
+
+def test_selected_internal_model_that_fails_to_load_falls_back_to_stock():
+  calls, blocked = [], []
+  selected = SimpleNamespace(pkl_path=Path('/selected.pkl'), model=SimpleNamespace(id='RDF', sha256='a' * 64))
+  def model_state(*args, **kwargs):
+    calls.append(kwargs)
+    if 'pkl_path' in kwargs:
+      raise RuntimeError('bad pkl')
+    return 'stock'
+  module, scope = _internal_model_creation(model_state, lambda w, h: selected, blocked.append)
+  scope.update({'vipc_client_main': SimpleNamespace(width=1344, height=760), 'model': None, 'USBGPU': False,
+                'usbgpu_model_loaded': False})
+  exec(compile(module, '<fallback>', 'exec'), scope)
+  assert scope['small_model'] == 'stock' and scope['internal_selected'] is None and blocked == [selected]
+  assert calls[-1] == {'enable_shadow': True}
 
 
 @pytest.mark.parametrize('enable_shadow,usbgpu', [(False, False), (False, True), (True, True), (True, False)])

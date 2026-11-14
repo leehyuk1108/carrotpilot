@@ -128,7 +128,7 @@ def get_action_from_model(model_output: dict[str, np.ndarray], prev_action: log.
 class ModelState:
   prev_desire: np.ndarray  # for tracking the rising edge of the pulse
 
-  def __init__(self, cam_w: int, cam_h: int, usbgpu: bool, pkl_path=None, *, enable_shadow=True):
+  def __init__(self, cam_w: int, cam_h: int, usbgpu: bool, pkl_path=None, *, enable_shadow=True, check_finite=False):
     input_devices = get_tg_input_devices(PROCESS_NAME, usbgpu)
     self.WARP_DEV, self.QUEUE_DEV = input_devices['WARP_DEV'], input_devices['QUEUE_DEV']
     jits = load_oob(open_file_chunked(pkl_path or modeld_pkl_path(usbgpu)))
@@ -139,6 +139,8 @@ class ModelState:
 
     self.prev_desire = np.zeros(ModelConstants.DESIRE_LEN, dtype=np.float32)
     self.usbgpu = usbgpu
+    # a user-selected internal model is not the stock artifact; reject non-finite outputs like the eGPU path
+    self.check_finite = usbgpu or check_finite
 
     self.frame_skip = ModelConstants.MODEL_RUN_FREQ // ModelConstants.MODEL_CONTEXT_FREQ
     self.input_queues, self.npy = make_input_queues(self.input_shapes, self.frame_skip, device=self.QUEUE_DEV)
@@ -216,8 +218,8 @@ class ModelState:
     )
     model_output = outs.numpy()[0]
     shadow_payload = self.signal_shadow.capture(model_output, self.npy) if self.signal_shadow is not None else None
-    if self.usbgpu and not np.all(np.isfinite(model_output)):
-      raise RuntimeError("eGPU model output is not finite")
+    if self.check_finite and not np.all(np.isfinite(model_output)):
+      raise RuntimeError("eGPU model output is not finite" if self.usbgpu else "selected internal model output is not finite")
     outputs_dict = self.parser.parse_outputs(self.slice_outputs(model_output, self.output_slices))
     self.npy['prev_feat'][:] = model_output[self.output_slices['hidden_state']]
 
@@ -226,6 +228,26 @@ class ModelState:
     if shadow_payload is not None:
       outputs_dict['_signal_shadow'] = shadow_payload
     return outputs_dict
+
+
+def create_internal_model(cam_w: int, cam_h: int, usbgpu_model_loaded: bool, model_state=None):
+  """The internal (comma GPU) model and the user selection it runs (None for the stock model).
+
+  A model selected in carrot web replaces the stock one only when its artifact matches this build and camera; any
+  problem keeps the stock model. Its outputs differ from the stock ONNX the signal shadow compares against, so the
+  shadow stays off for it.
+  """
+  model_state = model_state or ModelState
+  selected = internal_model.select_for_modeld(cam_w, cam_h)
+  if selected is not None:
+    try:
+      model = model_state(cam_w, cam_h, False, pkl_path=selected.pkl_path, enable_shadow=False, check_finite=True)
+      cloudlog.warning("internal model selected: %s %s", selected.model.id, selected.model.sha256)
+      return model, selected
+    except Exception:
+      cloudlog.exception("selected internal model %s failed to load; using the stock model", selected.model.id)
+      internal_model.record_load_failure(selected)
+  return model_state(cam_w, cam_h, False, enable_shadow=not usbgpu_model_loaded), None
 
 
 def main(demo=False):
@@ -342,25 +364,8 @@ def main(demo=False):
   # A standby model must not spawn a separate experimental ONNX observer that
   # receives no live samples. Keep standby inference/warmup and fallback intact;
   # optional comparison remains available when internal inference starts active.
-  small_model = None
-  internal_selected = None
-  if model is None or USBGPU:
-    # A user-selected internal model (carrot web) replaces the stock one only when its artifact matches this
-    # build and camera; any problem keeps the stock model. Its outputs differ from the stock ONNX the signal
-    # shadow compares against, so the shadow stays off for it.
-    internal_selected = internal_model.select_for_modeld(vipc_client_main.width, vipc_client_main.height)
-    if internal_selected is not None:
-      try:
-        small_model = ModelState(vipc_client_main.width, vipc_client_main.height, False,
-                                 pkl_path=internal_selected.pkl_path, enable_shadow=False)
-        cloudlog.warning("internal model selected: %s %s", internal_selected.model.id, internal_selected.model.sha256)
-      except Exception:
-        cloudlog.exception("selected internal model %s failed to load; using the stock model", internal_selected.model.id)
-        internal_model.record_load_failure(internal_selected)
-        internal_selected = None
-    if small_model is None:
-      small_model = ModelState(vipc_client_main.width, vipc_client_main.height, False,
-                               enable_shadow=not usbgpu_model_loaded)
+  small_model, internal_selected = create_internal_model(vipc_client_main.width, vipc_client_main.height,
+                                                         usbgpu_model_loaded) if model is None or USBGPU else (None, None)
   internal_health = internal_model.HealthTracker(internal_selected)
   if usbgpu_model_loaded:
     from openpilot.selfdrive.modeld.internal_model_warmup import warm_internal_model_from_camera
@@ -530,6 +535,8 @@ def main(demo=False):
       model_output = model.run(bufs, transforms, inputs, prepare_only)
     except Exception as exc:
       if not params.get_bool("UsbGpuActive") or small_model is None:
+        if internal_selected is not None:
+          internal_model.record_runtime_failure(internal_selected)
         raise
       cloudlog.exception("eGPU model failed, falling back to internal GPU")
       queue_usbgpu_error_tmux(params, "runtime model execution failed")
@@ -623,7 +630,8 @@ def main(demo=False):
       pm.send('modelV2', modelv2_send)
       pm.send('drivingModelData', drivingdata_send)
       pm.send('cameraOdometry', posenet_send)
-      internal_health.publish()
+      internal_health.publish(model is small_model or (getattr(model, 'small', None) is small_model
+                                                       and not getattr(model, 'active', False)))
       if usbgpu_startup_pending:
         # Clear only after all first-frame outputs are on the bus so selfdrived
         # cannot observe "ready" before modelV2 and its dependants can run.

@@ -136,7 +136,7 @@ def test_load_failure_blocks_immediately():
   selected = im.select_for_modeld(*CAM)
   im.record_load_failure(selected)
   assert im.select_for_modeld(*CAM) is None
-  assert im.read_json(im.runtime_path())["fallback_reason"] == "crashed"
+  assert im.read_json(im.runtime_path())["fallback_reason"] == "load_failed"
 
 
 def test_select_for_modeld_never_raises(monkeypatch):
@@ -239,13 +239,13 @@ def test_compile_command_uses_the_stock_build_flags(monkeypatch, tmp_path):
     returncode = 0
     def __init__(self, cmd, **kw):
       seen.update(cmd=cmd, env=kw["env"])
-      Path(cmd[cmd.index("--output") + 1]).write_bytes(b"pkl")
+      Path(cmd[cmd.index("--output") + 1]).write_bytes(b"compiled-pkl")
     def poll(self):
       return 0
   monkeypatch.setattr(imm.subprocess, "Popen", FakeProc)
   monkeypatch.setattr(imm.Path, "is_file", lambda self: str(self) == "/TICI" or Path.exists(self))
   import openpilot.selfdrive.modeld.helpers as helpers
-  monkeypatch.setattr(helpers, "validate_model_file", lambda path: None)
+  monkeypatch.setattr(helpers, "validate_model_file", lambda path: pytest.fail("must not load the model (GPU) in the manager"))
   im.model_dir(RDF).mkdir(parents=True)
   m.compile(RDF, 1, im.onnx_path(RDF), "stamp-1")
   cmd = seen["cmd"]
@@ -253,7 +253,7 @@ def test_compile_command_uses_the_stock_build_flags(monkeypatch, tmp_path):
   assert cmd[cmd.index("--model-size") + 1] == "512x256"
   assert all(seen["env"][k] == v for k, v in imm.QCOM_FLAGS.items())
   compiled = json.loads(im.compiled_path(RDF).read_text())
-  assert compiled["stamp"] == "stamp-1" and compiled["cameras"] == [list(CAM)] and im.pkl_path(RDF).read_bytes() == b"pkl"
+  assert compiled["stamp"] == "stamp-1" and compiled["cameras"] == [list(CAM)] and im.pkl_path(RDF).read_bytes() == b"compiled-pkl"
 
 
 def test_rdf_onnx_metadata_matches_the_contract_when_available():
@@ -262,3 +262,88 @@ def test_rdf_onnx_metadata_matches_the_contract_when_available():
     pytest.skip("RDF ONNX not downloaded here")
   from openpilot.selfdrive.modeld.get_model_metadata import make_metadata_dict
   assert im.contract_errors(make_metadata_dict(str(path))) == []
+
+
+def test_runtime_failure_after_healthy_blocks_the_model_with_its_reason():
+  im.write_request(RDF)
+  compile_ok(RDF)
+  selected = im.select_for_modeld(*CAM)
+  health = im.HealthTracker(selected)
+  for _ in range(im.HEALTHY_PUBLISHES):
+    health.publish()
+  im.record_runtime_failure(selected)   # modeld is about to stop on an inference error
+  assert im.select_for_modeld(*CAM) is None
+  assert im.read_json(im.runtime_path())["fallback_reason"] == "runtime_failed"
+  assert im.select_for_modeld(*CAM) is None   # still blocked, same reason
+  assert im.read_json(im.runtime_path())["fallback_reason"] == "runtime_failed"
+
+
+def test_outputs_of_an_external_model_do_not_make_the_selected_model_healthy():
+  im.write_request(RDF)
+  compile_ok(RDF)
+  health = im.HealthTracker(im.select_for_modeld(*CAM))
+  for _ in range(im.HEALTHY_PUBLISHES * 2):
+    health.publish(produced_by_internal=False)
+  assert im.read_json(im.runtime_path())["pending"] is True
+
+
+class FakeChild:
+  def __init__(self, polls_before_exit=1000, returncode=0, on_poll=None):
+    self.polls, self.returncode, self.on_poll, self.killed = polls_before_exit, None, on_poll, False
+    self._code = returncode
+
+  def poll(self):
+    if self.on_poll:
+      self.on_poll(self)
+    if self.killed:
+      self.returncode = -9
+    elif self.polls <= 0:
+      self.returncode = self._code
+    self.polls -= 1
+    return self.returncode
+
+  def kill(self):
+    self.killed = True
+
+  def wait(self, timeout=None):
+    return self.returncode
+
+
+def run_compile(monkeypatch, m, child):
+  monkeypatch.setattr(imm.subprocess, "Popen", lambda *a, **k: child)
+  monkeypatch.setattr(imm.time, "sleep", lambda s: None)
+  im.model_dir(RDF).mkdir(parents=True, exist_ok=True)
+  return m.compile(RDF, 1, im.onnx_path(RDF), "stamp-1")
+
+
+def test_stop_signal_during_compile_kills_the_child_and_leaves_a_resumable_status(monkeypatch):
+  im.write_request(RDF)
+  m = manager()
+  def signal_arrives(child):
+    if child.polls == 998 and not m.stopping:
+      m.stopping = True      # what the SIGTERM handler does
+      m.kill_child()
+  child = FakeChild(on_poll=signal_arrives)
+  m.status(RDF, 1, "compiling")
+  with pytest.raises(imm.Stop):
+    run_compile(monkeypatch, m, child)
+  assert child.killed and m.child is None
+  assert not im.compiled_path(RDF).exists() and not im.pkl_path(RDF).exists()
+  m.mark_paused()
+  status = im.read_json(im.status_path())
+  assert status["phase"] == "error" and status["error_code"] == "waiting_offroad"
+
+
+def test_ignition_on_as_the_compiler_exits_does_not_finish_the_artifact(monkeypatch):
+  im.write_request(RDF)
+  params = FakeParams()
+  m = imm.Manager(params, cameras=[CAM])
+  out = im.pkl_path(RDF).with_name(im.PKL_NAME + ".tmp")
+  def exits_while_ignition_turns_on(child):
+    if child.polls == 0:
+      out.write_bytes(b"compiled-pkl")
+      params.onroad = True
+  with pytest.raises(imm.StepError) as e:
+    run_compile(monkeypatch, m, FakeChild(polls_before_exit=0, on_poll=exits_while_ignition_turns_on))
+  assert e.value.code == "waiting_offroad"
+  assert not out.exists() and not im.pkl_path(RDF).exists() and not im.compiled_path(RDF).exists()

@@ -30,6 +30,7 @@ window.CarrotTranslations.register("en", {
     internal_model_ready_detail: "{name} is ready and is used from the next drive.",
     internal_model_fallback_crashed: "{name} did not start properly twice in a row, so the stock model was used. Apply it again to retry once.",
     internal_model_fallback_load_failed: "{name} could not be loaded, so the stock model was used. Apply it again to retry.",
+    internal_model_fallback_runtime_failed: "{name} failed while driving (an error or invalid output), so the stock model is used. Apply it again to retry.",
     internal_model_fallback_stale_build: "After a software update {name} must be compiled again. This runs automatically while parked.",
     internal_model_fallback_not_compiled: "{name} is not compiled yet, so the stock model was used.",
     internal_model_fallback_camera: "{name} was compiled for another camera, so the stock model was used.",

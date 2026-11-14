@@ -30,6 +30,7 @@ window.CarrotTranslations.register("ko", {
     internal_model_ready_detail: "{name} 준비가 끝났습니다. 다음 주행부터 이 모델을 씁니다.",
     internal_model_fallback_crashed: "{name}이(가) 두 번 연속 정상적으로 시작하지 못해 기본 모델로 주행했습니다. 다시 적용하면 한 번 더 시도합니다.",
     internal_model_fallback_load_failed: "{name}을(를) 불러오지 못해 기본 모델로 주행했습니다. 다시 적용하면 다시 시도합니다.",
+    internal_model_fallback_runtime_failed: "{name}이(가) 주행 중 오류를 내거나 잘못된 값을 내서 기본 모델로 돌아갔습니다. 다시 적용하면 다시 시도합니다.",
     internal_model_fallback_stale_build: "소프트웨어 업데이트 뒤 {name}을(를) 다시 컴파일해야 합니다. 주차 중에 자동으로 진행합니다.",
     internal_model_fallback_not_compiled: "{name} 컴파일이 아직 끝나지 않아 기본 모델로 주행했습니다.",
     internal_model_fallback_camera: "{name}이(가) 다른 카메라용으로 컴파일돼 기본 모델로 주행했습니다.",

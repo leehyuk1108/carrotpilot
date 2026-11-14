@@ -160,27 +160,38 @@ class Manager:
     log_path = im.model_dir(model) / "compile.log"
     started = time.monotonic()
     with log_path.open("w") as log:
-      self.child = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, env=env, cwd=str(MODELD_DIR),
-                                    preexec_fn=_set_parent_death_signal)
+      # The loop owns this reference; the signal handler only kills it (self.child), it never clears it.
+      proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, env=env, cwd=str(MODELD_DIR),
+                              preexec_fn=_set_parent_death_signal)
+      self.child = proc
       try:
-        while self.child.poll() is None:
+        while proc.poll() is None:
           if time.monotonic() - started > COMPILE_TIMEOUT_SECONDS:
             raise StepError("compile", "compiler timed out")
           self.check_continue()
           time.sleep(1.0)
-        code = self.child.returncode
+        code = proc.returncode
       finally:
         self.kill_child()
+        self.child = None
+    # Stopped or the ignition turned on while it ran: keep nothing half-finished.
+    try:
+      self.check_continue()
+    except (Stop, StepError):
+      tmp.unlink(missing_ok=True)
+      raise
     if code != 0:
       tmp.unlink(missing_ok=True)
       tail = log_path.read_text(errors="replace")[-600:].strip().splitlines()
       raise StepError("compile", f"compiler exited {code}: {tail[-1] if tail else ''}")
-    from openpilot.selfdrive.modeld.helpers import validate_model_file
+    # compile_modeld.py already loaded the result back (validate_model_file) inside the child. Loading it again
+    # here would allocate GPU buffers in this process, outside what stopping the child cancels.
     try:
-      validate_model_file(tmp)
-    except Exception as e:
+      if tmp.stat().st_size <= 8:
+        raise OSError("empty compiled model")
+    except OSError as e:
       tmp.unlink(missing_ok=True)
-      raise StepError("compile", f"compiled model invalid: {e}") from e
+      raise StepError("compile", f"compiled model missing: {e}") from e
     os.replace(tmp, out)
     im.write_json(im.compiled_path(model), {
       "sha256": model.sha256, "stamp": stamp, "cameras": [[w, h] for w, h in self.cameras],
@@ -188,7 +199,7 @@ class Manager:
     })
 
   def kill_child(self) -> None:
-    child, self.child = self.child, None
+    child = self.child
     if child is not None and child.poll() is None:
       child.kill()
       try:
@@ -230,6 +241,13 @@ class Manager:
       self.retry_at[token] = time.monotonic() + NETWORK_RETRY_SECONDS
       self.status(model, token, "error", error_code=e.code, detail=e.detail[:500])
 
+  def mark_paused(self) -> None:
+    """Stopped mid-work (the manager stops this process when the car turns on): say it resumes when parked."""
+    status = im.read_json(im.status_path())
+    model = im.find(status.get("model_id"))
+    if model is not None and status.get("phase") in ("downloading", "verifying", "validating", "compiling"):
+      self.status(model, int(status.get("token") or 0), "error", error_code="waiting_offroad", detail="stopped")
+
   def run(self) -> None:
     while not self.stopping:
       try:
@@ -237,6 +255,7 @@ class Manager:
       except Stop:
         break
       time.sleep(POLL_SECONDS)
+    self.mark_paused()
 
 
 def main() -> None:

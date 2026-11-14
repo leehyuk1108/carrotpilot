@@ -22,6 +22,7 @@ STOCK_ID = "CD210"
 # Starts that did not reach HEALTHY_PUBLISHES before modeld stopped. Two in a row block the model until the user
 # selects it again, so a model that crashes modeld cannot keep taking it down.
 MAX_UNHEALTHY_STARTS = 2
+BLOCK_REASONS = ("load_failed", "runtime_failed")  # kept as the reason while the model stays blocked
 HEALTHY_PUBLISHES = 100  # 5 s of published modelV2 at 20 Hz
 MODELS_DIR = Path(__file__).resolve().parent / "models"
 ONNX_NAME = "driving_supercombo.onnx"
@@ -263,7 +264,8 @@ def select_for_modeld(cam_w: int, cam_h: int, now: float | None = None) -> Selec
     if same and previous.get("pending"):
       unhealthy += 1  # the previous start with this model stopped before it was healthy
     if unhealthy >= MAX_UNHEALTHY_STARTS:
-      _write_runtime(stock, model.sha256, False, unhealthy, "crashed", now)
+      reason = previous.get("fallback_reason") if same and previous.get("fallback_reason") in BLOCK_REASONS else "crashed"
+      _write_runtime(stock, model.sha256, False, unhealthy, reason, now)
       return None
     _write_runtime(model, model.sha256, True, unhealthy, None, now)
     return Selected(model, pkl_path(model))
@@ -272,21 +274,33 @@ def select_for_modeld(cam_w: int, cam_h: int, now: float | None = None) -> Selec
 
 
 def record_load_failure(selected: Selected, now: float | None = None) -> None:
+  _block(selected, "load_failed", now)
+
+
+def record_runtime_failure(selected: Selected, now: float | None = None) -> None:
+  """modeld is about to stop on an inference error or non-finite output of the selected model; its restart uses stock."""
+  _block(selected, "runtime_failed", now)
+
+
+def _block(selected: Selected, reason: str, now: float | None) -> None:
   try:
-    _write_runtime(stock_model(), selected.model.sha256, False, MAX_UNHEALTHY_STARTS, "load_failed", now)
+    _write_runtime(stock_model(), selected.model.sha256, False, MAX_UNHEALTHY_STARTS, reason, now)
   except Exception:
     pass
 
 
 class HealthTracker:
-  """Marks the selected custom model healthy after HEALTHY_PUBLISHES published outputs in this modeld start."""
+  """Marks the selected custom model healthy after HEALTHY_PUBLISHES outputs it produced in this modeld start.
+
+  Outputs of an eGPU or Jetlink model that runs while the selected model waits as the internal fallback do not count.
+  """
 
   def __init__(self, selected: Selected | None):
     self.selected = selected
     self.published = 0
 
-  def publish(self) -> None:
-    if self.selected is None:
+  def publish(self, produced_by_internal: bool = True) -> None:
+    if self.selected is None or not produced_by_internal:
       return
     self.published += 1
     if self.published >= HEALTHY_PUBLISHES:

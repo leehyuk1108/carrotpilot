@@ -30,6 +30,7 @@ window.CarrotTranslations.register("zh", {
     internal_model_ready_detail: "{name} 已就绪，下次行驶起使用。",
     internal_model_fallback_crashed: "{name} 连续两次未能正常启动，已使用默认模型。再次应用可重试一次。",
     internal_model_fallback_load_failed: "无法加载 {name}，已使用默认模型。再次应用可重试。",
+    internal_model_fallback_runtime_failed: "{name} 在行驶中出错或输出无效，已改用默认模型。再次应用可重试。",
     internal_model_fallback_stale_build: "软件更新后需要重新编译 {name}，停车时会自动进行。",
     internal_model_fallback_not_compiled: "{name} 尚未编译完成，已使用默认模型。",
     internal_model_fallback_camera: "{name} 是为其他摄像头编译的，已使用默认模型。",

@@ -34,6 +34,7 @@ const FALLBACK_STRINGS = {
   ready_detail: "{name} is ready and is used from the next drive.",
   fallback_crashed: "{name} did not start properly twice in a row, so the stock model was used. Apply it again to retry once.",
   fallback_load_failed: "{name} could not be loaded, so the stock model was used. Apply it again to retry.",
+  fallback_runtime_failed: "{name} failed while driving (an error or invalid output), so the stock model is used. Apply it again to retry.",
   fallback_stale_build: "After a software update {name} must be compiled again. This runs automatically while parked.",
   fallback_not_compiled: "{name} is not compiled yet, so the stock model was used.",
   fallback_camera: "{name} was compiled for another camera, so the stock model was used.",
@@ -74,7 +75,7 @@ function optionLabel(model, translate = t) {
 function canRetry(status) {
   const requested = modelById(status, status?.requested);
   return !!requested && !requested.stock
-    && (status.phase === "error" || ["crashed", "load_failed"].includes(status.fallback_reason));
+    && (status.phase === "error" || ["crashed", "load_failed", "runtime_failed"].includes(status.fallback_reason));
 }
 
 // What the card shows: { state, detailKey } for a /api/internal_model payload.

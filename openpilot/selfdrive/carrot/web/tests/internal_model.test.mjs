@@ -24,6 +24,7 @@ test("a ready model is active only when modeld used it", () => {
   assert.deepEqual(describe({ ...base, phase: "ready", active: "RDF" }), { state: "active", detailKey: "active_detail" });
   assert.deepEqual(describe({ ...base, phase: "ready" }), { state: "ready", detailKey: "ready_detail" });
   assert.deepEqual(describe({ ...base, phase: "ready", fallback_reason: "crashed" }), { state: "ready", detailKey: "fallback_crashed" });
+  assert.deepEqual(describe({ ...base, phase: "ready", fallback_reason: "runtime_failed" }), { state: "ready", detailKey: "fallback_runtime_failed" });
   assert.deepEqual(describe({ ...base, phase: "ready", fallback_reason: "new-reason" }), { state: "ready", detailKey: "ready_detail" });
 });
 
@@ -38,6 +39,7 @@ test("the requested model can be applied again only to retry a failure or a cras
   assert.equal(canRetry({ ...base, phase: "ready" }), false);
   assert.equal(canRetry({ ...base, phase: "ready", fallback_reason: "crashed" }), true);
   assert.equal(canRetry({ ...base, phase: "ready", fallback_reason: "load_failed" }), true);
+  assert.equal(canRetry({ ...base, phase: "ready", fallback_reason: "runtime_failed" }), true);
   assert.equal(canRetry({ ...base, phase: "ready", fallback_reason: "stale_build" }), false);
   assert.equal(canRetry({ ...base, phase: "error", error_code: "compile" }), true);
   assert.equal(canRetry({ ...base, requested: "CD210", phase: "error" }), false);
