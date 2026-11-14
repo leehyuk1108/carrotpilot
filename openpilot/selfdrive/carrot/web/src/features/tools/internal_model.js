@@ -6,6 +6,7 @@ const POLL_INTERVAL_MS = 3000;
 let pollTimer = null;
 let lastStatus = null;
 let applying = false;
+let userChoice = null; // picked in the select but not applied yet; otherwise the select follows the server
 
 const FALLBACK_STRINGS = {
   title: "Driving model",
@@ -69,6 +70,13 @@ function optionLabel(model, translate = t) {
   return tags.length ? `${model.name} (${tags.join(", ")})` : model.name;
 }
 
+// Applying the already requested model again retries it after a failure or a crash block.
+function canRetry(status) {
+  const requested = modelById(status, status?.requested);
+  return !!requested && !requested.stock
+    && (status.phase === "error" || ["crashed", "load_failed"].includes(status.fallback_reason));
+}
+
 // What the card shows: { state, detailKey } for a /api/internal_model payload.
 function describe(status) {
   const requested = modelById(status, status?.requested);
@@ -114,15 +122,15 @@ function render(status = lastStatus) {
   document.getElementById("internalModelDetail").textContent = t(detailKey, { name: requested.name });
 
   const select = document.getElementById("internalModelSelect");
+  if (userChoice === status.requested || !modelById(status, userChoice)) userChoice = null;
   if (select && document.activeElement !== select) {
-    const current = select.value;
     select.replaceChildren(...status.models.map((model) => {
       const option = document.createElement("option");
       option.value = model.id;
       option.textContent = optionLabel(model);
       return option;
     }));
-    select.value = modelById(status, current) ? current : status.requested;
+    select.value = userChoice || status.requested;
   }
   if (select) select.disabled = !status.can_select || applying;
 
@@ -137,7 +145,7 @@ function render(status = lastStatus) {
   const button = document.getElementById("btnInternalModelApply");
   if (button) {
     button.textContent = applying ? t("checking") : t("apply");
-    button.disabled = applying || !status.can_select || !select || select.value === status.requested;
+    button.disabled = applying || !status.can_select || !select || (select.value === status.requested && !canRetry(status));
   }
 }
 
@@ -155,13 +163,15 @@ async function refresh() {
 async function applySelection() {
   const select = document.getElementById("internalModelSelect");
   const model = modelById(lastStatus, select?.value);
-  if (!model || model.id === lastStatus?.requested) return;
+  if (!model || (model.id === lastStatus?.requested && !canRetry(lastStatus))) return;
   const message = model.stock ? t("confirm_stock") : t("confirm", { name: model.name });
   if (typeof appConfirm === "function" && !await appConfirm(message, { title: t("title") })) return;
   applying = true;
   render();
   try {
-    render(await postJson("/api/internal_model/select", { id: model.id }));
+    const result = await postJson("/api/internal_model/select", { id: model.id });
+    userChoice = null;
+    render(result);
     if (typeof showAppToast === "function") showAppToast(t("applied"));
   } catch (error) {
     if (typeof showAppToast === "function") showAppToast(`${t("error")}: ${error?.message || error}`, { tone: "error", duration: 5000 });
@@ -180,7 +190,10 @@ function init() {
   const select = document.getElementById("internalModelSelect");
   if (select && select.dataset.bound !== "1") {
     select.dataset.bound = "1";
-    select.addEventListener("change", () => render());
+    select.addEventListener("change", () => {
+      userChoice = select.value;
+      render();
+    });
   }
   if (!pollTimer) refresh();
 }
@@ -188,4 +201,4 @@ function init() {
 const CarrotInternalModel = Object.freeze({ init, refresh, render });
 globalThis.CarrotInternalModel = CarrotInternalModel;
 
-export { CarrotInternalModel, FALLBACK_STRINGS, describe, optionLabel };
+export { CarrotInternalModel, FALLBACK_STRINGS, canRetry, describe, optionLabel };

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { describe, optionLabel } from "../src/features/tools/internal_model.js";
+import { canRetry, describe, optionLabel } from "../src/features/tools/internal_model.js";
 
 const models = [
   { id: "CD210", name: "CD210", stock: true, recommended: false, experimental: false },
@@ -32,4 +32,13 @@ test("progress and failures map to their own messages", () => {
   assert.deepEqual(describe({ ...base, phase: "error", error_code: "contract" }), { state: "error", detailKey: "failure_contract" });
   assert.deepEqual(describe({ ...base, phase: "error", error_code: "odd" }), { state: "error", detailKey: "failure_unknown" });
   assert.deepEqual(describe({ ...base, phase: undefined }), { state: "waiting", detailKey: "waiting_detail" });
+});
+
+test("the requested model can be applied again only to retry a failure or a crash block", () => {
+  assert.equal(canRetry({ ...base, phase: "ready" }), false);
+  assert.equal(canRetry({ ...base, phase: "ready", fallback_reason: "crashed" }), true);
+  assert.equal(canRetry({ ...base, phase: "ready", fallback_reason: "load_failed" }), true);
+  assert.equal(canRetry({ ...base, phase: "ready", fallback_reason: "stale_build" }), false);
+  assert.equal(canRetry({ ...base, phase: "error", error_code: "compile" }), true);
+  assert.equal(canRetry({ ...base, requested: "CD210", phase: "error" }), false);
 });
