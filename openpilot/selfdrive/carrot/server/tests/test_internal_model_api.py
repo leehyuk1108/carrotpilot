@@ -88,3 +88,13 @@ def test_selecting_again_clears_a_crash_block(feature):
   im.write_json(im.runtime_path(), {"active_id": im.STOCK_ID, "sha256": rdf.sha256, "pending": False, "unhealthy_starts": 2})
   call(feature.api_select, {"id": "RDF"})
   assert im.read_json(im.runtime_path())["unhealthy_starts"] == 0
+
+
+def test_selected_model_is_in_use_only_after_it_produced_outputs(feature):
+  rdf = im.find("RDF")
+  im.write_request(rdf)
+  im.write_json(im.status_path(), {"sha256": rdf.sha256, "phase": "ready"})
+  im.write_json(im.runtime_path(), {"active_id": "RDF", "sha256": rdf.sha256, "used": False})
+  assert call(feature.api_status)[1]["in_use"] is False   # loaded as the fallback behind an eGPU/Jetlink model
+  im.write_json(im.runtime_path(), {"active_id": "RDF", "sha256": rdf.sha256, "used": True})
+  assert call(feature.api_status)[1]["in_use"] is True

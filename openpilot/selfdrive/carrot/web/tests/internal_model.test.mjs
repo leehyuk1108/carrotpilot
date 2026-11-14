@@ -22,6 +22,7 @@ test("stock selection says when the stock model takes over", () => {
 
 test("a ready model is active only when modeld used it", () => {
   assert.deepEqual(describe({ ...base, phase: "ready", active: "RDF" }), { state: "active", detailKey: "active_detail" });
+  assert.deepEqual(describe({ ...base, phase: "ready", active: "RDF", in_use: false }), { state: "ready", detailKey: "ready_detail" });
   assert.deepEqual(describe({ ...base, phase: "ready" }), { state: "ready", detailKey: "ready_detail" });
   assert.deepEqual(describe({ ...base, phase: "ready", fallback_reason: "crashed" }), { state: "ready", detailKey: "fallback_crashed" });
   assert.deepEqual(describe({ ...base, phase: "ready", fallback_reason: "runtime_failed" }), { state: "ready", detailKey: "fallback_runtime_failed" });

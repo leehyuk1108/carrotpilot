@@ -90,7 +90,7 @@ function describe(status) {
     return { state: "error", detailKey: Object.hasOwn(FALLBACK_STRINGS, key) ? key : "failure_unknown" };
   }
   if (phase === "ready") {
-    if (status.active === requested.id) return { state: "active", detailKey: "active_detail" };
+    if (status.active === requested.id && status.in_use !== false) return { state: "active", detailKey: "active_detail" };
     const key = `fallback_${status.fallback_reason}`;
     if (status.fallback_reason && Object.hasOwn(FALLBACK_STRINGS, key)) return { state: "ready", detailKey: key };
     return { state: "ready", detailKey: "ready_detail" };

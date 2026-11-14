@@ -242,6 +242,7 @@ def create_internal_model(cam_w: int, cam_h: int, usbgpu_model_loaded: bool, mod
   if selected is not None:
     try:
       model = model_state(cam_w, cam_h, False, pkl_path=selected.pkl_path, enable_shadow=False, check_finite=True)
+      internal_model.mark_loaded(selected)
       cloudlog.warning("internal model selected: %s %s", selected.model.id, selected.model.sha256)
       return model, selected
     except Exception:
@@ -531,6 +532,10 @@ def main(demo=False):
     mt1 = time.perf_counter()
     camera_age_at_run_ms = (time.monotonic() - meta_main.timestamp_eof * 1e-9) * 1000
     inference_cpu_start = time.thread_time()
+    internal_running = model is small_model or (getattr(model, 'small', None) is small_model
+                                                and not getattr(model, 'active', False))
+    if not prepare_only:
+      internal_health.attempt(internal_running)
     try:
       model_output = model.run(bufs, transforms, inputs, prepare_only)
     except Exception as exc:

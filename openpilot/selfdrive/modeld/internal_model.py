@@ -239,10 +239,13 @@ class Selected:
 
 
 def _write_runtime(active: InternalModel, sha256: str | None, pending: bool, unhealthy: int, reason: str | None,
-                   now: float | None = None) -> None:
+                   now: float | None = None, loading: bool = False, used: bool = False) -> None:
+  # loading: modeld is loading the selected artifact (a native crash there counts as an unhealthy start)
+  # pending: the selected model has started producing outputs but is not healthy yet
+  # used: the selected model produced outputs in this modeld start (an eGPU/Jetlink model may run instead)
   write_json(runtime_path(), {
-    "active_id": active.id, "sha256": sha256, "pending": pending, "unhealthy_starts": unhealthy,
-    "fallback_reason": reason, "updated_at": now if now is not None else time.time(),
+    "active_id": active.id, "sha256": sha256, "pending": pending, "loading": loading, "used": used,
+    "unhealthy_starts": unhealthy, "fallback_reason": reason, "updated_at": now if now is not None else time.time(),
   })
 
 
@@ -261,16 +264,26 @@ def select_for_modeld(cam_w: int, cam_h: int, now: float | None = None) -> Selec
     previous = read_json(runtime_path())
     same = previous.get("sha256") == model.sha256
     unhealthy = int(previous.get("unhealthy_starts") or 0) if same else 0
-    if same and previous.get("pending"):
-      unhealthy += 1  # the previous start with this model stopped before it was healthy
+    if same and (previous.get("pending") or previous.get("loading")):
+      # the previous start stopped while loading this model or before its outputs were healthy; a start in which
+      # only an eGPU/Jetlink model ran is not counted
+      unhealthy += 1
     if unhealthy >= MAX_UNHEALTHY_STARTS:
       reason = previous.get("fallback_reason") if same and previous.get("fallback_reason") in BLOCK_REASONS else "crashed"
       _write_runtime(stock, model.sha256, False, unhealthy, reason, now)
       return None
-    _write_runtime(model, model.sha256, True, unhealthy, None, now)
+    _write_runtime(model, model.sha256, False, unhealthy, None, now, loading=True)
     return Selected(model, pkl_path(model))
   except Exception:
     return None
+
+
+def mark_loaded(selected: Selected, now: float | None = None) -> None:
+  try:
+    runtime = read_json(runtime_path())
+    _write_runtime(selected.model, selected.model.sha256, False, int(runtime.get("unhealthy_starts") or 0), None, now)
+  except Exception:
+    pass
 
 
 def record_load_failure(selected: Selected, now: float | None = None) -> None:
@@ -298,6 +311,19 @@ class HealthTracker:
   def __init__(self, selected: Selected | None):
     self.selected = selected
     self.published = 0
+    self.attempted = False
+
+  def attempt(self, internal: bool = True) -> None:
+    """Called before an inference; the first one by the selected internal model starts tracking it."""
+    if self.selected is None or self.attempted or not internal:
+      return
+    self.attempted = True
+    try:
+      runtime = read_json(runtime_path())
+      _write_runtime(self.selected.model, self.selected.model.sha256, True, int(runtime.get("unhealthy_starts") or 0),
+                     None, used=True)
+    except Exception:
+      pass
 
   def publish(self, produced_by_internal: bool = True) -> None:
     if self.selected is None or not produced_by_internal:
@@ -305,7 +331,7 @@ class HealthTracker:
     self.published += 1
     if self.published >= HEALTHY_PUBLISHES:
       try:
-        _write_runtime(self.selected.model, self.selected.model.sha256, False, 0, None)
+        _write_runtime(self.selected.model, self.selected.model.sha256, False, 0, None, used=True)
       except Exception:
         pass
       self.selected = None

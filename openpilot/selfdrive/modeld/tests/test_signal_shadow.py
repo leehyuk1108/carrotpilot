@@ -100,12 +100,12 @@ def test_modeld_keeps_original_artifact_and_output():
   assert source.index('self.signal_shadow.capture(model_output, self.npy)') < source.index("self.npy['prev_feat'][:] = model_output")
 
 
-def _internal_model_creation(model_state, select, record_load_failure=lambda selected: None):
+def _internal_model_creation(model_state, select, record_load_failure=lambda selected: None, mark_loaded=lambda selected: None):
   tree = ast.parse((Path(__file__).parents[1] / 'modeld.py').read_text())
   function = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == 'create_internal_model')
   statement = next(n for n in ast.walk(tree) if isinstance(n, ast.Assign) and isinstance(n.value, ast.IfExp)
                    and isinstance(n.value.body, ast.Call) and getattr(n.value.body.func, 'id', None) == 'create_internal_model')
-  internal = SimpleNamespace(select_for_modeld=select, record_load_failure=record_load_failure)
+  internal = SimpleNamespace(select_for_modeld=select, record_load_failure=record_load_failure, mark_loaded=mark_loaded)
   cloudlog = SimpleNamespace(warning=lambda *a: None, exception=lambda *a: None)
   return ast.fix_missing_locations(ast.Module(body=[function, statement], type_ignores=[])), {
     'ModelState': model_state, 'internal_model': internal, 'cloudlog': cloudlog}
@@ -132,11 +132,12 @@ def test_selected_internal_model_never_starts_the_stock_comparison_and_checks_ou
   def model_state(*args, **kwargs):
     calls.append((args, kwargs))
     return 'selected'
-  module, scope = _internal_model_creation(model_state, lambda w, h: selected)
+  loaded = []
+  module, scope = _internal_model_creation(model_state, lambda w, h: selected, mark_loaded=loaded.append)
   scope.update({'vipc_client_main': SimpleNamespace(width=1344, height=760), 'model': None, 'USBGPU': False,
                 'usbgpu_model_loaded': False})
   exec(compile(module, '<selected>', 'exec'), scope)
-  assert scope['small_model'] == 'selected' and scope['internal_selected'] is selected
+  assert scope['small_model'] == 'selected' and scope['internal_selected'] is selected and loaded == [selected]
   assert calls == [((1344, 760, False), {'pkl_path': Path('/selected.pkl'), 'enable_shadow': False, 'check_finite': True})]
 
 

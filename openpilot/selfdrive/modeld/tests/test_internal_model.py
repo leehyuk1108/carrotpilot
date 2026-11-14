@@ -105,13 +105,27 @@ def test_missing_build_stamp_never_uses_a_custom_model():
   assert im.select_for_modeld(*CAM) is None
 
 
-def test_ready_model_is_selected_and_marked_pending_until_healthy():
+def start(internal_runs=True, loaded=True):
+  """One modeld start that stops (or crashes) without reaching healthy."""
+  selected = im.select_for_modeld(*CAM)
+  if selected is not None and loaded:
+    im.mark_loaded(selected)
+    im.HealthTracker(selected).attempt(internal_runs)
+  return selected
+
+
+def test_ready_model_is_selected_and_tracked_from_its_first_inference_until_healthy():
   im.write_request(RDF)
   compile_ok(RDF)
   selected = im.select_for_modeld(*CAM)
   assert selected is not None and selected.pkl_path == im.pkl_path(RDF)
-  assert im.read_json(im.runtime_path())["pending"] is True
+  assert im.read_json(im.runtime_path())["loading"] is True
+  im.mark_loaded(selected)
+  runtime = im.read_json(im.runtime_path())
+  assert runtime["loading"] is False and runtime["pending"] is False and runtime["used"] is False
   health = im.HealthTracker(selected)
+  health.attempt()
+  assert im.read_json(im.runtime_path())["pending"] is True and im.read_json(im.runtime_path())["used"] is True
   for _ in range(im.HEALTHY_PUBLISHES):
     health.publish()
   runtime = im.read_json(im.runtime_path())
@@ -121,13 +135,31 @@ def test_ready_model_is_selected_and_marked_pending_until_healthy():
 def test_two_unhealthy_starts_block_the_model_until_selected_again():
   im.write_request(RDF)
   compile_ok(RDF)
-  assert im.select_for_modeld(*CAM) is not None   # start 1, crashes before healthy
-  assert im.select_for_modeld(*CAM) is not None   # start 2 (1 unhealthy so far), crashes again
+  assert start() is not None        # start 1, crashes before healthy
+  assert start() is not None        # start 2 (1 unhealthy so far), crashes again
   assert im.select_for_modeld(*CAM) is None       # 2 unhealthy starts: stock
   assert im.read_json(im.runtime_path())["fallback_reason"] == "crashed"
   assert im.select_for_modeld(*CAM) is None       # stays blocked
   im.reset_runtime_block(RDF)
   assert im.select_for_modeld(*CAM) is not None
+
+
+def test_native_crash_while_loading_counts_as_unhealthy():
+  im.write_request(RDF)
+  compile_ok(RDF)
+  assert start(loaded=False) is not None
+  assert start(loaded=False) is not None
+  assert im.select_for_modeld(*CAM) is None
+  assert im.read_json(im.runtime_path())["fallback_reason"] == "crashed"
+
+
+def test_starts_where_only_an_external_model_ran_never_block_the_selected_model():
+  im.write_request(RDF)
+  compile_ok(RDF)
+  for _ in range(4):
+    assert start(internal_runs=False) is not None
+  runtime = im.read_json(im.runtime_path())
+  assert runtime["unhealthy_starts"] == 0 and runtime["used"] is False
 
 
 def test_load_failure_blocks_immediately():
@@ -281,7 +313,10 @@ def test_runtime_failure_after_healthy_blocks_the_model_with_its_reason():
 def test_outputs_of_an_external_model_do_not_make_the_selected_model_healthy():
   im.write_request(RDF)
   compile_ok(RDF)
-  health = im.HealthTracker(im.select_for_modeld(*CAM))
+  selected = im.select_for_modeld(*CAM)
+  im.mark_loaded(selected)
+  health = im.HealthTracker(selected)
+  health.attempt()                      # it ran once, then an external model took over
   for _ in range(im.HEALTHY_PUBLISHES * 2):
     health.publish(produced_by_internal=False)
   assert im.read_json(im.runtime_path())["pending"] is True

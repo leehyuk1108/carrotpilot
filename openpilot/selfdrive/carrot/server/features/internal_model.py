@@ -55,6 +55,8 @@ def build_payload(params: Any | None = None) -> dict[str, Any]:
     "updated_at": status.get("updated_at"),
     # what modeld used at its last start, and why it fell back to the stock model if it did
     "active": active.id,
+    # the selected model actually produced outputs in the last modeld start (not only waited behind an eGPU/Jetlink)
+    "in_use": active.stock or bool(runtime.get("used")),
     "fallback_reason": runtime.get("fallback_reason") if runtime.get("sha256") == requested.sha256 else None,
     "onroad": onroad,
     "engaged": engaged,
